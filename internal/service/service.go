@@ -440,12 +440,12 @@ func countStorageKind(items []model.StorageInfo, kind string) int {
 // clientOptions 把 ScanOptions 转换为 kubernetes 客户端参数。
 func clientOptions(opts model.ScanOptions) kubernetes.Options {
 	return kubernetes.Options{
-		Kubeconfig: opts.Kubeconfig,
-		Context:    opts.Context,
-		InCluster:  opts.InCluster,
-		Timeout:    opts.RequestTimeout,
-		QPS:        opts.QPS,
-		Burst:      opts.Burst,
+		RequestCheck: opts.RequestCheck, Kubeconfig: opts.Kubeconfig,
+		Context:   opts.Context,
+		InCluster: opts.InCluster,
+		Timeout:   opts.RequestTimeout,
+		QPS:       opts.QPS,
+		Burst:     opts.Burst,
 	}
 }
 

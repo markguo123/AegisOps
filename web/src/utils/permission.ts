@@ -35,8 +35,7 @@ export const PERM = {
  */
 export const ROLE_PERMISSIONS: Record<Role, string[]> = {
   admin: ['*'],
-  operator: ['scan.execute'],
-  user: [],
+  user: ['scan.execute','skill.read'],
 }
 
 /**
@@ -77,7 +76,7 @@ export function permissionsOf(role: Role | null | undefined): string[] {
  * 后端仍会独立校验审批策略与权限，前端隐藏不是安全机制。
  */
 export function canDecideApproval(role: Role | null | undefined): boolean {
-  return role === 'admin' || role === 'operator' || role === 'user'
+  return role === 'admin' || role === 'user'
 }
 
 /** 是否可查看审批与审计（用于治理菜单的入口显隐）。 */

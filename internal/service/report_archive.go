@@ -135,11 +135,16 @@ func (w *ReportArchiveWriter) Archive(ctx context.Context, result *model.ScanRes
 			// 非法值一律降级成空串而不是拒掉整次归档——范围是展示信息，为一个展示字段丢一份
 			// 已经写进桶的报告本末倒置；降级会留 WARN，不会变成一个没人知道的分支。
 			ScopeKind:  scopeKind,
-			ScopeValue: scopeValue,
+			ScopeValue: scopeValue, CoverageLevel: attr.CoverageLevel,
 		}
 		// 业务行与引用必须同事务：行提交了而引用没加，对象会被 GC 当成孤儿删掉；
 		// 引用加了而行回滚，ref_count 永远减不掉。回调内只用 Tx（SQLite 单连接下
 		// 事务里再要连接会挂死），所以这里没有任何前置读。
+		if attr.Recheck != nil {
+			if err := attr.Recheck(ctx); err != nil {
+				return done, err
+			}
+		}
 		if err := w.st.WithTx(ctx, func(tx *store.Tx) error {
 			if err := tx.InsertReport(ctx, row); err != nil {
 				return err
@@ -225,6 +230,12 @@ func (s *scanService) archiveReportsIfNeeded(
 		return
 	}
 	started := phaseStart(archiveScanPhase, "归档报告到对象存储")
+	if opts.Attribution.Recheck != nil {
+		if e := opts.Attribution.Recheck(ctx); e != nil {
+			phaseDone(archiveScanPhase, e.Error(), false, started)
+			return
+		}
+	}
 	count, err := s.archive.Archive(ctx, result, opts.Attribution)
 	if err != nil {
 		slog.Warn("scan: 报告归档到对象存储失败",

@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,13 +30,14 @@ type Config struct {
 
 // KubernetesConfig controls cluster access (FR-003).
 type KubernetesConfig struct {
-	Kubeconfig  string        `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
-	Context     string        `mapstructure:"context"`
-	Namespace   string        `mapstructure:"namespace"`
-	KubectlPath string        `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
-	Timeout     time.Duration `mapstructure:"timeout"`
-	QPS         float32       `mapstructure:"qps"`
-	Burst       int           `mapstructure:"burst"`
+	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
+	Kubeconfig   string                    `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
+	Context      string                    `mapstructure:"context"`
+	Namespace    string                    `mapstructure:"namespace"`
+	KubectlPath  string                    `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
+	Timeout      time.Duration             `mapstructure:"timeout"`
+	QPS          float32                   `mapstructure:"qps"`
+	Burst        int                       `mapstructure:"burst"`
 }
 
 // LLMConfig controls the OpenAI-compatible endpoint (FR-015).
@@ -194,8 +196,10 @@ type PlatformExecConfig struct {
 
 // PlatformServerConfig 控制平台 HTTP 服务监听参数。
 type PlatformServerConfig struct {
-	Addr string            `mapstructure:"addr"`
-	TLS  PlatformTLSConfig `mapstructure:"tls"`
+	PublicURL         string            `mapstructure:"public_url"`
+	AllowLoopbackHTTP bool              `mapstructure:"allow_loopback_http"`
+	Addr              string            `mapstructure:"addr"`
+	TLS               PlatformTLSConfig `mapstructure:"tls"`
 	// StaticEnabled 控制是否由本进程托管内嵌前端产物（P6.1/P6.11，D-26）：
 	// true = 形态 A 一体化（单端口同时提供 SPA 与 API）；false = 形态 B 纯 API
 	// （静态资源交给独立前端镜像/Nginx）。
@@ -415,6 +419,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.blobs.max_object_size", "32MiB")
 	v.SetDefault("platform.blobs.session_data", false)
 	v.SetDefault("platform.blobs.gc_grace_period", 168*time.Hour)
+	v.SetDefault("platform.server.public_url", "")
+	v.SetDefault("platform.server.allow_loopback_http", false)
 	v.SetDefault("platform.auth.admin_username", "admin")
 	v.SetDefault("platform.auth.token_ttl", 24*time.Hour)
 	v.SetDefault("platform.auth.session_store", "memory")

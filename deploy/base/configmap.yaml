@@ -23,6 +23,8 @@ data:
     platform:
       server:
         addr: ":8080"            # 监听地址（编排层 --addr 可覆盖）
+        public_url: ""            # 浏览器访问的 HTTPS 根地址；OIDC 回调与 CSRF Origin 使用，安装时由 PUBLIC_URL 渲染
+        allow_loopback_http: false # 仅本机 localhost HTTP 调试可打开；集群部署保持 false
         static_enabled: true     # 形态 A 内嵌 SPA；形态 B 用 deploy/separated/deployment.yaml（env 置 false）
         tls:
           enabled: false         # 需要 TLS 时挂证书卷并把 cert_file/key_file 配成一对

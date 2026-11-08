@@ -10,6 +10,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
+	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
@@ -664,7 +665,13 @@ func (a *Agent) batchApprove(ctx context.Context, calls []llm.ToolCall) (approve
 				continue
 			}
 		}
-		if err := a.scopeCheck(call); err != nil {
+		if err := a.scopeCheck(ctx, call); err != nil {
+			continue
+		}
+		if mandatory, ok := t.(interface{ RequiresHumanApproval(json.RawMessage) bool }); ok && mandatory.RequiresHumanApproval(call.Arguments) {
+			continue
+		}
+		if a.AccessScope != nil && a.AccessScope.Policy != nil && (t.Risk(call.Arguments) == model.RiskHigh || t.Risk(call.Arguments) == model.RiskCritical) {
 			continue
 		}
 		safeArgs := a.safeArguments(call.Arguments)
@@ -761,11 +768,23 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		Name: call.Name, Arguments: safeArgsView, Risk: string(t.Risk(call.Arguments)),
 	}})
 	a.audit(ctx, audit.ActionToolCallRequest, map[string]any{"name": call.Name, "arguments": safeArgsView})
-	if err := a.scopeCheck(call); err != nil {
+	if err := a.scopeCheck(ctx, call); err != nil {
 		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{
 			"name": call.Name, "reason": "scope_denied", "detail": err.Error(),
 		})
 		return tools.ResultErrorWithCode(tools.ErrorScopeDenied, err.Error())
+	}
+	var validateVersion func(context.Context) error
+	if a.AccessScope != nil && a.AccessScope.Policy != nil {
+		if guard, ok := t.(interface {
+			PrepareExecution(context.Context, json.RawMessage, *tools.AccessScope) (func(context.Context) error, error)
+		}); ok {
+			var guardErr error
+			validateVersion, guardErr = guard.PrepareExecution(ctx, call.Arguments, a.AccessScope)
+			if guardErr != nil {
+				return tools.ResultError(guardErr.Error())
+			}
+		}
 	}
 	clusterAccessChecked := false
 	if checker, ok := t.(tools.ClusterAccessChecker); ok && !t.IsReadOnly(call.Arguments) {
@@ -901,6 +920,15 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	if secretErr != "" {
 		return tools.ResultError(secretErr)
 	}
+	if err := a.scopeCheck(execCtx, call); err != nil {
+		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{"name": call.Name, "reason": "scope_revoked"})
+		return tools.ResultErrorWithCode(tools.ErrorScopeDenied, err.Error())
+	}
+	if validateVersion != nil {
+		if err := validateVersion(execCtx); err != nil {
+			return tools.ResultError(err.Error())
+		}
+	}
 	tr, err := t.Execute(execCtx, call.Arguments)
 	if err != nil {
 		tr = tools.ResultError(err.Error())
@@ -975,11 +1003,28 @@ func (a *Agent) approvalPlan(t tools.Tool, call llm.ToolCall, detail approvalDet
 	return a.safeApprovalPlan(plan)
 }
 
-func (a *Agent) scopeCheck(call llm.ToolCall) error {
+func (a *Agent) scopeCheck(ctx context.Context, call llm.ToolCall) error {
 	if a.AccessScope == nil {
 		return nil
 	}
-	return a.AccessScope.Check(call.Name, call.Arguments)
+	scope := a.AccessScope
+	if scope.Refresh != nil {
+		fresh, err := scope.Refresh(ctx)
+		if err != nil || fresh == nil {
+			return fmt.Errorf("SCOPE_DENIED: 当前授权已失效")
+		}
+		scope = fresh
+	}
+	if scope.Policy != nil && call.Name == "create_resource" {
+		if t, ok := a.Tools.Lookup(call.Name); ok {
+			if planner, ok := t.(interface {
+				CheckAccess(*tools.AccessScope, json.RawMessage) error
+			}); ok {
+				return planner.CheckAccess(scope, call.Arguments)
+			}
+		}
+	}
+	return scope.Check(call.Name, call.Arguments)
 }
 
 // collectSecretValues 在审批通过后、工具执行前逐个索取 $ASK 的 Secret 明文值（三期 R4.5）。

@@ -12,7 +12,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 8
+const schemaVersion = 11
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -63,6 +63,47 @@ var migrations = []migration{
 		name:    "report scan scope columns",
 		up:      migrateV8,
 	},
+	{version: 9, name: "user security versions and scoped resource grants", up: migrateV9},
+	{version: 10, name: "external user identities", up: migrateV10},
+	{version: 11, name: "two platform roles and report coverage", up: migrateV11},
+}
+
+func migrateV11(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, q := range []string{"SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE r.name='operator'", "SELECT COUNT(*) FROM authz_grants WHERE scope_type='' OR principal_type<>'user'"} {
+		var n int
+		if err := tx.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return fmt.Errorf("identity upgrade blocked: %d legacy assignments or grants; export policy, explicitly reassign operators and revoke obsolete grants before upgrade", n)
+		}
+	}
+	for _, q := range []string{"DELETE FROM roles WHERE name='operator'", "UPDATE api_tokens SET status='revoked'"} {
+		if _, e := tx.ExecContext(ctx, q); e != nil {
+			return e
+		}
+	}
+	_, e := tx.ExecContext(ctx, d.addColumn("reports", column{name: "coverage_level", kind: colInt, def: "0"}))
+	if e != nil && d.isDuplicateColumnErr(e) {
+		return nil
+	}
+	return e
+}
+func migrateV9(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, item := range []struct {
+		table string
+		col   column
+	}{
+		{"users", column{name: "email", kind: colTextMedium, def: "''"}},
+		{"users", column{name: "session_version", kind: colInt, def: "0"}},
+		{"authz_grants", column{name: "scope_type", kind: colText, def: "''"}},
+		{"authz_grants", column{name: "resource_profile", kind: colText, def: "''"}},
+	} {
+		if _, err := tx.ExecContext(ctx, d.addColumn(item.table, item.col)); err != nil && !d.isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // schemaV1 描述建表：users / roles / sessions / audit_events / settings /
@@ -490,7 +531,6 @@ func migrateV8(ctx context.Context, tx *sql.Tx, d dialect) error {
 	return nil
 }
 
-
 func migrateV1(ctx context.Context, tx *sql.Tx, d dialect) error {
 	for _, t := range schemaV1 {
 		if _, err := tx.ExecContext(ctx, d.createTable(t)); err != nil {
@@ -682,11 +722,11 @@ func backfillSessionIndexColumns(ctx context.Context, tx *sql.Tx) error {
 		return fmt.Errorf("backfill session index columns: %w", err)
 	}
 	type patch struct {
-		id      string
-		pinned  int
-		count   int
-		title   string
-		size    int
+		id     string
+		pinned int
+		count  int
+		title  string
+		size   int
 	}
 	var patches []patch
 	var skipped int
@@ -744,7 +784,6 @@ func bytesColumns() []columnRef {
 	}
 	return out
 }
-
 
 func backfillAuditEventType(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx,

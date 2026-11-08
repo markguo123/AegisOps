@@ -16,7 +16,16 @@ export default defineConfig({
     port: 5173,
     // 四期后端走 /api/v1（P2 接入时联调）。
     proxy: {
-      '/api/v1': { target: apiTarget, changeOrigin: true },
+      '/api/v1': {
+        target: apiTarget,
+        changeOrigin: true,
+        configure(proxy) {
+          proxy.on('proxyReq', (proxyReq) => {
+            // Local Vite is the browser origin; the API gateway sees the proxied host.
+            proxyReq.setHeader('Origin', apiTarget)
+          })
+        },
+      },
     },
   },
 })

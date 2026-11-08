@@ -86,7 +86,7 @@ describe('skills API（P3.5–P3.7 前端契约）', () => {
     expect(init.body).toBe(yaml)
     const headers = init.headers as Headers
     expect(headers.get('Content-Type')).toBe('text/yaml')
-    expect(headers.get('Authorization')).toBe('Bearer tok-demo')
+    expect(headers.get('Authorization')).toBeNull()
     expect(imported).toHaveLength(1)
   })
 

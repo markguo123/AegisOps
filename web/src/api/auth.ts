@@ -36,7 +36,7 @@ export async function logout(): Promise<void> {
 }
 
 export async function me(): Promise<MeResponse> {
-  const res = await request<MeResponse>('/auth/me')
+  const res = await request<MeResponse>('/auth/me', { redirectOnUnauthorized: false })
   if (!res.data) {
     throw new ApiRequestError(200, ErrorCode.internal, 'auth: empty me response')
   }

@@ -28,8 +28,8 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  (e: 'approve', value: string): void
-  (e: 'reject'): void
+  (e: 'approve', value: string,id?:string): void
+  (e: 'reject',id?:string): void
 }>()
 
 const open = ref(true)
@@ -266,8 +266,8 @@ function locateStep(step: AgentStep): void {
             class="turn-item"
             :approval="item.data"
             :can-decide="canDecide"
-            @approve="emit('approve', $event)"
-            @reject="emit('reject')"
+            @approve="(v,id)=>emit('approve',v,id)"
+            @reject="emit('reject',$event)"
           />
           <article
             v-else-if="item.type === 'report'"

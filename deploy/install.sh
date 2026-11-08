@@ -60,6 +60,7 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 : "${EXPOSE:=nodeport}"
 : "${NODE_PORT:=}"
 : "${INGRESS_HOST:=}"
+: "${PUBLIC_URL:=}"
 : "${INGRESS_CLASS:=}"
 : "${INGRESS_CLASS_DEFAULT:=nginx}"
 : "${ENABLE_WRITE:=false}"
@@ -93,7 +94,7 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 # 参数名清单：env 文件与通用 --KEY=VALUE 都按这张表识别，避免拼错键被静默忽略。
 PARAM_KEYS="IMAGE TAG IMAGE_WEB BUILD PUSH LOAD_TAR NAMESPACE FORM STORE_DRIVER MYSQL_DSN
 SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST
-INGRESS_CLASS ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY IMAGE_PULL_SECRET
+INGRESS_CLASS PUBLIC_URL ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY IMAGE_PULL_SECRET
 IMAGE_PULL_POLICY BLOBS_BACKEND BLOBS_ENDPOINT BLOBS_BUCKET BLOBS_ACCESS_KEY BLOBS_SECRET_KEY
 BLOBS_REGION BLOBS_PATH_STYLE ENABLE_MINIO MINIO_STORAGE_SIZE ENC_KEY ENC_KEY_BACKUP_DIR
 BLOBS_USE_TLS BLOBS_CREATE_BUCKET BLOBS_PREFIX BLOBS_TMP_DIR ALLOW_DRIVER_MISMATCH
@@ -268,6 +269,7 @@ AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一�
   NODE_PORT             空 = 集群在 NodePort 区间随机分配，末行回显实际端口与节点 URL
   INGRESS_HOST          给了才建 Ingress（自定义域名需要客户端能解析）
   INGRESS_CLASS         IngressClass 名，留空用 nginx；先 kubectl get ingressclass 确认现场类名
+  PUBLIC_URL            浏览器访问的 HTTPS 根地址，OIDC 回调与 Cookie/CSRF 使用
   ENABLE_WRITE          true 时显式 apply 写权限 RBAC，并二次确认；默认 false 只读
   ADMIN_USERNAME        首启管理员用户名，留空用配置中心 platform.auth.admin_username
   ADMIN_PASSWORD        缺省随机生成，只打印一次，不落文件；重跑不覆盖已存在口令
@@ -447,6 +449,9 @@ validate_config() {
     nodeport|ingress) ;;
     *) die "EXPOSE 只能是 nodeport 或 ingress，当前值：${EXPOSE}" "没有真实域名就用默认 nodeport" ;;
   esac
+  if [[ -n "$PUBLIC_URL" && ! "$PUBLIC_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ ]]; then
+    die "PUBLIC_URL 必须是无路径的 HTTPS 根地址：${PUBLIC_URL}" "例如 https://aegisops.internal.example"
+  fi
   if [[ -n "$NODE_PORT" ]] && [[ ! "$NODE_PORT" =~ ^[0-9]+$ ]]; then
     die "NODE_PORT 必须是数字，当前值：${NODE_PORT}" "留空表示让集群随机分配"
   fi
@@ -621,6 +626,9 @@ END {
 
     # 锚点 11：ConfigMap 里的存储驱动与 sqlite 路径（只在需要时改，mysql 口径原样不动）
     if (base == "configmap.yaml") {
+      if (l ~ /^[ \t]*public_url:[ \t]*""/) {
+        p = l; sub(/""/, "\"" PUBLICURL "\"", p); l = p
+      }
       # 行尾还留着注释，所以只替换值本身，不动注释。
       if (DRIVER != "mysql" && l ~ /^[ \t]*driver:[ \t]*mysql([^A-Za-z0-9]|$)/) {
         p = l; sub(/mysql/, DRIVER, p); l = p
@@ -733,7 +741,7 @@ render_one() {
       -v HOST="$INGRESS_HOST" -v CLASS="$INGRESS_CLASS" -v SC="$STORAGE_CLASS" -v SIZE="$REPORT_STORAGE_SIZE" \
       -v PULLSEC="$PULLED_SECRET_NAME" -v EXPOSED="$EXPOSED_SVC" -v NODEPORT="$NODE_PORT" \
       -v REPORTS_PVC="$PERSIST_REPORTS" -v DATA_PVC="$DATA_ON_PVC" -v PVC="$PVC_NAME" \
-      -v DRIVER="$STORE_DRIVER" -v SQLITE="$SQLITE_PATH" \
+      -v DRIVER="$STORE_DRIVER" -v SQLITE="$SQLITE_PATH" -v PUBLICURL="$PUBLIC_URL" \
       -v EXTRAENV="$(extra_env_block)" \
       "$RENDER_AWK" "$src" >"$dst"
   detail "渲染 deploy/${rel} -> ${dst}"

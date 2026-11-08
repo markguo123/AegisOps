@@ -49,16 +49,20 @@ var tokenStatuses = map[string]bool{
 
 // Grant 是授权委派的 API 视图：namespaces / permissions 以 []string 表达。
 type Grant struct {
-	ID            string     `json:"id"`
-	PrincipalType string     `json:"principalType"`
-	PrincipalID   string     `json:"principalId"`
-	ClusterID     string     `json:"clusterId,omitempty"`
-	Namespaces    []string   `json:"namespaces"`
-	Permissions   []string   `json:"permissions"`
-	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	CreatedBy     string     `json:"createdBy,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	ScopeType       string     `json:"scopeType"`
+	ResourceProfile string     `json:"resourceProfile"`
+	Actions         []string   `json:"actions"`
+	UserID          string     `json:"userId"`
+	ID              string     `json:"id"`
+	PrincipalType   string     `json:"principalType"`
+	PrincipalID     string     `json:"principalId"`
+	ClusterID       string     `json:"clusterId,omitempty"`
+	Namespaces      []string   `json:"namespaces"`
+	Permissions     []string   `json:"permissions"`
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	CreatedBy       string     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 // Token 是 API Token 的 API 视图（TokenHash 永不回显，仅 createdAt 等元数据）。
@@ -513,7 +517,7 @@ func toGrantView(g *store.AuthzGrant) (*Grant, error) {
 		return nil, fmt.Errorf("authz: decode permissions: %w", err)
 	}
 	return &Grant{
-		ID:            g.ID,
+		ID: g.ID, ScopeType: g.ScopeType, ResourceProfile: g.ResourceProfile, Actions: permissions, UserID: g.PrincipalID,
 		PrincipalType: g.PrincipalType,
 		PrincipalID:   g.PrincipalID,
 		ClusterID:     g.ClusterID,

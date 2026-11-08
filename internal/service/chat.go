@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/agent"
 	"github.com/k8s-ai/k8s-ai/internal/approval"
@@ -90,9 +92,16 @@ type ChatEvent struct {
 }
 
 // ChatRequest 是一次对话请求。
+type Confirmation func(context.Context, sse.ApprovalData) (string, <-chan string, func(), error)
+
 type ChatRequest struct {
-	SessionID string
-	Query     string
+	ApprovalContext  string
+	CoverageSnapshot func() []byte
+	Confirmation     Confirmation
+	KubeconfigPath   string
+	RequestCheck     func(*http.Request) error
+	SessionID        string
+	Query            string
 	// UserID 是发起本轮的产品内用户，用于 Turn/审计归属。
 	UserID string
 	// AllowAnySession 仅由具备 chat.manage.all 的管理员请求设置。
@@ -314,11 +323,11 @@ func (s *chatService) SetSink(sink func(sse.Event)) {
 // chatReader 从配置构建只读 Kubernetes 门面（chat 用）。
 func chatReader(cfg *config.Config) (scanner.Reader, error) {
 	return kubernetes.NewClient(kubernetes.Options{
-		Kubeconfig: cfg.Kubernetes.Kubeconfig,
-		Context:    cfg.Kubernetes.Context,
-		Timeout:    cfg.Kubernetes.Timeout,
-		QPS:        cfg.Kubernetes.QPS,
-		Burst:      cfg.Kubernetes.Burst,
+		RequestCheck: cfg.Kubernetes.RequestCheck, Kubeconfig: cfg.Kubernetes.Kubeconfig,
+		Context: cfg.Kubernetes.Context,
+		Timeout: cfg.Kubernetes.Timeout,
+		QPS:     cfg.Kubernetes.QPS,
+		Burst:   cfg.Kubernetes.Burst,
 	})
 }
 
@@ -336,11 +345,11 @@ func NewChatWithStoreAndConfig(cfg *config.Config, st store.Store) ChatService {
 // chatWriteRunner 从配置构建写执行器（kubectl argv + client-go，仅 executor 包内）。
 func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 	cs, err := kubernetes.NewClientset(kubernetes.Options{
-		Kubeconfig: cfg.Kubernetes.Kubeconfig,
-		Context:    cfg.Kubernetes.Context,
-		Timeout:    cfg.Kubernetes.Timeout,
-		QPS:        cfg.Kubernetes.QPS,
-		Burst:      cfg.Kubernetes.Burst,
+		RequestCheck: cfg.Kubernetes.RequestCheck, Kubeconfig: cfg.Kubernetes.Kubeconfig,
+		Context: cfg.Kubernetes.Context,
+		Timeout: cfg.Kubernetes.Timeout,
+		QPS:     cfg.Kubernetes.QPS,
+		Burst:   cfg.Kubernetes.Burst,
 	})
 	if err != nil {
 		return nil, err
@@ -352,11 +361,11 @@ func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 	// 三期创建通道（R3）需要 dynamic + discovery：RESTConfig 与只读门面同源，
 	// 缺它时 executor 会报「写通道未装配」而不是静默降级。
 	restConfig, err := kubernetes.NewRESTConfig(kubernetes.Options{
-		Kubeconfig: cfg.Kubernetes.Kubeconfig,
-		Context:    cfg.Kubernetes.Context,
-		Timeout:    cfg.Kubernetes.Timeout,
-		QPS:        cfg.Kubernetes.QPS,
-		Burst:      cfg.Kubernetes.Burst,
+		RequestCheck: cfg.Kubernetes.RequestCheck, Kubeconfig: cfg.Kubernetes.Kubeconfig,
+		Context: cfg.Kubernetes.Context,
+		Timeout: cfg.Kubernetes.Timeout,
+		QPS:     cfg.Kubernetes.QPS,
+		Burst:   cfg.Kubernetes.Burst,
 	})
 	if err != nil {
 		return nil, err
@@ -378,7 +387,7 @@ func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 // chatScanOptions 把配置映射为一期 ScanOptions（诊断 Tool 的 base opts）。
 func chatScanOptions(cfg *config.Config) model.ScanOptions {
 	return model.ScanOptions{
-		Kubeconfig:          cfg.Kubernetes.Kubeconfig,
+		RequestCheck: cfg.Kubernetes.RequestCheck, Kubeconfig: cfg.Kubernetes.Kubeconfig,
 		Context:             cfg.Kubernetes.Context,
 		Namespace:           cfg.Kubernetes.Namespace,
 		Timeout:             cfg.Scan.Timeout,
@@ -440,12 +449,28 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	if req.UserID != "" && !req.AllowAnySession && sess.UserID != req.UserID {
 		return nil, fmt.Errorf("%w: session %s", session.ErrForbidden, req.SessionID)
 	}
+	if req.UserID != "" && req.ApprovalContext != sess.ApprovalContext {
+		sess.ApprovalGrants = nil
+		sess.ApprovedWrites = nil
+		sess.ApprovalContext = req.ApprovalContext
+	}
 	// P6.1：本轮装配统一用生效配置，配置中心改模型后下一轮立即生效。
 	cfg, err := s.effectiveConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reader, err := s.newReader()
+	makeReader, makeWriter := s.newReader, s.newWriteRunner
+	if req.KubeconfigPath != "" {
+		c := *cfg
+		cfg = &c
+		cfg.Report.Directory = "" // platform runs cannot consult a CLI report from another scope
+		cfg.Kubernetes.Kubeconfig = req.KubeconfigPath
+		cfg.Kubernetes.Context = ""
+		cfg.Kubernetes.RequestCheck = req.RequestCheck
+		makeReader = func() (scanner.Reader, error) { return chatReader(cfg) }
+		makeWriter = func() (tools.WriteRunner, error) { return chatWriteRunner(cfg) }
+	}
+	reader, err := makeReader()
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +489,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		}
 	}
 	// 写 Tool（P4）：kubectl + 结构化写，全部走审批。
-	writeRunner, err := s.newWriteRunner()
+	writeRunner, err := makeWriter()
 	if err != nil {
 		return nil, err
 	}
@@ -501,8 +526,8 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	events := make(chan ChatEvent, 64)
 	pol := approval.Policy{
 		Mode:            approval.Mode(cfg.Agent.ApprovalMode),
-		RequireApproval: cfg.Agent.RequireApproval,
-		SkipPermissions: req.SkipPermissions || cfg.Agent.SkipPermissions,
+		RequireApproval: req.UserID != "" || cfg.Agent.RequireApproval,
+		SkipPermissions: req.UserID == "" && (req.SkipPermissions || cfg.Agent.SkipPermissions),
 		DenyOps:         cfg.Agent.DenyOps,
 	}
 	// P1.9: 生命周期观察器同时负责 Store 持久化与统一事件广播，approver 复用同一
@@ -510,9 +535,9 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	tracer := s.chatTracer(ctx, sess, scope)
 	approver := &chatApprover{
 		events:  events,
-		respond: respond,
-		sink:    s.sink,
-		scope:   scope,
+		respond: respond, confirmation: req.Confirmation, cluster: sess.Cluster,
+		sink:  s.sink,
+		scope: scope,
 	}
 	client := s.llmFactory(llm.Options{
 		Endpoint:        cfg.LLM.Endpoint,
@@ -723,6 +748,9 @@ func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *sessio
 	// 会话落库 + 容量闸门反馈（P8.6）：预警与超限都必须走到用户眼前。真机上出过 MySQL
 	// 「Data too long」把整轮对话静默吞掉的事故——用户看到的是「回复正常，历史里没有」，
 	// 服务端日志里那行 Warn 没人看得见。
+	if req.CoverageSnapshot != nil {
+		sess.Coverage = req.CoverageSnapshot()
+	}
 	capacityWarn, capacityFail := s.persistTurnSession(ctx, sess)
 	events <- ChatEvent{Type: ChatEventAnswer, Text: answer, Usage: &usage}
 	if chatErr != nil {
@@ -884,10 +912,12 @@ func translateEvent(m agent.Message) (ChatEvent, bool) {
 
 // chatApprover 把审批请求转成 choice-request 事件，并等待 respond 回传选择。
 type chatApprover struct {
-	events      chan<- ChatEvent
-	respond     <-chan string
-	skip        bool
-	autoApprove bool
+	confirmation Confirmation
+	cluster      string
+	events       chan<- ChatEvent
+	respond      <-chan string
+	skip         bool
+	autoApprove  bool
 	// sink 非空时以统一事件顺带广播审批请求（P1.9）。
 	sink  func(sse.Event)
 	scope *runScope
@@ -949,6 +979,27 @@ func (a *chatApprover) confirm(ctx context.Context, prompt string, options []age
 	if a.skip || a.autoApprove {
 		return agent.ChoiceYes, nil
 	}
+	reply := a.respond
+	if a.confirmation != nil {
+		if approvalData == nil {
+			approvalData = &sse.ApprovalData{Prompt: prompt, Options: sseChoiceOptions(options)}
+		}
+		id, ch, done, err := a.confirmation(ctx, *approvalData)
+		if err != nil {
+			return "", err
+		}
+
+		defer done()
+		reply = ch
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		approvalData.ID = id
+		if approvalData.Target == nil {
+			approvalData.Target = &sse.ApprovalTarget{}
+		}
+		approvalData.Target.Cluster = a.cluster
+	}
 	opts := make([]ChatChoiceOption, 0, len(options))
 	for _, o := range options {
 		opts = append(opts, ChatChoiceOption{Label: o.Label, Value: o.Value})
@@ -967,7 +1018,7 @@ func (a *chatApprover) confirm(ctx context.Context, prompt string, options []age
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case c := <-a.respond:
+	case c := <-reply:
 		return c, nil
 	}
 }
@@ -978,17 +1029,31 @@ func (a *chatApprover) RequestSecretValue(ctx context.Context, prompt string) (s
 	if a.skip || a.autoApprove {
 		return "", errors.New("非交互模式下无法向用户索取 Secret 值，请改用 $GENERATE 由 AegisOps 随机生成")
 	}
-	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: prompt, Secret: true}}
+	reply := a.respond
+	var id string
+	if a.confirmation != nil {
+		key, ch, done, err := a.confirmation(ctx, sse.ApprovalData{Secret: true})
+		if err != nil {
+			return "", err
+		}
+		defer done()
+		id = key
+		reply = ch
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
+	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: prompt, Secret: true, Approval: &sse.ApprovalData{ID: id, Secret: true}}}
 	if a.sink != nil {
 		// 只下发 secret=true 标记，明文值从不进入事件流（AGENTS.md 红线）。
 		a.sink(sse.New(a.scope.session(), a.scope.turn(), a.scope.step(), sse.EventApprovalRequired, sse.ApprovalData{
-			Prompt: prompt, Secret: true,
+			ID: id, Prompt: prompt, Secret: true,
 		}))
 	}
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case c := <-a.respond:
+	case c := <-reply:
 		value := strings.TrimSpace(c)
 		if value == "" || strings.EqualFold(value, "no") {
 			return "", nil
@@ -1013,6 +1078,10 @@ func (s *chatService) GetSession(id string) (*session.Session, error) {
 }
 
 // GetOrCreateSessionForUser 将 Web 会话绑定到当前登录用户。
+func (s *chatService) NewClusterSession(id, userID, cluster, model string, coverage []byte) (*session.Session, error) {
+	return s.sessions.NewBoundSession(id, userID, cluster, "", model, coverage)
+}
+
 func (s *chatService) GetOrCreateSessionForUser(id, userID, namespace, model string) (*session.Session, error) {
 	return s.sessions.GetOrCreateSessionForUser(id, userID, namespace, model)
 }

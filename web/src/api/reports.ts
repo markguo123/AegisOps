@@ -17,7 +17,6 @@ import {
   apiDelete,
   apiGet,
   apiPost,
-  readToken,
 } from './request'
 import type {
   ReportCleanupResult,
@@ -102,10 +101,7 @@ function decodeFilename(raw: string, fallback: string): string {
  */
 async function fetchAndSave(id: string, suffix: string): Promise<string> {
   const headers = new Headers({ Accept: 'application/octet-stream' })
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+
   const response = await fetch(`${API_BASE}/reports/${encodeURIComponent(id)}${suffix}`, { headers })
   if (!response.ok) {
     throw apiErrorFrom(response.status, await response.text())

@@ -153,9 +153,9 @@ func TestCancelScanStopsRunningJob(t *testing.T) {
 func TestCancelScanOwnerBoundary(t *testing.T) {
 	f := newReportFixture(t, nil)
 	admin := f.adminToken(t)
-	owner := f.userToken(t, "op-cancel", "operator")
+	owner := f.userToken(t, "op-cancel", "user")
 	f.grantNamespaces(t, "u-op-cancel", "app")
-	other := f.userToken(t, "op-other", "operator")
+	other := f.userToken(t, "op-other", "user")
 
 	scan := &blockingScan{entered: make(chan struct{}, 1), canceled: make(chan struct{}, 1)}
 	f.server.svc = scan

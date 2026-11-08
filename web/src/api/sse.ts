@@ -11,7 +11,7 @@
  */
 
 import type { ChatMessage } from './sessions'
-import { readToken } from './request'
+
 
 /** 统一事件类型，对齐 `internal/sse/event.go` 的 EventType 全量枚举。 */
 export type AgentEventType =
@@ -355,10 +355,7 @@ export async function fetchChatStream(
 ): Promise<void> {
   const headers = new Headers({ Accept: 'text/event-stream' })
   // SSE 与普通 API 使用同一登录 Token，并在服务端执行 owner 校验。
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+
   const response = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/stream`, {
     signal,
     headers,

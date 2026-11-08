@@ -13,7 +13,11 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const username = ref('admin')
+const enterprise = ref('')
+onMounted(async () => {
+  try { const res = await fetch('/api/v1/auth/providers'); const { data } = await res.json(); if (data?.oidc) enterprise.value = data.displayName || '企业单点登录' } catch { enterprise.value = '' }
+})
+const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
@@ -120,6 +124,7 @@ async function handleLogin(): Promise<void> {
           <p>登录后即可体检、诊断并处置集群异常</p>
         </div>
 
+        <a v-if="enterprise" class="btn" href="/api/v1/auth/oidc/start">{{ enterprise }}</a>
         <form class="form" novalidate @submit.prevent="handleLogin">
           <div class="field">
             <label class="field-label" for="login-username">账号</label>

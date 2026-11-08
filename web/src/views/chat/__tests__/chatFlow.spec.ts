@@ -12,7 +12,7 @@ import ComposerBox from '@/components/chat/ComposerBox.vue'
  * 真实集群端到端由 P6.7 覆盖，本用例保证前端契约与交互不断链。
  */
 
-const SESSION = {
+const SESSION = {ownerId:'u1',clusterId:'c1',
   id: 's1',
   name: '诊断 default 命名空间部署',
   state: 'running',
@@ -74,9 +74,9 @@ function installFetch(
       if (url === '/api/v1/skills' && (init.method ?? 'GET') === 'GET') {
         return new Response(JSON.stringify({ data: skills }), { status: 200 })
       }
-      if (url === '/api/v1/auth/scope') {
+      if (url === '/api/v1/auth/access') {
         return new Response(
-          JSON.stringify({ request_id: 'r', timestamp: new Date().toISOString(), data: scope }),
+          JSON.stringify({ request_id: 'r', timestamp: new Date().toISOString(), data: [{id:"c1",name:"prod",access:{rules:[{scopeType:"namespace",namespaces:(scope as {namespaces:string[]}).namespaces,actions:["read"]}]}}] }),
           { status: 200 },
         )
       }
@@ -133,11 +133,11 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     const emptySession = { ...SESSION, id: 'empty', name: '新会话', messageCount: 0, token: null }
     installFetch([], [], [emptySession])
     const wrapper = mount(ChatView, { attachTo: document.body })
-    await vi.waitFor(() => expect(wrapper.text()).toContain('新会话'))
+    await vi.waitFor(() => expect(wrapper.find('.session-item').exists()).toBe(true))
     await wrapper.find('.session-item').trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('当前授权范围：1 个命名空间'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('授权集群：prod'))
     expect(wrapper.text()).toContain('mysql-dev')
-    expect(wrapper.text()).toContain('Node、PV、StorageClass')
+    expect(wrapper.text()).toContain('集群对象与命名空间分别授权')
   })
 
   it('选择会话后订阅 SSE：发送进入 Turn，审批卡回传选择值', async () => {
@@ -151,7 +151,7 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
         event_type: 'approval.required',
         turn_id: 't1',
         data: {
-          prompt: '确认执行 dry-run 后的 apply？',
+          id:'once',prompt: '确认执行 dry-run 后的 apply？',
           options: [{ label: '确认并执行', value: 'approve' }],
           tool: 'create_resource',
           risk: 'HIGH',
@@ -172,7 +172,7 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     const approve = wrapper.findAll('button').find((btn) => btn.text() === '确认并执行')!
     await approve.trigger('click')
     await vi.waitFor(() => expect(postCallsSuffix('/approve')).toHaveLength(1))
-    expect(postCallsSuffix('/approve')[0].body).toEqual({ choice: 'approve' })
+    expect(postCallsSuffix('/approve')[0].body).toEqual({choice:'approve',approvalId:'once'})
   })
 
   it('SSE 驱动运行态：turn.completed 后回到可发送，停止按钮回传 cancel', async () => {

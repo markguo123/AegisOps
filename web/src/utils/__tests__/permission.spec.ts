@@ -30,11 +30,10 @@ describe('角色权限口径', () => {
   it('admin 全量，user 平台权限为零，operator 只多一个发起体检权', () => {
     expect(hasPermission(permissionsOf('admin'), PERM.userManage)).toBe(true)
     // 与后端 auth.defaultRoles() 同口径：多给的每一位都要能说出理由。
-    expect(permissionsOf('operator')).toEqual([PERM.scanExecute])
-    expect(permissionsOf('user')).toEqual([])
-    expect(hasPermission(permissionsOf('operator'), PERM.chatWrite)).toBe(false)
-    expect(hasPermission(permissionsOf('user'), PERM.scanExecute)).toBe(false)
-    expect(hasPermission(permissionsOf('operator'), PERM.skillManage)).toBe(false)
+    expect(permissionsOf('user')).toEqual([PERM.scanExecute,PERM.skillRead])
+    expect(hasPermission(permissionsOf('user'), PERM.chatWrite)).toBe(false)
+    expect(hasPermission(permissionsOf('user'), PERM.scanExecute)).toBe(true)
+    expect(hasPermission(permissionsOf('user'), PERM.skillManage)).toBe(false)
     expect(hasPermission(permissionsOf('user'), PERM.settingsRead)).toBe(false)
   })
 
@@ -46,12 +45,11 @@ describe('角色权限口径', () => {
 
   it('会话内审批与平台权限解耦：三类登录角色均可自确认', () => {
     expect(canDecideApproval('admin')).toBe(true)
-    expect(canDecideApproval('operator')).toBe(true)
     expect(canDecideApproval('user')).toBe(true)
     expect(canDecideApproval(null)).toBe(false)
   })
 
   it('角色权限表覆盖全部产品角色（避免新增角色漏配导致越权展示）', () => {
-    expect(Object.keys(ROLE_PERMISSIONS).sort()).toEqual(['admin', 'operator', 'user'])
+    expect(Object.keys(ROLE_PERMISSIONS).sort()).toEqual(['admin', 'user'])
   })
 })

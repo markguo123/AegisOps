@@ -135,9 +135,9 @@ describe('UsersView 用户与权限（P3.12）', () => {
         expect.stringContaining('用户管理'),
         expect.stringContaining('角色与权限'),
         expect.stringContaining('授权委派'),
-        expect.stringContaining('API Token'),
+        expect.stringContaining('企业登录'),
       ])
-      expect(wrapper.findAll('.stat')).toHaveLength(4)
+      expect(wrapper.findAll('.stat')).toHaveLength(3)
       expect(wrapper.text()).toContain('创建用户')
       expect(wrapper.text()).toContain('alice')
       expect(wrapper.text()).not.toContain('password')
@@ -150,7 +150,7 @@ describe('UsersView 用户与权限（P3.12）', () => {
 
       const roleButton = wrapper.findAll('.rail-item')[1]!
       await roleButton.trigger('click')
-      await vi.waitFor(() => expect(wrapper.findAll('.role-card')).toHaveLength(3))
+      await vi.waitFor(() => expect(wrapper.findAll('.role-card')).toHaveLength(2))
 
       expect(wrapper.text()).toContain('角色与权限矩阵')
       expect(wrapper.text()).toContain('全量权限 *')
@@ -178,7 +178,7 @@ describe('UsersView 用户与权限（P3.12）', () => {
       const labels = Array.from(document.querySelectorAll('.el-select-dropdown__item'))
         .map((item) => item.textContent?.trim() ?? '')
         .filter(Boolean)
-      expect(labels).toEqual(expect.arrayContaining(['user', 'operator', 'admin']))
+      expect(labels).toEqual(expect.arrayContaining(['user', 'admin']))
     })
 
     it('切换到授权委派分区展示委派列表与有效期', async () => {
@@ -195,26 +195,9 @@ describe('UsersView 用户与权限（P3.12）', () => {
       expect(wrapper.text()).toContain('撤销')
     })
 
-    it('切换到 Token 分区展示用户选择与已签发 Token', async () => {
-      const wrapper = mount(UsersView)
-      await flushPromises()
-      await vi.waitFor(() => expect(wrapper.findAll('.rail-item')).toHaveLength(4))
-      await vi.waitFor(() => expect(wrapper.findAll('.stat')).toHaveLength(4))
+    it('企业登录页面提供 OIDC 配置',async()=>{
+ const wrapper=mount(UsersView);await flushPromises();await wrapper.findAll('.rail-item')[3]!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('Issuer URL');expect(wrapper.text()).not.toContain('签发 Token')
 
-      await wrapper.findAll('.rail-item')[3]!.trigger('click')
-      await flushPromises()
-      await vi.waitFor(() => expect(wrapper.text()).toContain('签发 Token'))
-
-      expect(wrapper.find('.user-select').exists()).toBe(true)
-      expect(wrapper.text()).toContain('cli')
-
-      const issueButton = wrapper.findAll('button').find((button) => button.text().includes('签发 Token'))
-      expect(issueButton).toBeDefined()
-      await issueButton!.trigger('click')
-      await flushPromises()
-
-      expect(wrapper.text()).toContain('Token 名称')
-      expect(wrapper.text()).toContain('签发')
     })
   })
 

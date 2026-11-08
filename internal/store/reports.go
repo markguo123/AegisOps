@@ -16,7 +16,7 @@ import (
 // 列表查询刻意复用同一串列名，包括 blob_key：它只在 service 层换取内容时用，不进
 // JSON 视图（model.Report 上是 json:"-"），但读进内存本身不泄露给响应。
 const reportColumns = "id, cluster_id, scan_id, kind, blob_key, media_type, size, sha256, " +
-	"findings, created_by, available, created_at, scope_kind, scope_value"
+	"findings, created_by, available, created_at, scope_kind, scope_value,coverage_level"
 
 // ReportQuery 是报告列表的过滤与归属条件（方案 15 §12.3）。
 //
@@ -24,6 +24,7 @@ const reportColumns = "id, cluster_id, scan_id, kind, blob_key, media_type, size
 // 报告也算进去，用户看到「共 200 条」却只列出 3 条，而且越权行的存在性本身就走漏了
 // 报告数量。归属三态由 service 层算好后交进来，本层只负责把它翻成一条 WHERE。
 type ReportQuery struct {
+	Boundaries []ReportBoundary
 	// ViewerID 是查看者用户 ID。Admin 为 false 时必填——空 ViewerID 意味着「谁都不该
 	// 看到」，把它当成「无过滤条件」是最危险的一种默认值。
 	ViewerID string
@@ -146,7 +147,17 @@ func (q ReportQuery) where() (string, []any, error) {
 	var clauses []string
 	var args []any
 
-	if !q.Admin {
+	if !q.Admin && q.Boundaries != nil {
+		clauses = append(clauses, "created_by IN (?,?)")
+		args = append(args, q.ViewerID, objectstore.SystemActor)
+		parts := []string{"1=0"}
+		for _, b := range q.Boundaries {
+			pred, a := b.predicate()
+			parts = append(parts, "("+pred+")")
+			args = append(args, a...)
+		}
+		clauses = append(clauses, "("+strings.Join(parts, " OR ")+")")
+	} else if !q.Admin {
 		viewer := strings.TrimSpace(q.ViewerID)
 		if viewer == "" {
 			return "", nil, fmt.Errorf("list reports: non-admin query needs a viewer id")
@@ -262,7 +273,7 @@ func scanReport(row scanner) (*Report, error) {
 	// 都是运行期才炸的错。
 	err := row.Scan(&r.ID, &r.ClusterID, &r.ScanID, &r.Kind, &r.BlobKey, &r.MediaType,
 		&r.Size, &r.SHA256, &r.Findings, &r.CreatedBy, &available, &createdAt,
-		&r.ScopeKind, &r.ScopeValue)
+		&r.ScopeKind, &r.ScopeValue, &r.CoverageLevel)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, mapErr(err, "get report")

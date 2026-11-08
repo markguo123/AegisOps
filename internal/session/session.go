@@ -38,11 +38,13 @@ type Message struct {
 
 // Session 是一个对话会话。
 type Session struct {
-	ID string `json:"id"`
+	ApprovalContext string `json:"approvalContext,omitempty"`
+	ID              string `json:"id"`
 	// UserID 是会话所有者。空值表示三期历史会话或 CLI 会话；管理员可读取
 	// 这类会话，普通用户/操作员不得认领或访问。
 	UserID         string           `json:"userId,omitempty"`
 	Name           string           `json:"name"`
+	Coverage       json.RawMessage  `json:"coverage,omitempty"`
 	Cluster        string           `json:"cluster,omitempty"`
 	Namespace      string           `json:"namespace,omitempty"`
 	Model          string           `json:"model,omitempty"`

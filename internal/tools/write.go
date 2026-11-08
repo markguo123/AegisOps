@@ -106,7 +106,19 @@ func (t *kubectlTool) CheckClusterAccess(ctx context.Context, input json.RawMess
 
 func kubectlResourceForKind(kind string) (group, resource string, ok bool) {
 	switch strings.ToLower(kind) {
-	case "deployment", "deployments":
+	case "events", "event", "ev":
+		return "", "events", true
+	case "endpoints", "ep":
+		return "", "endpoints", true
+	case "endpointslice", "endpointslices":
+		return "discovery.k8s.io", "endpointslices", true
+	case "storageclass", "storageclasses", "sc":
+		return "storage.k8s.io", "storageclasses", true
+	case "horizontalpodautoscaler", "horizontalpodautoscalers", "hpa":
+		return "autoscaling", "horizontalpodautoscalers", true
+	case "poddisruptionbudget", "poddisruptionbudgets", "pdb":
+		return "policy", "poddisruptionbudgets", true
+	case "deployment", "deployments", "deploy":
 		return "apps", "deployments", true
 	case "statefulset", "statefulsets":
 		return "apps", "statefulsets", true

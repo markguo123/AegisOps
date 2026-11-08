@@ -26,6 +26,7 @@ export type ScanPreset = 'quick' | 'standard' | 'deep'
 export type ScanFormat = 'json' | 'markdown'
 
 export interface ScanRequest {
+ clusterId?:string
   scope: ScanScope
   namespace?: string
   pod?: string
@@ -56,7 +57,7 @@ export const SCAN_FORMATS: { value: ScanFormat; label: string; hint: string }[] 
 /** 发起一次体检。返回 202 与 pending 任务，结果靠 getScan 轮询。 */
 export async function createScan(req: ScanRequest): Promise<ScanJob> {
   const env = await apiPost<ScanJob>('/scans', {
-    scope: req.scope,
+    clusterId:req.clusterId,scope: req.scope,
     namespace: req.namespace ?? '',
     pod: req.pod ?? '',
     preset: req.preset ?? 'standard',

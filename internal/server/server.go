@@ -35,13 +35,15 @@ const (
 
 // ScanJob 内存任务。
 type ScanJob struct {
-	ID        string            `json:"id"`
-	Status    ScanStatus        `json:"status"`
-	Result    *model.ScanResult `json:"result,omitempty"`
-	Error     string            `json:"error,omitempty"`
-	CreatedAt time.Time         `json:"createdAt"`
-	StartedAt *time.Time        `json:"startedAt,omitempty"`
-	EndedAt   *time.Time        `json:"endedAt,omitempty"`
+	ClusterID     string            `json:"clusterId,omitempty"`
+	CoverageLevel int               `json:"-"`
+	ID            string            `json:"id"`
+	Status        ScanStatus        `json:"status"`
+	Result        *model.ScanResult `json:"result,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	StartedAt     *time.Time        `json:"startedAt,omitempty"`
+	EndedAt       *time.Time        `json:"endedAt,omitempty"`
 	// Owner 是发起人的用户 ID（P8.13）。任务结果含被扫命名空间的问题清单，
 	// 没有 owner 就没法判「谁的任务」，GET 只能对全体登录用户开放。
 	Owner string `json:"owner,omitempty"`
@@ -55,8 +57,9 @@ type ScanJob struct {
 
 // Server 最小化 HTTP 服务。
 type Server struct {
-	svc  service.ScanService
-	auth authService
+	platform *service.PlatformAccess
+	svc      service.ScanService
+	auth     authService
 	// settings 是配置中心应用服务（P1.10），nil 时配置端点返回 501。
 	settings settingsService
 	// auditlog 写系统事件（LOGIN/LOGOUT 等，P1.11），nil 时跳过。
@@ -194,6 +197,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
+	mux.HandleFunc("GET /api/v1/auth/access", s.handleAccess)
 	mux.HandleFunc("GET /api/v1/auth/scope", s.handleMyScope)
 	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)
 	mux.HandleFunc("POST /api/v1/scans", s.handleCreateScan)
@@ -243,7 +247,16 @@ func (s *Server) Handler() http.Handler {
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		mux.HandleFunc(method+" /api/v1/{path...}", s.handleAPINotFound)
 	}
-	return WithMiddleware(mux, DefaultCORS(), s.perms, s.principal)
+	managed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutation := r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS"
+		if s.platform != nil && mutation && serverRoleIsAdmin(RoleFrom(r.Context())) && r.URL.Path != "/api/v1/auth/login" && r.URL.Path != "/api/v1/auth/logout" {
+			if !s.auditPolicy(w, r, "platform.change.request") {
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return WithMiddleware(managed, DefaultCORS(), s.perms, s.principal)
 }
 
 // principal 由 Token 解析当前用户与角色；未配置认证服务时视为未认证。

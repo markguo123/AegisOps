@@ -122,17 +122,31 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var cleanup func()
+	var watcher func(context.Context, context.CancelFunc)
+	if s.platform != nil {
+		bound, e := s.bindScan(r, u, &opts)
+		if e != nil {
+			writeError(w, r, 403, codeForbidden, "所选集群或体检范围未获授权")
+			return
+		}
+		cleanup = bound.Close
+		watcher = bound.Watch
+	}
 	s.mu.Lock()
 	if s.running {
+		if cleanup != nil {
+			cleanup()
+		}
 		s.mu.Unlock()
 		writeError(w, r, http.StatusConflict, codeConflict, "a scan is already running")
 		return
 	}
 	job := &ScanJob{
-		ID:         newID(),
-		Status:     StatusPending,
-		CreatedAt:  time.Now().UTC(),
-		Owner:      u.ID,
+		ID:        newID(),
+		Status:    StatusPending,
+		CreatedAt: time.Now().UTC(),
+		Owner:     u.ID, ClusterID: opts.Attribution.ClusterID, CoverageLevel: opts.Attribution.CoverageLevel,
 		ScopeKind:  opts.Attribution.ScopeKind,
 		ScopeValue: opts.Attribution.ScopeValue,
 	}
@@ -142,6 +156,9 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 	// 不存在「刚点发起、正好停不掉」的窗口。
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	s.registerScanCancelLocked(job.ID, cancelRun)
+	if watcher != nil {
+		go watcher(runCtx, cancelRun)
+	}
 
 	// ScanID 依赖任务 ID，只能在任务登记后回填（Attribution 是值类型，直接整体赋值）。
 	opts.Attribution.ScanID = job.ID
@@ -156,7 +173,13 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 
 	// 阶段账回调：扫描跑到哪一步，页面上一次轮询就能看到，不用等整次体检结束。
 	opts.Progress = scanStageSink{srv: s, job: job}
-	go s.runJob(job, runCtx, opts)
+	go func() {
+		if cleanup != nil {
+			defer cleanup()
+		}
+		defer cancelRun()
+		s.runJob(job, runCtx, opts)
+	}()
 
 	writeOK(w, r, http.StatusAccepted, accepted)
 }
@@ -183,13 +206,26 @@ func (s *Server) buildScanOptions(r *http.Request, u *store.User, role *store.Ro
 	scope := strings.TrimSpace(req.Scope)
 	ns := strings.TrimSpace(req.Namespace)
 	pod := strings.TrimSpace(req.Pod)
-	if req.ClusterID != "" {
+	if s.platform == nil && req.ClusterID != "" {
 		// 多集群本期只留口不实现连通（方案 17 §6）：宁可现在拒绝，也不能让请求体里一个
 		// clusterId 把扫描打到平台之外的集群上。
 		return model.ScanOptions{}, scanInvalid("该集群尚未接入扫描：本期体检目标固定为平台自身集群（clusterId 必须为空）")
 	}
 
-	scopeKind, scopeValue, targetNS, gateErr := s.resolveScanScope(r.Context(), u, role, scope, ns, pod)
+	var scopeKind, scopeValue, targetNS string
+	if s.platform == nil {
+		scopeKind, scopeValue, targetNS, gateErr = s.resolveScanScope(r.Context(), u, role, scope, ns, pod)
+	} else {
+		scopeKind = scope
+		targetNS = ns
+		scopeValue = ns
+		if scope == model.ScopePod {
+			scopeValue = ns + "/" + pod
+		}
+		if scope == model.ScopeCluster && ns != "" || scope != model.ScopePod && pod != "" || len(scanCoverage(req.ClusterID, scope, scopeValue, 2).Targets) == 0 {
+			gateErr = scanInvalid("需要有效的集群与明确的体检目标")
+		}
+	}
 	if gateErr != nil {
 		return model.ScanOptions{}, gateErr
 	}
@@ -206,7 +242,7 @@ func (s *Server) buildScanOptions(r *http.Request, u *store.User, role *store.Ro
 	opts.WithDoc = false
 	applyScanPreset(&opts, preset)
 	opts.Attribution = model.ReportAttribution{
-		Actor:      u.ID,
+		Actor: u.ID, ClusterID: req.ClusterID,
 		ScopeKind:  scopeKind,
 		ScopeValue: scopeValue,
 		// 页面一次体检只留一份产物（P9.13）。opts.ReportFormat 不动：它管的是
@@ -345,6 +381,12 @@ func (s *Server) runJob(job *ScanJob, ctx context.Context, opts model.ScanOption
 	}
 	defer s.clearScanCancel(job.ID)
 	result, err := s.svc.Run(ctx, opts)
+	if check := opts.Attribution.Recheck; check != nil {
+		if e := check(ctx); e != nil {
+			result = nil
+			err = e
+		}
+	}
 	ended := time.Now().UTC()
 	s.mu.Lock()
 	job.EndedAt = &ended
@@ -387,6 +429,16 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	}
 	if job.Owner != "" && job.Owner != u.ID && !serverRoleIsAdmin(RoleFrom(r.Context())) {
 		writeError(w, r, http.StatusNotFound, codeNotFound, "scan not found")
+		return
+	}
+	if s.platform != nil && !serverRoleIsAdmin(RoleFrom(r.Context())) {
+		a, e := s.platform.Grants.EffectiveAccess(r.Context(), u.ID, job.ClusterID)
+		if e != nil || !scanCoverage(job.ClusterID, job.ScopeKind, job.ScopeValue, job.CoverageLevel).CoveredBy(a) {
+			writeError(w, r, 404, codeNotFound, "scan not found")
+			return
+		}
+	}
+	if s.platform != nil && job.Owner != u.ID && !s.auditPolicy(w, r, "scan.governance.read") {
 		return
 	}
 	writeOK(w, r, http.StatusOK, job)

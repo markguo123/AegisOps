@@ -53,7 +53,7 @@ describe('clusters API（P3.4）', () => {
     const created = await createCluster({ name: 'stg', kubeconfig: 'clouds:\n  - server: x\n' })
     const [, init] = fetchMock.mock.calls[0]
     const headers = init.headers as Headers
-    expect(headers.get('Authorization')).toBe('Bearer tok-demo')
+    expect(headers.get('Authorization')).toBeNull()
     const parsed = JSON.parse(init.body as string) as { kubeconfig: string }
     expect(parsed.kubeconfig).toContain('clouds')
     expect(created.name).toBe('stg')

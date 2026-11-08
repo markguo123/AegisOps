@@ -36,8 +36,8 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  (e: 'approve', value: string): void
-  (e: 'reject'): void
+  (e: 'approve', value: string,id?:string): void
+  (e: 'reject',id?:string): void
 }>()
 
 const rollRef = ref<HTMLElement | null>(null)
@@ -559,6 +559,7 @@ const turns = computed<TurnUiData[]>(() => {
           ? (data.options as Array<{ label: string; value: string }>)
           : []
         const approval: ApprovalUiData = {
+ id:typeof data.id==='string'?data.id:undefined,
           key: `${turn.key}:approval:${turn.items.length}`,
           title: typeof data.title === 'string' ? data.title : undefined,
           operation: typeof data.operation === 'string' ? data.operation : undefined,
@@ -726,8 +727,8 @@ defineExpose({ turns })
         <TurnBlock
           :turn="turn"
           :can-decide="canDecide"
-          @approve="emit('approve', $event)"
-          @reject="emit('reject')"
+          @approve="(v,id)=>emit('approve',v,id)"
+          @reject="emit('reject',$event)"
         />
       </div>
     </template>

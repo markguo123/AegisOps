@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import request from '@/api/request'
+import { ElMessage,ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
   ChatDotRound,
@@ -96,7 +97,17 @@ const THEME_OPTIONS: ThemeMode[] = ['dark', 'light', 'system']
 const THEME_ICONS: Record<ThemeMode, Component> = { dark: Moon, light: Sunny, system: Monitor }
 const themeIcon = computed(() => THEME_ICONS[themeMode.value])
 
-function handleUserCommand(command: string | number | object): void {
+async function handleUserCommand(command: string | number | object): Promise<void> {
+ if(command==='identity'){
+ try{const {data}=await request<{local:boolean;enabled:boolean;linked:boolean}>('/auth/oidc/bind')
+ if(!data?.local){ElMessage.info('当前账号使用企业身份登录');return}
+ if(!data.enabled&&!data.linked){ElMessage.info('管理员尚未启用企业登录');return}
+ const action=data.linked?'解绑':'绑定'
+ const {value}=await ElMessageBox.prompt('输入本地密码以'+action+'企业身份',action+'企业身份',{inputType:'password',confirmButtonText:action})
+ const res=await request<{redirect?:string}>('/auth/oidc/bind',{method:data.linked?'DELETE':'POST',body:{password:value}})
+ if(data.linked){await router.replace({name:'login'})}else if(res.data?.redirect){window.location.assign(res.data.redirect)}
+ }catch(e){if(e instanceof Error)ElMessage.error(e.message)};return
+ }
   if (command === 'logout') {
     auth.logout()
     router.push({ name: 'login' })
@@ -243,6 +254,7 @@ async function submitPasswordChange(): Promise<void> {
                 <el-dropdown-item v-if="isAdmin" divided command="admin">
                   管理控制台
                 </el-dropdown-item>
+                <el-dropdown-item command="identity">企业身份绑定</el-dropdown-item>
                 <el-dropdown-item divided command="password">修改密码</el-dropdown-item>
                 <el-dropdown-item command="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>

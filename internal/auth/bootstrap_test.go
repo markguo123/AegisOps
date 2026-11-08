@@ -62,7 +62,7 @@ func TestBootstrapReconcilesRoles(t *testing.T) {
 		t.Fatalf("应有 %d 个内置角色, got %d", len(defaultRoles()), len(roles))
 	}
 	for _, r := range roles {
-		if r.Name == RoleOperator {
+		if r.Name == RoleUser {
 			if err := st.Roles().Delete(ctx, r.ID); err != nil {
 				t.Fatalf("delete role: %v", err)
 			}

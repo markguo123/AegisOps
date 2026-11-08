@@ -91,7 +91,7 @@ func TestUsersAdminCRUD(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /roles 应 200, got %d: %s", resp.StatusCode, raw)
 	}
-	for _, want := range []string{auth.RoleAdmin, auth.RoleUser, auth.RoleOperator} {
+	for _, want := range []string{auth.RoleAdmin, auth.RoleUser} {
 		if !strings.Contains(raw, `"name":"`+want+`"`) {
 			t.Fatalf("角色列表缺少 %q", want)
 		}
@@ -139,7 +139,7 @@ func TestUsersAdminCRUD(t *testing.T) {
 func TestUsersPermissionDenied(t *testing.T) {
 	p := newPlatformServer(t)
 	tokens := map[string]string{}
-	for _, role := range []string{auth.RoleUser, auth.RoleOperator} {
+	for _, role := range []string{auth.RoleUser} {
 		tokens[role] = createUserWithRole(t, p, "denied-"+role, role)
 	}
 	// 基线 = bootstrap admin + 两个无权限测试账号；越权请求后数量不得变化。
@@ -168,7 +168,7 @@ func TestUsersPermissionDenied(t *testing.T) {
 	}
 }
 
-// TestUsersProtectedAdmin 验证保守保护：内置 admin 不可删除；
+// TestUsersProtectedAdmin 验证本地管理员生命周期：保留其他可用管理员时可以调整首个账号；
 // 登录用户禁止停用或降级自己的账号。
 func TestUsersProtectedAdmin(t *testing.T) {
 	p := newPlatformServer(t)
@@ -186,21 +186,32 @@ func TestUsersProtectedAdmin(t *testing.T) {
 		t.Fatalf("降级自己的账号应 400, got %d: %s", resp.StatusCode, raw)
 	}
 
-	// 以第二个 admin 验证服务层保守保护：内置 admin 不可删除/停用/降级（403）。
+	// 平台保护最后一个本地管理员，不绑定固定用户名。
 	admin2Body := fmt.Sprintf(`{"username":"admin2","displayName":"Admin 2","password":"admin2-pw-123","roleId":"%s"}`, adminRole)
 	if resp, raw := p.do(t, http.MethodPost, "/api/v1/users", token, admin2Body); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("创建 admin2 应 201, got %d: %s", resp.StatusCode, raw)
 	}
 	token2 := p.tokenAs(t, "admin2", "admin2-pw-123")
-	if resp, raw := p.do(t, http.MethodDelete, "/api/v1/users/"+admin.ID, token2, ""); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("删除内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"disabled"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("有第二个可用本地管理员时允许停用首个账号, got %d: %s", resp.StatusCode, raw)
 	}
-	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"disabled"}`); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("停用内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodGet, "/api/v1/auth/me", token, ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("停用后已有令牌应失效, got %d: %s", resp.StatusCode, raw)
 	}
-	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, patchSelf); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("降级内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"active"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("恢复账号: %d %s", resp.StatusCode, raw)
 	}
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, patchSelf); resp.StatusCode != http.StatusOK {
+		t.Fatalf("保留第二个管理员时可降级首个账号: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := p.do(t, http.MethodDelete, "/api/v1/users/"+admin.ID, token2, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("逻辑删除: %d %s", resp.StatusCode, raw)
+	}
+	deleted, err := p.store.Users().Get(context.Background(), admin.ID)
+	if err != nil || deleted.Status != "deleted" {
+		t.Fatalf("应保留已删除用户的内部身份: %+v %v", deleted, err)
+	}
+
 }
 
 // TestUsersNeverEchoPassword 是红线用例：创建/列表响应不得出现明文口令，

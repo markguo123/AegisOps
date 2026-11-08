@@ -28,7 +28,7 @@ describe('auth store（P2.2/P2.3 真实认证接入）', () => {
       user: { id: 'u1', username: 'admin', displayName: '管理员', roleId: 'role-admin' },
     })
     authApi.me.mockResolvedValue({
-      user: { id: 'u1', username: 'admin' },
+      user: { id: 'u1', username: 'admin', displayName:'管理员' },
       role: { name: 'admin', permissions: ['*'] },
     })
 
@@ -38,7 +38,7 @@ describe('auth store（P2.2/P2.3 真实认证接入）', () => {
     expect(auth.isAuthenticated).toBe(true)
     expect(auth.role).toBe('admin')
     expect(auth.user?.displayName).toBe('管理员')
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('tok-1')
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
   })
 
   it('未知角色名落到零权限 user，避免越权展示', async () => {
@@ -56,15 +56,16 @@ describe('auth store（P2.2/P2.3 真实认证接入）', () => {
   it('restore 用本地会话 + /me 校正角色；无本地会话时清空', async () => {
     localStorage.setItem(TOKEN_KEY, 'tok-3')
     localStorage.setItem(USER_KEY, JSON.stringify({ userId: 'u3', username: 'op', role: 'user' }))
-    authApi.me.mockResolvedValue({ user: { id: 'u3' }, role: { name: 'operator' } })
+    authApi.me.mockResolvedValue({ user: { id: 'u3' }, role: { name: 'user' } })
 
     const auth = useAuthStore()
     await auth.restore()
     expect(auth.isAuthenticated).toBe(true)
-    expect(auth.role).toBe('operator')
+    expect(auth.role).toBe('user')
 
     localStorage.clear()
     setActivePinia(createPinia())
+    authApi.me.mockRejectedValueOnce(new Error("expired"))
     const fresh = useAuthStore()
     await fresh.restore()
     expect(fresh.isAuthenticated).toBe(false)

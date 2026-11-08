@@ -14,14 +14,16 @@ import (
 
 // User 是产品内用户（D-05：仅作用于 Web/API，不进入 CLI）。
 type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	DisplayName  string    `json:"displayName,omitempty"`
-	PasswordHash string    `json:"-"`
-	RoleID       string    `json:"roleId,omitempty"`
-	Status       string    `json:"status,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Username       string    `json:"username"`
+	DisplayName    string    `json:"displayName,omitempty"`
+	PasswordHash   string    `json:"-"`
+	RoleID         string    `json:"roleId,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	Email          string    `json:"email,omitempty"`
+	SessionVersion int64     `json:"-"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // Role 是产品内角色。Permission 以 JSON 数组存储，业务判定只依赖
@@ -68,14 +70,14 @@ type AuditEvent struct {
 	// 由 EventTypeForAction 或写入方显式设置。
 	EventType string `json:"eventType,omitempty"`
 	// ResourceKind/ResourceName/Operation 描述被操作对象（可空）。
-	ResourceKind   string `json:"resourceKind,omitempty"`
-	ResourceName   string `json:"resourceName,omitempty"`
-	Operation      string `json:"operation,omitempty"`
-	Risk           string `json:"risk,omitempty"`
-	Decision       string `json:"decision,omitempty"`
-	ApprovalID     string `json:"approvalId,omitempty"`
-	GrantID        string `json:"grantId,omitempty"`
-	MatchReason    string `json:"matchReason,omitempty"`
+	ResourceKind     string `json:"resourceKind,omitempty"`
+	ResourceName     string `json:"resourceName,omitempty"`
+	Operation        string `json:"operation,omitempty"`
+	Risk             string `json:"risk,omitempty"`
+	Decision         string `json:"decision,omitempty"`
+	ApprovalID       string `json:"approvalId,omitempty"`
+	GrantID          string `json:"grantId,omitempty"`
+	MatchReason      string `json:"matchReason,omitempty"`
 	ParameterSummary string `json:"parameterSummary,omitempty"`
 	ResultSummary    string `json:"resultSummary,omitempty"`
 	// Status 是结果状态：success | error | pending。
@@ -154,16 +156,18 @@ type Credential struct {
 // namespace 是唯一授权边界；Permissions 是被委派的动作集合（["*"] 表示该
 // namespace 全量，["destroy"] 表示销毁类写操作）。JSON 数组字段以字符串落库。
 type AuthzGrant struct {
-	ID            string     `json:"id"`
-	PrincipalType string     `json:"principalType"` // user | group
-	PrincipalID   string     `json:"principalId"`
-	ClusterID     string     `json:"clusterId,omitempty"`
-	Namespaces    string     `json:"namespaces"`              // JSON array
-	Permissions   string     `json:"permissions"`             // JSON array
-	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	CreatedBy     string     `json:"createdBy,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	ID              string     `json:"id"`
+	PrincipalType   string     `json:"principalType"` // user | group
+	PrincipalID     string     `json:"principalId"`
+	ClusterID       string     `json:"clusterId,omitempty"`
+	ScopeType       string     `json:"scopeType"`
+	ResourceProfile string     `json:"resourceProfile"`
+	Namespaces      string     `json:"namespaces"`  // JSON array
+	Permissions     string     `json:"permissions"` // JSON array
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	CreatedBy       string     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 // ApiToken 是产品内用户的持久化 API Token（P3.11）。
@@ -213,18 +217,19 @@ type Attachment struct {
 // CreatedBy 必须由写入方显式带：扫描任务是进程内对象、没有 owner 列可继承，重启后 Web
 // 仍要能按归属列出历史报告。Available 由对账维护，false 时列表可见但下载返回 410。
 type Report struct {
-	ID        string    `json:"id"`
-	ClusterID string    `json:"clusterId,omitempty"`
-	ScanID    string    `json:"scanId,omitempty"`
-	Kind      string    `json:"kind"`
-	BlobKey   string    `json:"-"`
-	MediaType string    `json:"mediaType,omitempty"`
-	Size      int64     `json:"size"`
-	SHA256    string    `json:"sha256"`
-	Findings  int64     `json:"findings"`
-	CreatedBy string    `json:"createdBy,omitempty"`
-	Available bool      `json:"available"`
-	CreatedAt time.Time `json:"createdAt"`
+	CoverageLevel int       `json:"-"`
+	ID            string    `json:"id"`
+	ClusterID     string    `json:"clusterId,omitempty"`
+	ScanID        string    `json:"scanId,omitempty"`
+	Kind          string    `json:"kind"`
+	BlobKey       string    `json:"-"`
+	MediaType     string    `json:"mediaType,omitempty"`
+	Size          int64     `json:"size"`
+	SHA256        string    `json:"sha256"`
+	Findings      int64     `json:"findings"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+	Available     bool      `json:"available"`
+	CreatedAt     time.Time `json:"createdAt"`
 	// ScopeKind / ScopeValue 是体检范围（cluster|namespace|pod 与取值，P8.13）。
 	// 空串表示 v8 之前入库的存量报告，页面显示「未记录」；两者只用于展示与过滤。
 	ScopeKind  string `json:"scopeKind,omitempty"`

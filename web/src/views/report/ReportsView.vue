@@ -14,7 +14,7 @@ import {
   View,
 } from '@element-plus/icons-vue'
 
-import { myScope } from '@/api/auth'
+import {useClusterAccess} from '@/composables/useClusterAccess'
 import { listClusters } from '@/api/clusters'
 import {
   cleanupReports,
@@ -43,7 +43,7 @@ import {
 } from '@/api/scans'
 import type {
   Cluster,
-  EffectiveScope,
+
   ReportOverview,
   ReportView,
   ScanJob,
@@ -90,7 +90,8 @@ const canSeeStorage = computed(() => hasPermission(permissionsOf(auth.role), PER
 const canScan = computed(() => hasPermission(permissionsOf(auth.role), PERM.scanExecute))
 
 /** 「全集群」的可见性与后端同一判据：角色持全域权限 `*`（不是"看起来像管理员"）。 */
-const canClusterScope = computed(() => hasPermission(permissionsOf(auth.role), '*'))
+const {clusters:targets,target,rules,refresh:refreshTargets}=useClusterAccess()
+const canClusterScope=computed(()=>rules.value.some(r=>r.scopeType==='cluster'&&r.actions.includes('read'))&&['read','logs'].every(a=>rules.value.some(r=>r.namespaces?.includes('*')&&r.actions.includes(a))))
 
 const KIND_LABELS: Record<string, string> = {
   'latest-md': '体检报告',
@@ -470,7 +471,7 @@ async function copyPresign(): Promise<void> {
 }
 
 /** 只有 s3 后端有直连能力；其余后端不显示这个按钮，省得点了才知道不支持。 */
-const canPresign = computed(() => health.value?.driver === 's3' && health.value?.ready === true)
+const canPresign = computed(() => false)
 
 // ------------------------------------------------------- 发起体检（P8.13）
 
@@ -484,8 +485,7 @@ const scanPreset = ref<ScanPreset>('standard')
 const scanFormat = ref<ScanFormat>('json')
 
 /** 自己的授权范围只用来填下拉候选；真正的判定在后端，拉不到也不该拦住发起。 */
-const scopeInfo = ref<EffectiveScope | null>(null)
-const namespaceOptions = computed(() => scopeInfo.value?.namespaces ?? [])
+const namespaceOptions=computed(()=>[...new Set(rules.value.flatMap(r=>r.namespaces??[]))].filter(n=>n!=='*'))
 
 const activeJob = ref<ScanJob | null>(null)
 const activePreset = ref('')
@@ -610,12 +610,7 @@ function stopPolling(): void {
 }
 
 async function loadScope(): Promise<void> {
-  try {
-    scopeInfo.value = await myScope()
-  } catch {
-    // 只影响候选列表：管理员可以直接输入，普通用户仍可手输名字，后端照样逐次判定。
-    scopeInfo.value = null
-  }
+  await refreshTargets()
   if (!scanNamespace.value && namespaceOptions.value.length === 1) {
     scanNamespace.value = namespaceOptions.value[0]
   }
@@ -623,12 +618,13 @@ async function loadScope(): Promise<void> {
 
 function openScanDialog(): void {
   scanOpen.value = true
-  if (!namespaceOptions.value.length && !canClusterScope.value) {
+  {
     void loadScope()
   }
 }
 
 function submitScan(): void {
+  if(!target.value){ElMessage.warning('请选择已授权集群');return}
   const ns = scanNamespace.value.trim()
   const pod = scanPod.value.trim()
   if (scanScope.value !== 'cluster' && !ns) {
@@ -643,9 +639,8 @@ function submitScan(): void {
   void (async () => {
     try {
       const job = await createScan({
-        scope: scanScope.value,
-        namespace: ns,
-        pod,
+        scope:scanScope.value,clusterId:target.value,
+        namespace:scanScope.value==='cluster'?'':ns,pod:scanScope.value==='pod'?pod:'',
         preset: scanPreset.value,
         format: scanFormat.value,
       })
@@ -1083,6 +1078,7 @@ onBeforeUnmount(stopPolling)
 
     <el-dialog v-model="scanOpen" title="开始体检" width="540px" top="6vh">
       <div class="scan-form">
+        <label>目标集群 <el-select v-model="target" @change="scanNamespace='';scanScope='namespace'"><el-option v-for="c in targets" :key="c.id" :value="c.id" :label="c.name"/></el-select></label>
         <div class="field">
           <span class="field-label">体检维度</span>
           <el-radio-group v-model="scanScope">

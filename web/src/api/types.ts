@@ -95,7 +95,6 @@ export interface LoginRequest {
 }
 
 export interface LoginResponse {
-  token: string
   expiresAt: string
   user: AuthUser
 }
@@ -313,6 +312,8 @@ export interface UpdateUserRequest {
 
 /** namespace 授权/销毁委派（后端 authz.Grant；不含任何敏感实体）。 */
 export interface AuthzGrant {
+  scopeType?:string
+ actions?:string[]
   id: string
   principalType: GrantPrincipalType
   principalId: string
@@ -327,22 +328,14 @@ export interface AuthzGrant {
 
 /** POST /api/v1/grants 请求体（authz.CreateGrantRequest）。 */
 export interface CreateGrantRequest {
-  principalType: GrantPrincipalType
-  principalId: string
-  clusterId?: string
-  namespaces: string[]
-  permissions: string[]
-  expiresAt?: string
+ userId:string
+ clusterId:string
+ scopeType:string
+ namespaces:string[]
+ actions:string[]
+ expiresAt?:string|null
 }
-
-/** PATCH /api/v1/grants/{id} 部分更新请求体（authz.UpdateGrantRequest；
- * expiresAt 省略表示保持原值）。 */
-export interface UpdateGrantRequest {
-  clusterId?: string
-  namespaces?: string[]
-  permissions?: string[]
-  expiresAt?: string
-}
+export type UpdateGrantRequest=Partial<CreateGrantRequest>
 
 /** 用户 API Token 元数据（authz.Token；TokenHash 永不回传）。 */
 export interface ApiToken {

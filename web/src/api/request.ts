@@ -54,8 +54,9 @@ export class ApiRequestError extends Error {
   }
 }
 
-export function readToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+export function addCsrfHeader(headers: Headers): void {
+  const cookie = document.cookie.split('; ').find((v) => v.startsWith('__Host-aegisops_csrf=') || v.startsWith('aegisops_dev_csrf='))
+  if (cookie) headers.set('X-CSRF-Token', cookie.slice(cookie.indexOf('=') + 1))
 }
 
 export function readStoredUser<T>(): T | null {
@@ -70,8 +71,8 @@ export function readStoredUser<T>(): T | null {
   }
 }
 
-export function saveSession(token: string, user: unknown): void {
-  localStorage.setItem(TOKEN_KEY, token)
+export function saveSession(user: unknown): void {
+  localStorage.removeItem(TOKEN_KEY)
   localStorage.setItem(USER_KEY, JSON.stringify(user))
 }
 
@@ -150,10 +151,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<A
   } else if (formData === undefined && body !== undefined) {
     headers.set('Content-Type', 'application/json')
   }
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+  if (method !== 'GET') addCsrfHeader(headers)
 
   const init: RequestInit = { method, headers }
   if (rawBody !== undefined) {

@@ -5,6 +5,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,12 +33,13 @@ import (
 
 // Options configure cluster access.
 type Options struct {
-	Kubeconfig string
-	Context    string
-	InCluster  bool
-	Timeout    time.Duration
-	QPS        float32
-	Burst      int
+	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
+	Kubeconfig   string
+	Context      string
+	InCluster    bool
+	Timeout      time.Duration
+	QPS          float32
+	Burst        int
 }
 
 // Client implements scanner.Reader with a typed read-only clientset.
@@ -97,7 +99,7 @@ func NewRESTConfig(opts Options) (*rest.Config, error) {
 }
 
 func buildRESTConfig(opts Options) (*rest.Config, error) {
-	if opts.InCluster || os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+	if opts.Kubeconfig == "" && (opts.InCluster || os.Getenv("KUBERNETES_SERVICE_HOST") != "") {
 		rc, err := rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("in-cluster config: %w", err)
@@ -123,7 +125,22 @@ func buildRESTConfig(opts Options) (*rest.Config, error) {
 	return rc, nil
 }
 
+type checkedTransport struct {
+	next  http.RoundTripper
+	check func(*http.Request) error
+}
+
+func (t checkedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := t.check(r); err != nil {
+		return nil, err
+	}
+	return t.next.RoundTrip(r)
+}
+
 func applyLimits(rc *rest.Config, opts Options) {
+	if opts.RequestCheck != nil {
+		rc.Wrap(func(next http.RoundTripper) http.RoundTripper { return checkedTransport{next, opts.RequestCheck} })
+	}
 	rc.QPS = 20
 	rc.Burst = 40
 	rc.Timeout = 30 * time.Second

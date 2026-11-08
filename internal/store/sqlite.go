@@ -44,18 +44,18 @@ func (st *userStore) Create(ctx context.Context, u *User) error {
 		u.UpdatedAt = now
 	}
 	_, err := st.s.db.ExecContext(ctx, `
-		INSERT INTO users (id, username, display_name, password_hash, role_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.ID, u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.CreatedAt, u.UpdatedAt)
+		INSERT INTO users (id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.Email, u.SessionVersion, u.CreatedAt, u.UpdatedAt)
 	return mapErr(err, "create user")
 }
 
 func (st *userStore) Get(ctx context.Context, id string) (*User, error) {
 	u := &User{}
 	err := st.s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
+		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
 		FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, mapErr(err, "get user")
 	}
@@ -65,9 +65,9 @@ func (st *userStore) Get(ctx context.Context, id string) (*User, error) {
 func (st *userStore) GetByUsername(ctx context.Context, username string) (*User, error) {
 	u := &User{}
 	err := st.s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
+		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
 		FROM users WHERE username = ?`, username).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, mapErr(err, "get user by username")
 	}
@@ -75,20 +75,12 @@ func (st *userStore) GetByUsername(ctx context.Context, username string) (*User,
 }
 
 func (st *userStore) Update(ctx context.Context, u *User) error {
-	u.UpdatedAt = time.Now()
-	res, err := st.s.db.ExecContext(ctx, `
-		UPDATE users SET username=?, display_name=?, password_hash=?, role_id=?, status=?, updated_at=?
-		WHERE id=?`,
-		u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.UpdatedAt, u.ID)
-	if err != nil {
-		return fmt.Errorf("update user: %w", err)
-	}
-	return ensureAffected(res, "update user")
+	return st.updateUser(ctx, u)
 }
 
 func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
+		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
 		FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -97,7 +89,7 @@ func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	var out []*User
 	for rows.Next() {
 		u := &User{}
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		out = append(out, u)
@@ -864,9 +856,9 @@ func (st *authzGrantStore) Create(ctx context.Context, g *AuthzGrant) error {
 	}
 	_, err := st.s.db.ExecContext(ctx, `
 		INSERT INTO authz_grants
-			(id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		g.ID, g.PrincipalType, g.PrincipalID, g.ClusterID, g.Namespaces, g.Permissions,
+			(id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		g.ID, g.PrincipalType, g.PrincipalID, g.ClusterID, g.ScopeType, g.ResourceProfile, g.Namespaces, g.Permissions,
 		nilTime(g.ExpiresAt), g.CreatedBy, g.CreatedAt, g.UpdatedAt)
 	return mapErr(err, "create authz grant")
 }
@@ -874,7 +866,7 @@ func (st *authzGrantStore) Create(ctx context.Context, g *AuthzGrant) error {
 func scanAuthzGrant(scanner interface{ Scan(...any) error }) (*AuthzGrant, error) {
 	g := &AuthzGrant{}
 	var expires sql.NullTime
-	if err := scanner.Scan(&g.ID, &g.PrincipalType, &g.PrincipalID, &g.ClusterID,
+	if err := scanner.Scan(&g.ID, &g.PrincipalType, &g.PrincipalID, &g.ClusterID, &g.ScopeType, &g.ResourceProfile,
 		&g.Namespaces, &g.Permissions, &expires, &g.CreatedBy, &g.CreatedAt, &g.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -886,7 +878,7 @@ func scanAuthzGrant(scanner interface{ Scan(...any) error }) (*AuthzGrant, error
 
 func (st *authzGrantStore) Get(ctx context.Context, id string) (*AuthzGrant, error) {
 	row := st.s.db.QueryRowContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants WHERE id = ?`, id)
 	g, err := scanAuthzGrant(row)
 	if err != nil {
@@ -898,9 +890,9 @@ func (st *authzGrantStore) Get(ctx context.Context, id string) (*AuthzGrant, err
 func (st *authzGrantStore) Update(ctx context.Context, g *AuthzGrant) error {
 	g.UpdatedAt = time.Now()
 	res, err := st.s.db.ExecContext(ctx, `
-		UPDATE authz_grants SET principal_type=?, principal_id=?, cluster_id=?, namespaces=?, permissions=?, expires_at=?, created_by=?, updated_at=?
+		UPDATE authz_grants SET principal_type=?, principal_id=?, cluster_id=?, scope_type=?, resource_profile=?, namespaces=?, permissions=?, expires_at=?, created_by=?, updated_at=?
 		WHERE id=?`,
-		g.PrincipalType, g.PrincipalID, g.ClusterID, g.Namespaces, g.Permissions,
+		g.PrincipalType, g.PrincipalID, g.ClusterID, g.ScopeType, g.ResourceProfile, g.Namespaces, g.Permissions,
 		nilTime(g.ExpiresAt), g.CreatedBy, g.UpdatedAt, g.ID)
 	if err != nil {
 		return fmt.Errorf("update authz grant: %w", err)
@@ -910,7 +902,7 @@ func (st *authzGrantStore) Update(ctx context.Context, g *AuthzGrant) error {
 
 func (st *authzGrantStore) List(ctx context.Context) ([]*AuthzGrant, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list authz grants: %w", err)
@@ -929,7 +921,7 @@ func (st *authzGrantStore) List(ctx context.Context) ([]*AuthzGrant, error) {
 
 func (st *authzGrantStore) ListByPrincipal(ctx context.Context, principalType, principalID string) ([]*AuthzGrant, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants WHERE principal_type=? AND principal_id=? ORDER BY created_at`, principalType, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("list authz grants by principal: %w", err)

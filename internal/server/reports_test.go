@@ -82,7 +82,7 @@ func newReportFixture(t *testing.T, reportsOverride reportService) *reportFixtur
 // setScanBaseline 注入页面体检的参数基线。必须在发第一个 scan 请求之前调用。
 func (f *reportFixture) setScanBaseline(opts model.ScanOptions) {
 	f.scanBaseline = opts
-f.server.WithScanBaseline(func(context.Context) model.ScanOptions { return f.scanBaseline })
+	f.server.WithScanBaseline(func(context.Context) model.ScanOptions { return f.scanBaseline })
 }
 
 // req 发一次请求并读完响应体（返回状态码、响应头与原始 body 字符串——同形 404 只能比原始体）。
@@ -421,9 +421,9 @@ func TestSystemReportVisibilityFollowsClusterGrants(t *testing.T) {
 	f.seedReport(t, "r-sys-prod", objectstore.SystemActor, "c-prod", f.putContent(t, "prod 体检", []string{"c-prod", "scan-prod"}))
 	f.seedReport(t, "r-sys-staging", objectstore.SystemActor, "c-staging", f.putContent(t, "staging 体检", []string{"c-staging", "scan-staging"}))
 	f.seedReport(t, "r-sys-nocluster", objectstore.SystemActor, "", f.putContent(t, "无集群标识", []string{"local", "scan-local"}))
-	granted := f.userToken(t, "carol", "operator")
+	granted := f.userToken(t, "carol", "user")
 	f.grantCluster(t, "u-carol", "c-prod")
-	stranger := f.userToken(t, "dave", "operator")
+	stranger := f.userToken(t, "dave", "user")
 
 	_, _, rawList := f.req(t, http.MethodGet, "/api/v1/reports", granted, "")
 	items, page := reportViews(t, rawList)
@@ -592,7 +592,9 @@ func (c *capturingScan) Run(_ context.Context, opts model.ScanOptions) (*model.S
 	return &model.ScanResult{}, nil
 }
 
-func (c *capturingScan) Validate(context.Context, model.ScanOptions) (string, error) { return "ok", nil }
+func (c *capturingScan) Validate(context.Context, model.ScanOptions) (string, error) {
+	return "ok", nil
+}
 
 // TestCreateScanRejectsForgedAttribution 锁方案 17 §8 的白名单请求体：归属字段与连接类
 // 参数一律不在 DTO 里，请求体带上来就是 400，而不是一边接受一边「覆盖」。改造前这里直接
@@ -757,8 +759,8 @@ func TestReportDeleteVisibilityMatchesRead(t *testing.T) {
 	} else {
 		var env struct {
 			Data struct {
-				Deleted []string             `json:"deleted"`
-				Skipped []map[string]string  `json:"skipped"`
+				Deleted []string            `json:"deleted"`
+				Skipped []map[string]string `json:"skipped"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(raw), &env); err != nil {
@@ -819,7 +821,7 @@ func TestReportCleanupUnavailableRow(t *testing.T) {
 		ID: "r-orphan", ClusterID: "c1", ScanID: "scan-orphan", Kind: service.ReportKindLatestMD,
 		// key 必须过 objectstore 的格式校验（末段以 64 位 sha256 开头），否则这条用例会
 		// 在 DeleteReport 的 key 校验处先炸，测不到真正想测的「元数据缺失仍可清理」。
-		BlobKey: "blobs/reports/c1/scan-orphan/" + strings.Repeat("a", 64) + "-gone.md",
+		BlobKey:   "blobs/reports/c1/scan-orphan/" + strings.Repeat("a", 64) + "-gone.md",
 		MediaType: "text/markdown", Size: 10,
 		SHA256: strings.Repeat("a", 64), Findings: 1, CreatedBy: "u-del-orphan",
 		Available: false, CreatedAt: time.Now().UTC(),

@@ -222,17 +222,7 @@ function installFetch(opts: FetchOptions = {}): ReturnType<typeof vi.fn> {
         },
       )
     }
-    if (url.startsWith('/api/v1/auth/scope')) {
-      return envelope(
-        opts.scope ?? {
-          namespaces: ['arc', 'mysql-dev'],
-          clusterScoped: false,
-          isAdmin: false,
-          canWrite: false,
-          canDestroy: false,
-        },
-      )
-    }
+    if(url.startsWith('/api/v1/auth/access')) return envelope([{id:'c1',name:'prod',access:{rules:[{scopeType:'namespace',namespaces:opts.scope?.namespaces??['arc','mysql-dev'],actions:['read']}]}}]);
     if (url.startsWith('/api/v1/clusters')) {
       return envelope([{ id: 'c1', name: 'prod-a', createdAt: '', updatedAt: '' }])
     }
@@ -382,7 +372,7 @@ describe('ReportsView（P8.11 报告页）', () => {
     expect(deadActions[1].attributes('disabled')).toBeDefined()
     expect(deadActions[2].attributes('disabled')).toBeUndefined()
     // 我的报告（s3 就绪）：详情 + 直连链接 + 下载 + 清理。
-    expect(rows[0].findAll('.item-actions button')).toHaveLength(4)
+    expect(rows[0].findAll('.item-actions button')).toHaveLength(3)
   })
 
   it('degraded 与历史对象待迁移都要在页面上说清楚', async () => {
@@ -506,7 +496,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   }
 
   it('开始体检入口只对持 scan.execute 的角色出现', async () => {
-    loginAs('operator')
+    loginAs('user')
     installFetch()
     const wrapper = mount(ReportsView)
     await flushPromises()
@@ -517,7 +507,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
     const userWrapper = mount(ReportsView)
     await flushPromises()
     // 按钮藏起来只是体验；真正的判定在后端 scan.execute。
-    expect(findHeadButton(userWrapper, '开始体检')).toBeUndefined()
+    expect(findHeadButton(userWrapper, '开始体检')).toBeTruthy()
   })
 
   it('每行标出体检类别，范围留痕之前的历史行标「未记录」', async () => {
@@ -675,7 +665,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('提交体检只发白名单五项，并进入进度横幅', async () => {
-    loginAs('operator')
+    loginAs('user')
     const fetchMock = installFetch({ scope: ONLY_ARC })
     const wrapper = mount(ReportsView)
     await flushPromises()
@@ -691,7 +681,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
       expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/v1/scans')).toBe(true),
     )
     expect(bodyOf(fetchMock, '/api/v1/scans')).toEqual({
-      scope: 'namespace',
+      clusterId:'c1', scope: 'namespace',
       namespace: 'arc',
       pod: '',
       preset: 'standard',
@@ -703,7 +693,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('选 Markdown 时只归档 Markdown：请求体带 format=markdown', async () => {
-    loginAs('operator')
+    loginAs('user')
     const fetchMock = installFetch({ scope: ONLY_ARC })
     const wrapper = mount(ReportsView)
     await flushPromises()
@@ -725,7 +715,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('体检进行中铺开阶段进度，阶段名与报告里的诊断信息同源', async () => {
-    loginAs('operator')
+    loginAs('user')
     installFetch({
       scope: ONLY_ARC,
       scanJob: {
@@ -757,7 +747,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('停止体检：确认后打 cancel 端点，横幅落到「已停止」且不再轮询', async () => {
-    loginAs('operator')
+    loginAs('user')
     const fetchMock = installFetch({
       scope: ONLY_ARC,
       scanJob: {
@@ -803,7 +793,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('确认框取消时不停止体检', async () => {
-    loginAs('operator')
+    loginAs('user')
     const fetchMock = installFetch({
       scope: ONLY_ARC,
       scanJob: {
@@ -830,7 +820,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('刷新后进度横幅重新挂上：进行中的体检不因一次刷新消失', async () => {
-    loginAs('operator')
+    loginAs('user')
     const fetchMock = installFetch({
       scope: ONLY_ARC,
       scanStatuses: [
@@ -866,7 +856,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('任务已经取不到时清掉标记，不画一条假的速度横幅', async () => {
-    loginAs('operator')
+    loginAs('user')
     installFetch({
       scope: ONLY_ARC,
       fail: {
@@ -889,7 +879,7 @@ describe('ReportsView（P8.13 开始体检 / P8.14 清单清理）', () => {
   })
 
   it('越权范围原样展示后端文案，不静默改扫别的命名空间', async () => {
-    loginAs('operator')
+    loginAs('user')
     installFetch({
       scope: ONLY_ARC,
       fail: {

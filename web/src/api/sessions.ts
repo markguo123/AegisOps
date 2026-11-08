@@ -6,10 +6,12 @@
  */
 
 import type { AgentToken } from './sse'
-import { readToken } from './request'
+import { addCsrfHeader } from './request'
 
 /** 列表项，与服务端 handleListSessions 返回字段一一对应。 */
 export interface SessionSummary {
+  clusterId?:string
+  ownerId?:string
   id: string
   name: string
   state: string
@@ -64,10 +66,7 @@ async function sessionFetch<T>(url: string, init: RequestInit = {}): Promise<T> 
   }
   // 会话端点在四期平台进程下同样受鉴权保护：带 Bearer 令牌，
   // 三期 webui（无鉴权）会忽略该头，行为不变。
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+  if (init.method && init.method !== 'GET') addCsrfHeader(headers)
   const response = await fetch(url, { ...init, headers })
   const text = await response.text()
   let data: unknown = null
@@ -96,7 +95,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 }
 
 /** 创建新会话；若传 id 则等同“恢复/获取”该会话。 */
-export async function createSession(payload: { id?: string; name?: string } = {}): Promise<SessionDetail> {
+export async function createSession(payload: { id?: string; name?: string; clusterId?:string } = {}): Promise<SessionDetail> {
   return sessionFetch<SessionDetail>('/api/v1/sessions', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -146,10 +145,10 @@ export async function cancelRun(id: string): Promise<{ sessionId: string }> {
 }
 
 /** 回传审批选择（webui `POST /api/v1/sessions/{id}/approve`）。choice 不写回响应体。 */
-export async function approveRun(id: string, choice: string): Promise<{ sessionId: string }> {
+export async function approveRun(id: string, choice: string, approvalId?:string): Promise<{ sessionId: string }> {
   return sessionFetch<{ sessionId: string }>(
     `/api/v1/sessions/${encodeURIComponent(id)}/approve`,
-    { method: 'POST', body: JSON.stringify({ choice }) },
+    { method: 'POST', body: JSON.stringify({ choice,approvalId }) },
   )
 }
 

@@ -13,6 +13,7 @@ import copyText from '@/composables/useClipboard'
  */
 
 export interface ApprovalUiData {
+ id?:string
   key: string
   title?: string
   operation?: string
@@ -61,8 +62,8 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  (e: 'approve', value: string): void
-  (e: 'reject'): void
+  (e: 'approve', value: string,id?:string): void
+  (e: 'reject',id?:string): void
 }>()
 
 const secretValue = ref('')
@@ -164,13 +165,13 @@ function resolveSecret(optionValue: string): string {
 
 function approve(option: { label: string; value: string }): void {
   const value = props.approval.secret ? resolveSecret(option.value) : option.value
-  emit('approve', value)
+  if(props.approval.id) emit('approve',value,props.approval.id);else emit('approve',value)
   // 值不入流，提交后即清空。
   secretValue.value = ''
 }
 
 function reject(): void {
-  emit('reject')
+  if(props.approval.id) emit('reject',props.approval.id);else emit('reject')
   secretValue.value = ''
 }
 </script>

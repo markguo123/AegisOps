@@ -58,6 +58,9 @@ func ParseKubeconfig(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse kubeconfig: %w", err)
 	}
+	if err := validatePortable(cfg); err != nil {
+		return nil, err
+	}
 	ctxName := cfg.CurrentContext
 	if ctxName == "" {
 		for name := range cfg.Contexts {

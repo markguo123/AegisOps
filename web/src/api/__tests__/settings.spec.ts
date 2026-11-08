@@ -86,7 +86,7 @@ describe('settings API（P3.9/P3.10 前端契约）', () => {
     expect(init.method).toBe('PATCH')
     expect(JSON.parse(init.body as string)).toEqual({ 'model.provider': 'azure' })
     const headers = init.headers as Headers
-    expect(headers.get('Authorization')).toBe('Bearer tok-demo')
+    expect(headers.get('Authorization')).toBeNull()
     expect(view.group).toBe('model')
   })
 

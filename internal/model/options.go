@@ -4,7 +4,9 @@ package model
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -148,6 +150,7 @@ type LogOptions struct {
 // ScanOptions is the CLI/Server/CronJob-shared execution contract passed to
 // service.ScanService.Run.
 type ScanOptions struct {
+	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
 	// Kubernetes connection.
 	Kubeconfig string
 	Context    string
@@ -264,6 +267,8 @@ type ReportOptions struct {
 // Server 侧必须在解码请求体之后无条件覆盖这三个字段：它们由登录态与任务 ID 决定，
 // 让请求体里的值漏进来就等于允许调用方伪造报告归属、把报告挂到别人名下。
 type ReportAttribution struct {
+	CoverageLevel int
+	Recheck       func(context.Context) error `json:"-"`
 	// Actor 是触发扫描的用户 ID；空 = 系统任务。
 	Actor string
 	// ClusterID 是本次扫描的目标集群 ID；空表示走 kubeconfig 默认目标。

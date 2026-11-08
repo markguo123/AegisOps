@@ -131,10 +131,10 @@ func (t *Tx) InsertReport(ctx context.Context, r *Report) error {
 		r.CreatedAt = time.Now()
 	}
 	_, err := t.tx.ExecContext(ctx, `
-		INSERT INTO reports (id, cluster_id, scan_id, kind, blob_key, media_type, size, sha256, findings, created_by, available, created_at, scope_kind, scope_value)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO reports (id, cluster_id, scan_id, kind, blob_key, media_type, size, sha256, findings, created_by, available, created_at, scope_kind, scope_value,coverage_level)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)`,
 		r.ID, r.ClusterID, r.ScanID, r.Kind, r.BlobKey, r.MediaType, r.Size, r.SHA256,
-		r.Findings, r.CreatedBy, boolInt(r.Available), r.CreatedAt, r.ScopeKind, r.ScopeValue)
+		r.Findings, r.CreatedBy, boolInt(r.Available), r.CreatedAt, r.ScopeKind, r.ScopeValue, r.CoverageLevel)
 	return mapErr(err, "insert report")
 }
 

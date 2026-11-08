@@ -106,11 +106,7 @@ func TestBootstrapCanonicalizesRoles(t *testing.T) {
 		byName[role.Name] = role
 	}
 	byName[RoleUser].Permissions = []string{"chat.read", "cluster.read"}
-	byName[RoleOperator].Permissions = []string{"chat.write", "cluster.manage"}
 	if err := st.Roles().Update(ctx, byName[RoleUser]); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Roles().Update(ctx, byName[RoleOperator]); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Roles().Create(ctx, &store.Role{
@@ -130,12 +126,8 @@ func TestBootstrapCanonicalizesRoles(t *testing.T) {
 	for _, role := range roles {
 		switch role.Name {
 		case RoleUser:
-			if len(role.Permissions) != 0 {
-				t.Fatalf("%s permissions = %v, want zero", role.Name, role.Permissions)
-			}
-		case RoleOperator:
 			// 手工塞进去的 chat.write/cluster.manage 必须被抹掉，只留发起体检权。
-			if len(role.Permissions) != 1 || role.Permissions[0] != permission.ScanExecute {
+			if len(role.Permissions) != 2 || role.Permissions[0] != permission.ScanExecute || role.Permissions[1] != permission.SkillRead {
 				t.Fatalf("%s permissions = %v, want [%s]",
 					role.Name, role.Permissions, permission.ScanExecute)
 			}
@@ -145,8 +137,8 @@ func TestBootstrapCanonicalizesRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(visible) != 3 {
-		t.Fatalf("ListRoles len = %d, want 3", len(visible))
+	if len(visible) != 2 {
+		t.Fatalf("ListRoles len = %d, want 2", len(visible))
 	}
 }
 
@@ -166,10 +158,10 @@ func TestListRolesSelfHealsCanonicalRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roles) != 3 {
-		t.Fatalf("ListRoles len = %d, want 3: %+v", len(roles), roles)
+	if len(roles) != 2 {
+		t.Fatalf("ListRoles len = %d, want 2: %+v", len(roles), roles)
 	}
-	for i, want := range []string{RoleUser, RoleOperator, RoleAdmin} {
+	for i, want := range []string{RoleUser, RoleAdmin} {
 		if roles[i].Name != want {
 			t.Fatalf("ListRoles[%d] = %s, want %s", i, roles[i].Name, want)
 		}

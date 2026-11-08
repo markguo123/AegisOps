@@ -20,8 +20,7 @@ import MessageTimeline from '@/components/chat/MessageTimeline.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
 import TokenUsageBadge from '@/components/chat/TokenUsageBadge.vue'
 import TechEmptyState from '@/components/TechEmptyState.vue'
-import { myScope } from '@/api/auth'
-import type { EffectiveScope } from '@/api/types'
+import {useClusterAccess} from '@/composables/useClusterAccess'
 import { buildSessionMarkdown, markdownFileName } from '@/utils/exportMarkdown'
 import { useChatStream, type StreamStatus } from '@/composables/useChatStream'
 import { useAuthStore } from '@/stores/auth'
@@ -40,7 +39,7 @@ const input = ref('')
 const sending = ref(false)
 const composerRef = ref<InstanceType<typeof ComposerBox> | null>(null)
 const auth = useAuthStore()
-const accessScope = ref<EffectiveScope | null>(null)
+const {clusters,target,refresh:loadScope}=useClusterAccess()
 
 const CONVERSATIONS_KEY = 'aegisops_conversations_collapsed'
 const conversationsCollapsed = ref(localStorage.getItem(CONVERSATIONS_KEY) === '1')
@@ -99,40 +98,13 @@ const showScopeWelcome = computed(() => {
 })
 
 const scopeWelcome = computed(() => {
-  const scope = accessScope.value
-  if (!scope) {
-    return null
-  }
-  if (scope.isAdmin || scope.clusterScoped) {
-    return {
-      title: '当前授权范围：全集群，平台允许发起修复',
-      hint:
-        '你可以查询全部命名空间，以及 Node、PV、StorageClass 等集群级资源；写操作仍会经过审批。',
-      tags: ['全部命名空间', '集群级资源', '平台可写'],
-    }
-  }
-  if (scope.namespaces.length === 0) {
-    return {
-      title: '当前尚未获得命名空间授权',
-      hint: '请联系管理员完成 namespace 授权。授权生效前无法查询或修改集群资源。',
-      tags: ['只读诊断'],
-    }
-  }
-  const canWrite = scope.canWrite
-  return {
-    title: `当前授权范围：${scope.namespaces.length} 个命名空间${canWrite ? '，平台允许发起修复' : '，只读诊断'}`,
-    hint:
-      canWrite
-        ? '你可以查询以下命名空间内的工作负载、Pod、事件、日志；修复操作仍需要审批，集群 RBAC 也必须允许。' +
-          '其他命名空间及 Node、PV、StorageClass 等集群级资源需要管理员单独授权。'
-        : '你可以查询以下命名空间内的工作负载、Pod、事件、日志并生成修复建议；当前没有可用的写权限。' +
-          '其他命名空间及 Node、PV、StorageClass 等集群级资源需要管理员单独授权。',
-    tags: [...scope.namespaces, canWrite ? '平台可写' : '只读诊断'],
-  }
+  const c=clusters.value.find(c=>c.id===activeSession.value?.clusterId)
+  return {title:c?'授权集群：'+c.name:'没有可用的集群授权',hint:'集群对象与命名空间分别授权，写操作需要确认。',tags:c?.access.rules.map(r=>(r.scopeType==='cluster'?'集群对象':r.namespaces?.join('、'))+'：'+r.actions.join('、'))??[]}
+
 })
 
 /** P2.9 审批操作显隐：只读角色不展示审批按钮（后端仍独立强校验）。 */
-const canDecide = computed(() => canDecideApproval(auth.role))
+const canDecide = computed(() => canDecideApproval(auth.role) && activeSession.value?.ownerId===auth.user?.userId)
 
 /** P3.8.4 @ 技能引用权限：仅具备 skill.read 时开启提示与回填。 */
 const canUseSkills = computed(() => hasPermission(permissionsOf(auth.role), PERM.skillRead))
@@ -204,13 +176,7 @@ async function loadSessions(): Promise<void> {
   }
 }
 
-async function loadScope(): Promise<void> {
-  try {
-    accessScope.value = await myScope()
-  } catch {
-    accessScope.value = null
-  }
-}
+
 
 function selectSession(id: string): void {
   mobileDrawerOpen.value = false
@@ -241,7 +207,8 @@ function handleReconnect(): void {
 async function handleCreate(): Promise<void> {
   try {
     await loadScope()
-    const session = await createSession()
+    if(!target.value){ElMessage.warning('请先选择已授权集群；无可选项时请联系管理员');return}
+    const session = await createSession({clusterId:target.value})
     activeId.value = session.id
     sessionStorage.setItem(ACTIVE_SESSION_KEY, session.id)
     await loadSessions()
@@ -345,21 +312,21 @@ function handleStop(): void {
 }
 
 /** 审批回传：把用户选择回传给服务端。 */
-function handleApprove(value: string): void {
+function handleApprove(value: string,id?:string): void {
   if (!activeId.value) {
     return
   }
-  void approveRun(activeId.value, value).catch((error) => {
+  void approveRun(activeId.value, value,id).catch((error) => {
     ElMessage.error(error instanceof Error ? error.message : '审批回传失败')
   })
 }
 
 /** 审批拒绝：与旧 UI 一致，回传 `no` 作为否定选择。 */
-function handleReject(): void {
+function handleReject(id?:string): void {
   if (!activeId.value) {
     return
   }
-  void approveRun(activeId.value, 'no').catch((error) => {
+  void approveRun(activeId.value, 'no',id).catch((error) => {
     ElMessage.error(error instanceof Error ? error.message : '拒绝回传失败')
   })
 }
@@ -449,6 +416,7 @@ watch(
           aria-label="打开会话列表"
           @click="mobileDrawerOpen = true"
         />
+        <el-select v-model="target" aria-label="新会话的集群" placeholder="选择新会话的集群" style="max-width:220px"><el-option v-for="c in clusters" :key="c.id" :label="c.name" :value="c.id"/></el-select>
         <div class="chat-heading">
           <h2>{{ activeSession?.name || '未选择会话' }}</h2>
           <span v-if="activeSession" class="chat-id" :title="activeSession.id">

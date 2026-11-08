@@ -1,5 +1,15 @@
 # AegisOps 部署清单（四期 P6.2 / P6.5）
 
+## 身份权限重构验收入口
+
+当前登录网关使用 Secure Cookie。集群验收须提供浏览器可访问的 HTTPS 同源地址；仅有 HTTP NodePort 时无法完成登录/OIDC 验证。`deploy/install.sh` 现接受 `PUBLIC_URL=https://<域名>` 并写入 ConfigMap 的 `platform.server.public_url`；OIDC 回调固定为 `<PUBLIC_URL>/api/v1/auth/oidc/callback`。Ingress 清单仍需按现场证书 Secret 增加 `spec.tls`，并确保浏览器访问的域名和 `PUBLIC_URL` 一致。不要在服务端配置 `allow_loopback_http: true` 来放开集群 HTTP。
+
+在已有 `k8s-ai-test` 环境验收时，设置 `NAMESPACE=k8s-ai-test`、`INGRESS_HOST`、`PUBLIC_URL`、镜像和数据库参数，先执行 `deploy/install.sh --env-file install.env --dry-run` 检查渲染的 namespace、`public_url`、镜像和 Secret 引用，再 `--diff`。确认 MySQL 备份与旧 operator/legacy Grant 预检结果后正式安装。迁移 Job 必须成功，再检查 Deployment `/readyz`。旧库迁移若被旧授权数据阻断，先按设计方案显式处置这些授权，不要强行跳过。
+
+登录后在“用户与权限”配置企业 OIDC，IdP 登记上述精确回调；在平台先登记真实集群凭据并授予测试用户所需集群/namespace Grant，再依次验证首次登录无授权、只读体检、跨 namespace 拒绝、写操作审批、撤权后会话/报告不可读和审计。Kubernetes ServiceAccount 的实际 RBAC 仍是最终执行边界。
+
+本机也能用真实 kubeconfig 验证多数链路：以 SQLite 启动最新代码，设置 `platform.server.allow_loopback_http: true`、`public_url: ""`，仅在 `http://127.0.0.1:8080` 打开页面。此模式可测本地账号、Grant、真实集群读写/审批和报告；企业 OIDC 回调需要固定 HTTPS 地址，不能用这个 HTTP 调试入口验证。
+
 同一套后端清单支持两种部署形态，差别只在「前端由谁提供」。两种形态的 YAML **分目录存放**，
 `base/` 是两者共用的部分，`allinone/` 与 `separated/` 互斥、**只能选一个目录 apply**。
 

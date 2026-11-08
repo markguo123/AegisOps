@@ -122,7 +122,7 @@ type settingsView struct {
 // 配置中心读与写均不得越过 API 权限门禁。
 func TestSettingsAdminOnly(t *testing.T) {
 	p := newPlatformServer(t)
-	for _, role := range []string{auth.RoleUser, auth.RoleOperator} {
+	for _, role := range []string{auth.RoleUser} {
 		token := createUserWithRole(t, p, "settings-"+role, role)
 		if resp, raw := p.do(t, http.MethodGet, "/api/v1/settings/model", token, ""); resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s 读取配置应 403, got %d: %s", role, resp.StatusCode, raw)

@@ -291,5 +291,6 @@ func summarizeScanResult(result *model.ScanResult) map[string]any {
 		"history":          history,
 		"components":       components,
 		"collectionErrors": len(result.CollectionErrors),
+		"collection":       result.Collection,
 	}
 }

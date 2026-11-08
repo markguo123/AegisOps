@@ -6,6 +6,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -18,20 +19,19 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/k8s-ai/k8s-ai/internal/store"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
+	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
 // 默认角色名：平台只开放 user / operator / admin 三角色。
 const (
-	RoleAdmin    = "admin"
-	RoleUser     = "user"
-	RoleOperator = "operator"
+	RoleAdmin = "admin"
+	RoleUser  = "user"
 
 	// DefaultAdminUsername 首次初始化时创建的超级管理员用户名。
 	DefaultAdminUsername = "admin"
 	// SessionTTL 单个登录会话的有效期。
-	SessionTTL = 24 * time.Hour
+	SessionTTL = 8 * time.Hour
 
 	argonMemory  = 64 * 1024 // 64 MiB，argon2id 推荐下限
 	argonTime    = 3
@@ -57,9 +57,12 @@ type Session struct {
 }
 
 type sessionEntry struct {
-	userID    string
-	createdAt time.Time
-	expiresAt time.Time
+	source     string
+	lastActive time.Time
+	userID     string
+	version    int64
+	createdAt  time.Time
+	expiresAt  time.Time
 }
 
 // Service 是用户认证应用服务。
@@ -106,13 +109,21 @@ func (s *Service) Login(ctx context.Context, username, password string) (*Sessio
 	if err != nil {
 		return nil, err
 	}
+	return s.issue(u, "local", s.now().Add(SessionTTL))
+}
+
+func (s *Service) issue(u *store.User, source string, expires time.Time) (*Session, error) {
+	if u.Status != "active" || !s.now().Before(expires) {
+		return nil, ErrInvalidCredentials
+	}
 	now := s.now().UTC()
 	token := newSecretToken()
 	s.mu.Lock()
-	s.tokens[token] = sessionEntry{
-		userID:    u.ID,
+	s.tokens[tokenHash(token)] = sessionEntry{
+		source: source, lastActive: now, userID: u.ID,
+		version:   u.SessionVersion,
 		createdAt: now,
-		expiresAt: now.Add(SessionTTL),
+		expiresAt: expires,
 	}
 	s.mu.Unlock()
 	return &Session{
@@ -120,7 +131,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (*Sessio
 		UserID:    u.ID,
 		User:      u,
 		CreatedAt: now,
-		ExpiresAt: now.Add(SessionTTL),
+		ExpiresAt: expires,
 	}, nil
 }
 
@@ -131,27 +142,54 @@ func (s *Service) Logout(token string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.tokens[token]; !ok {
+	if _, ok := s.tokens[tokenHash(token)]; !ok {
 		return ErrInvalidToken
 	}
-	delete(s.tokens, token)
+	delete(s.tokens, tokenHash(token))
 	return nil
+}
+
+func (s *Service) revokeUser(userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, entry := range s.tokens {
+		if entry.userID == userID {
+			delete(s.tokens, token)
+		}
+	}
 }
 
 // UserByToken 依据 Token 解析当前用户与其角色。
 func (s *Service) UserByToken(ctx context.Context, token string) (*store.User, *store.Role, error) {
+	return s.userByToken(ctx, token, true)
+}
+
+func (s *Service) RecheckToken(ctx context.Context, token string) (*store.User, *store.Role, error) {
+	return s.userByToken(ctx, token, false)
+}
+
+func (s *Service) userByToken(ctx context.Context, token string, touch bool) (*store.User, *store.Role, error) {
 	if token == "" {
 		return nil, nil, ErrInvalidToken
 	}
 	s.mu.Lock()
-	e, ok := s.tokens[token]
+	e, ok := s.tokens[tokenHash(token)]
+	if ok && (!s.now().Before(e.expiresAt) || !s.now().Before(e.lastActive.Add(30*time.Minute))) {
+		delete(s.tokens, tokenHash(token))
+		s.mu.Unlock()
+		return nil, nil, ErrTokenExpired
+	}
+	if ok && touch {
+		e.lastActive = s.now()
+		s.tokens[tokenHash(token)] = e
+	}
 	s.mu.Unlock()
 	if !ok {
 		return nil, nil, ErrInvalidToken
 	}
 	if s.now().UTC().After(e.expiresAt) {
 		s.mu.Lock()
-		delete(s.tokens, token)
+		delete(s.tokens, tokenHash(token))
 		s.mu.Unlock()
 		return nil, nil, ErrTokenExpired
 	}
@@ -159,11 +197,20 @@ func (s *Service) UserByToken(ctx context.Context, token string) (*store.User, *
 	if err != nil {
 		return nil, nil, ErrInvalidToken
 	}
+	if u.Status != "active" || u.SessionVersion != e.version {
+		s.mu.Lock()
+		delete(s.tokens, tokenHash(token))
+		s.mu.Unlock()
+		return nil, nil, ErrInvalidToken
+	}
 	var role *store.Role
 	if u.RoleID != "" {
 		if r, err := s.roles.Get(ctx, u.RoleID); err == nil {
 			role = r
 		}
+	}
+	if role == nil || !allowedRoleNames[role.Name] {
+		return nil, nil, ErrInvalidToken
 	}
 	return u, role, nil
 }
@@ -190,7 +237,22 @@ func (s *Service) BootstrapWithName(ctx context.Context, adminUsername, adminPas
 		return fmt.Errorf("auth: list users: %w", err)
 	}
 	if len(existing) > 0 {
-		return s.reconcileRoles(ctx)
+		if err := s.reconcileRoles(ctx); err != nil {
+			return err
+		}
+		for _, u := range existing {
+			if u.Status != "active" || u.PasswordHash == "" {
+				continue
+			}
+			r, err := s.roles.Get(ctx, u.RoleID)
+			if err != nil {
+				return fmt.Errorf("auth: read administrator role: %w", err)
+			}
+			if r.Name == RoleAdmin {
+				return nil
+			}
+		}
+		return errors.New("auth: no active local administrator; restore an administrator through controlled recovery")
 	}
 	if strings.TrimSpace(adminPassword) == "" {
 		return errors.New("auth: first start requires an admin password (set AEGISOPS_ADMIN_PASSWORD)")
@@ -283,13 +345,7 @@ type roleDef struct {
 func defaultRoles() []roleDef {
 	return []roleDef{
 		{name: RoleAdmin, description: "管理员：全部平台权限", permissions: []string{"*"}},
-		// user 的平台权限为空。实际集群能力由 admin 授予的 namespace AuthzGrant 决定，
-		// 不能靠角色默认值预先放行；普通用户默认不给发起体检权（方案 17 §4 第 1 条）。
-		{name: RoleUser, description: "普通用户：零平台权限，按 namespace 授权使用集群能力", permissions: []string{}},
-		// operator 只多一个 scan.execute：体检发起权。它能触发的读能力仍受 namespace 授权
-		// 闸门约束（server 侧逐次判定），所以这一位不扩大任何人的可见范围，只是让「体检」
-		// 按钮对操作员可用——reconcileRoles 每次启动覆盖内置角色，这里补上就会自动补齐存量库。
-		{name: RoleOperator, description: "操作员：仅发起体检权，按 namespace 授权使用集群能力", permissions: []string{permission.ScanExecute}},
+		{name: RoleUser, description: "普通用户：在授权范围内诊断及体检", permissions: []string{permission.ScanExecute, permission.SkillRead}},
 	}
 }
 
@@ -379,10 +435,8 @@ func parseArgonParams(raw string) (memory uint32, iterations uint32, threads uin
 	return memory, iterations, threads, nil
 }
 
-func newSecretToken() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("tok-%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
+func newSecretToken() string { return rand.Text() }

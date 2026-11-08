@@ -2,10 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  CopyDocument,
   Delete,
   Edit,
-  Key,
   Lock,
   Plus,
   Refresh,
@@ -13,47 +11,43 @@ import {
   User,
 } from '@element-plus/icons-vue'
 
+import EnterpriseLoginPanel from './EnterpriseLoginPanel.vue'
 import TechEmptyState from '@/components/TechEmptyState.vue'
 import {
   createGrant,
-  createToken,
   createUser,
   deleteGrant,
-  deleteToken,
   deleteUser,
   describeUsersError,
   listGrants,
   listRoles,
-  listTokens,
   listUsers,
   updateGrant,
-  updateTokenStatus,
   updateUser,
 } from '@/api/users'
 import type {
-  ApiToken,
   AuthRole,
   AuthUser,
   AuthzGrant,
   CreateGrantRequest,
-  CreateTokenRequest,
   CreateUserRequest,
   GrantPermission,
   GrantPrincipalType,
-  UpdateGrantRequest,
   UpdateUserRequest,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 
+import {listClusters} from '@/api/clusters'
+const registered=ref<Awaited<ReturnType<typeof listClusters>>>([])
 const auth = useAuthStore()
 
-type SectionKey = 'users' | 'roles' | 'grants' | 'tokens'
+type SectionKey = 'users' | 'roles' | 'grants' | 'enterprise'
 const SECTION_META: Array<{ key: SectionKey; title: string; desc: string }> = [
   { key: 'users', title: '用户管理', desc: '账号、角色与状态' },
-  { key: 'roles', title: '角色与权限', desc: '三角色权限矩阵' },
+  { key: 'roles', title: '角色与权限', desc: '两角色权限矩阵' },
   { key: 'grants', title: '授权委派', desc: 'namespace 授权与销毁委派' },
-  { key: 'tokens', title: 'API Token', desc: '按用户签发与生命周期' },
+  { key: 'enterprise', title: '企业登录', desc: 'OIDC 单点登录与准入' },
 ]
 const activeSection = ref<SectionKey>('users')
 
@@ -64,7 +58,7 @@ const users = ref<AuthUser[]>([])
 const roles = ref<AuthRole[]>([])
 const grants = ref<AuthzGrant[]>([])
 const loading = ref(false)
-const ROLE_ORDER: Record<string, number> = { user: 0, operator: 1, admin: 2 }
+const ROLE_ORDER: Record<string, number> = { user: 0, admin: 2 }
 
 function normalizedRoles(list: AuthRole[]): AuthRole[] {
   return list
@@ -79,10 +73,6 @@ function normalizedRoles(list: AuthRole[]): AuthRole[] {
 function defaultUserRoleID(): string {
   return roles.value.find((role) => role.name === 'user')?.id ?? roles.value[0]?.id ?? ''
 }
-
-const tokensUser = ref('')
-const tokens = ref<ApiToken[]>([])
-const tokensLoading = ref(false)
 
 const currentUserId = computed(() => auth.user?.userId ?? '')
 
@@ -123,38 +113,12 @@ function userStatusText(status?: string): string {
   }
 }
 
-function tokenStatusType(status?: string): 'success' | 'danger' | 'warning' | 'info' {
-  switch (status) {
-    case 'active':
-      return 'success'
-    case 'disabled':
-      return 'warning'
-    case 'revoked':
-      return 'danger'
-    default:
-      return 'info'
-  }
-}
-
-function tokenStatusText(status?: string): string {
-  switch (status) {
-    case 'active':
-      return '正常'
-    case 'disabled':
-      return '停用'
-    case 'revoked':
-      return '已撤销'
-    default:
-      return status || '未知'
-  }
-}
-
 function principalTypeText(type?: string): string {
   return type === 'group' ? '组' : '用户'
 }
 
 function grantPermissionText(permission: string): string {
-  return permission === 'destroy' ? '销毁委派' : '全量权限'
+  return permission
 }
 
 function escapeNamespaces(list: string[]): string {
@@ -171,9 +135,7 @@ async function loadAll(): Promise<void> {
       userForm.roleId = defaultUserRoleID()
     }
     grants.value = grantList
-    if (!tokensUser.value && userList.length > 0) {
-      tokensUser.value = userList[0]!.id
-    }
+
   } catch (error) {
     ElMessage.error(describeUsersError('加载用户与权限', error))
   } finally {
@@ -183,7 +145,7 @@ async function loadAll(): Promise<void> {
 
 onMounted(async () => {
   await loadAll()
-  void loadTokens()
+  try{registered.value=await listClusters()}catch{registered.value=[]}
 })
 
 /** ---------------- 用户管理 ---------------- */
@@ -320,10 +282,7 @@ async function handleDeleteUser(target: AuthUser): Promise<void> {
   try {
     await deleteUser(target.id)
     ElMessage.success('用户已删除')
-    if (tokensUser.value === target.id) {
-      tokensUser.value = ''
-      tokens.value = []
-    }
+
     await loadAll()
   } catch (error) {
     ElMessage.error(describeUsersError('删除用户', error))
@@ -336,7 +295,7 @@ const grantForm = reactive({
   visible: false,
   mode: 'create' as 'create' | 'edit',
   id: '',
-  principalType: 'user' as GrantPrincipalType,
+  principalType: 'user' as GrantPrincipalType,scopeType:'namespace',
   principalId: '',
   clusterId: '',
   namespacesText: '',
@@ -353,7 +312,7 @@ function resetGrantForm(): void {
   grantForm.principalId = ''
   grantForm.clusterId = ''
   grantForm.namespacesText = ''
-  grantForm.permissions = ['*']
+  grantForm.scopeType='namespace';grantForm.permissions = ['read','logs']
   grantForm.expiresAt = ''
 }
 
@@ -364,7 +323,7 @@ function openCreateGrant(): void {
   grantForm.principalId = ''
   grantForm.clusterId = ''
   grantForm.namespacesText = ''
-  grantForm.permissions = ['*']
+  grantForm.scopeType='namespace';grantForm.permissions = ['read','logs']
   grantForm.expiresAt = ''
   grantForm.visible = true
 }
@@ -376,8 +335,8 @@ function openEditGrant(target: AuthzGrant): void {
   grantForm.principalId = target.principalId
   grantForm.clusterId = target.clusterId ?? ''
   grantForm.namespacesText = (target.namespaces ?? []).join(', ')
-  grantForm.permissions = (target.permissions ?? []).slice()
-  grantForm.expiresAt = ''
+  grantForm.scopeType=target.scopeType??'namespace';grantForm.permissions = (target.actions ?? target.permissions).slice()
+  grantForm.expiresAt = target.expiresAt??''
   grantForm.visible = true
 }
 
@@ -391,11 +350,11 @@ function splitNamespaces(text: string): string[] {
 async function submitGrant(): Promise<void> {
   const principalId = grantForm.principalId.trim()
   if (!principalId) {
-    ElMessage.warning('请输入用户或组标识')
+    ElMessage.warning('请选择用户')
     return
   }
   const namespaces = splitNamespaces(grantForm.namespacesText)
-  if (namespaces.length === 0) {
+  if (grantForm.scopeType==='namespace' && namespaces.length === 0) {
     ElMessage.warning('至少授权一个 namespace')
     return
   }
@@ -405,32 +364,9 @@ async function submitGrant(): Promise<void> {
   }
   savingGrant.value = true
   try {
-    if (grantForm.mode === 'create') {
-      const req: CreateGrantRequest = {
-        principalType: grantForm.principalType,
-        principalId,
-        namespaces,
-        permissions: grantForm.permissions.slice(),
-      }
-      if (grantForm.clusterId.trim()) {
-        req.clusterId = grantForm.clusterId.trim()
-      }
-      if (grantForm.expiresAt) {
-        req.expiresAt = grantForm.expiresAt
-      }
-      await createGrant(req)
-      ElMessage.success('授权委派已创建')
-    } else {
-      const patch: UpdateGrantRequest = { namespaces, permissions: grantForm.permissions.slice() }
-      if (grantForm.clusterId.trim()) {
-        patch.clusterId = grantForm.clusterId.trim()
-      }
-      if (grantForm.expiresAt) {
-        patch.expiresAt = grantForm.expiresAt
-      }
-      await updateGrant(grantForm.id, patch)
-      ElMessage.success('授权委派已更新')
-    }
+    const req:CreateGrantRequest={userId:principalId,clusterId:grantForm.clusterId,scopeType:grantForm.scopeType,namespaces:grantForm.scopeType==='cluster'?[]:namespaces,actions:grantForm.permissions,expiresAt:grantForm.expiresAt||null}
+    if(grantForm.mode==='create')await createGrant(req);else await updateGrant(grantForm.id,req)
+    ElMessage.success('授权已保存')
     resetGrantForm()
     await loadAll()
   } catch (error) {
@@ -466,122 +402,6 @@ async function handleRevokeGrant(target: AuthzGrant): Promise<void> {
   }
 }
 
-/** ---------------- API Token ---------------- */
-
-const tokenForm = reactive({ visible: false, name: '', expiresAt: '' })
-const savingToken = ref(false)
-const tokenReveal = reactive({ visible: false, name: '', token: '' })
-
-function openCreateToken(): void {
-  if (!tokensUser.value) {
-    ElMessage.warning('请先选择用户')
-    return
-  }
-  tokenForm.name = ''
-  tokenForm.expiresAt = ''
-  tokenForm.visible = true
-}
-
-async function loadTokens(): Promise<void> {
-  if (!tokensUser.value) {
-    tokens.value = []
-    return
-  }
-  tokensLoading.value = true
-  try {
-    tokens.value = await listTokens(tokensUser.value)
-  } catch (error) {
-    tokens.value = []
-    ElMessage.error(describeUsersError('加载 API Token', error))
-  } finally {
-    tokensLoading.value = false
-  }
-}
-
-function selectTokensUser(userId: string): void {
-  tokensUser.value = userId
-  void loadTokens()
-}
-
-function closeTokenReveal(): void {
-  // 明文仅展示一次，关闭即从内存丢弃
-  tokenReveal.visible = false
-  tokenReveal.token = ''
-  tokenReveal.name = ''
-}
-
-async function copyToken(): Promise<void> {
-  if (!tokenReveal.token) {
-    return
-  }
-  try {
-    await navigator.clipboard?.writeText(tokenReveal.token)
-    ElMessage.success('已复制，注意保存')
-  } catch {
-    ElMessage.warning('复制失败，请手动选中复制')
-  }
-}
-
-async function submitToken(): Promise<void> {
-  const name = tokenForm.name.trim()
-  if (!name) {
-    ElMessage.warning('请输入 Token 名称')
-    return
-  }
-  savingToken.value = true
-  try {
-    const req: CreateTokenRequest = { name }
-    if (tokenForm.expiresAt) {
-      req.expiresAt = tokenForm.expiresAt
-    }
-    const result = await createToken(tokensUser.value, req)
-    tokenForm.visible = false
-    tokenReveal.name = name
-    tokenReveal.token = result.token
-    tokenReveal.visible = true
-    await loadTokens()
-  } catch (error) {
-    ElMessage.error(describeUsersError('签发 API Token', error))
-  } finally {
-    savingToken.value = false
-  }
-}
-
-async function handleTokenToggle(target: ApiToken): Promise<void> {
-  if (!canManage.value) {
-    return
-  }
-  const next = target.status === 'disabled' ? 'active' : 'disabled'
-  try {
-    await updateTokenStatus(tokensUser.value, target.id, next)
-    ElMessage.success(next === 'active' ? 'Token 已恢复' : 'Token 已停用')
-    await loadTokens()
-  } catch (error) {
-    ElMessage.error(describeUsersError('切换 Token 状态', error))
-  }
-}
-
-async function handleDeleteToken(target: ApiToken): Promise<void> {
-  if (!canManage.value) {
-    return
-  }
-  try {
-    await ElMessageBox.confirm(`确定删除 API Token「${target.name || target.id}」？`, '删除 API Token', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-  } catch {
-    return
-  }
-  try {
-    await deleteToken(tokensUser.value, target.id)
-    ElMessage.success('API Token 已删除')
-    await loadTokens()
-  } catch (error) {
-    ElMessage.error(describeUsersError('删除 API Token', error))
-  }
-}
 </script>
 
 <template>
@@ -591,7 +411,7 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
         <el-icon class="title-icon"><User /></el-icon>
         用户与权限
       </h2>
-      <span class="desc">账号、角色权限矩阵、namespace 授权委派与 API Token 生命周期。</span>
+      <span class="desc">账号、角色权限矩阵、集群资源授权与企业登录。</span>
       <el-button text class="refresh" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
     </div>
 
@@ -614,10 +434,7 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
           <div class="l">授权委派</div>
           <div class="v mono">{{ grants.length }}</div>
         </div>
-        <div class="card stat">
-          <div class="l">Token</div>
-          <div class="v mono">{{ tokens.length }}</div>
-        </div>
+
       </div>
 
       <div class="users-layout">
@@ -692,7 +509,7 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
             <div class="row panel-head">
               <div class="grow">
                 <div class="sub strong">角色与权限矩阵</div>
-                <div class="muted small">与后端 `auth.defaultRoles()` 一致，管理端只读。</div>
+                <div class="muted small">角色决定平台管理能力。操作任何集群都需要单独的资源授权。</div>
               </div>
             </div>
             <div v-if="loading" class="muted center-hint">加载中…</div>
@@ -766,64 +583,7 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
           </div>
 
           <!-- API Token -->
-          <div v-if="activeSection === 'tokens'" class="card panel">
-            <div class="row panel-head">
-              <div class="grow">
-                <div class="sub strong">API Token</div>
-                <div class="muted small">服务端只存 SHA-256；明文仅在签发时展示一次。</div>
-              </div>
-              <el-select
-                :model-value="tokensUser"
-                class="user-select"
-                placeholder="选择用户"
-                @update:model-value="(value: string) => selectTokensUser(value)"
-              >
-                <el-option v-for="target in users" :key="target.id" :label="target.username" :value="target.id" />
-              </el-select>
-              <el-button type="primary" :icon="Key" :disabled="!tokensUser" @click="openCreateToken">
-                签发 Token
-              </el-button>
-            </div>
-            <div v-if="tokensLoading" class="muted center-hint">加载中…</div>
-            <div v-else-if="!tokensUser" class="muted center-hint">请选择用户查看其 API Token。</div>
-            <div v-else-if="tokens.length === 0" class="muted center-hint">该用户暂无 API Token。</div>
-            <div v-else class="list">
-              <div v-for="token in tokens" :key="token.id" class="row list-item">
-                <div class="grow identity">
-                  <div class="row top">
-                    <span class="t mono">{{ token.name || token.id }}</span>
-                    <span class="pill" :class="tokenStatusType(token.status)">{{ tokenStatusText(token.status) }}</span>
-                  </div>
-                  <div class="muted meta">
-                    <span class="faint mono">{{ token.id }}</span>
-                    <span v-if="token.expiresAt" class="faint">· 至 {{ formatTime(token.expiresAt) }}</span>
-                    <span v-if="token.lastUsedAt" class="faint">· 最后使用 {{ formatTime(token.lastUsedAt) }}</span>
-                  </div>
-                </div>
-                <el-button
-                  v-if="token.status !== 'revoked' && token.status !== 'disabled'"
-                  size="small"
-                  text
-                  :icon="Lock"
-                  @click="handleTokenToggle(token)"
-                >
-                  停用
-                </el-button>
-                <el-button
-                  v-else-if="token.status === 'disabled'"
-                  size="small"
-                  text
-                  :icon="Unlock"
-                  @click="handleTokenToggle(token)"
-                >
-                  恢复
-                </el-button>
-                <el-button size="small" text type="danger" :icon="Delete" @click="handleDeleteToken(token)">
-                  删除
-                </el-button>
-              </div>
-            </div>
-          </div>
+          <EnterpriseLoginPanel v-if="activeSection === 'enterprise'" />
         </div>
       </div>
     </template>
@@ -887,27 +647,12 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
       @closed="resetGrantForm"
     >
       <el-form label-position="top" @submit.prevent="submitGrant">
-        <el-form-item label="主体类型">
-          <el-select v-model="grantForm.principalType" :disabled="grantForm.mode === 'edit'" placeholder="主体类型">
-            <el-option label="用户" value="user" />
-            <el-option label="组" value="group" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="主体标识">
-          <el-input v-model="grantForm.principalId" :disabled="grantForm.mode === 'edit'" placeholder="用户 ID 或组名" />
-        </el-form-item>
-        <el-form-item label="集群">
-          <el-input v-model="grantForm.clusterId" placeholder="集群 ID（可选，默认当前集群）" />
-        </el-form-item>
-        <el-form-item label="Namespaces">
-          <el-input v-model="grantForm.namespacesText" placeholder="逗号或空格分隔，如 ns-a, ns-b" />
-        </el-form-item>
-        <el-form-item label="权限">
-          <el-select v-model="grantForm.permissions" multiple placeholder="选择权限">
-            <el-option label="全量权限 (*)" value="*" />
-            <el-option label="销毁委派 (destroy)" value="destroy" />
-          </el-select>
-        </el-form-item>
+        <el-form-item label="用户"><el-select v-model="grantForm.principalId" filterable :disabled="grantForm.mode==='edit'"><el-option v-for="u in users.filter(u=>u.status==='active' && roleName(u.roleId)!=='admin')" :key="u.id" :value="u.id" :label="u.username"/></el-select></el-form-item>
+        <el-form-item label="集群"><el-select v-model="grantForm.clusterId" :disabled="grantForm.mode==='edit'"><el-option v-for="c in registered" :key="c.id" :value="c.id" :label="c.name"/></el-select></el-form-item>
+        <el-form-item label="资源范围"><el-select v-model="grantForm.scopeType" @change="grantForm.permissions=['read']"><el-option label="命名空间内的资源" value="namespace"/><el-option label="集群级对象（不含命名空间内的资源）" value="cluster"/></el-select></el-form-item>
+        <el-form-item v-if="grantForm.scopeType==='namespace'" label="命名空间"><el-input v-model="grantForm.namespacesText" placeholder="多个名称用逗号分隔；* 包含现在和未来全部命名空间" /></el-form-item>
+        <el-form-item label="常用授权"><el-button v-for="(label,n) in ['只读诊断','普通变更','允许删除']" :key="label" @click="grantForm.permissions=['read',...(grantForm.scopeType==='namespace'?['logs']:[]),...(['operate','destroy'].slice(0,n))]">{{label}}</el-button></el-form-item>
+        <el-form-item label="允许的动作"><el-select v-model="grantForm.permissions" multiple><el-option v-for="a in (grantForm.scopeType==='cluster'?['read','operate','destroy','shell']:['read','logs','operate','destroy','exec','secret.read'])" :key="a" :value="a" :label="a"/></el-select></el-form-item>
         <el-form-item label="有效期至（可选）">
           <el-date-picker
             v-model="grantForm.expiresAt"
@@ -926,53 +671,6 @@ async function handleDeleteToken(target: ApiToken): Promise<void> {
       </el-form>
     </el-dialog>
 
-    <!-- 签发 API Token -->
-    <el-dialog
-      :model-value="tokenForm.visible"
-      title="签发 API Token"
-      width="440px"
-      :close-on-click-modal="false"
-      @closed="() => (tokenForm.visible = false)"
-    >
-      <el-form label-position="top" @submit.prevent="submitToken">
-        <el-form-item label="Token 名称">
-          <el-input v-model="tokenForm.name" placeholder="如 cli / ci / 监控接入" />
-        </el-form-item>
-        <el-form-item label="有效期至（可选）">
-          <el-date-picker
-            v-model="tokenForm.expiresAt"
-            type="datetime"
-            value-format="YYYY-MM-DDTHH:mm:ssZ"
-            placeholder="不填则长期有效"
-            class="w-full"
-          />
-        </el-form-item>
-        <div class="row dialog-actions">
-          <el-button @click="tokenForm.visible = false">取消</el-button>
-          <el-button type="primary" :loading="savingToken" :disabled="savingToken" @click="submitToken">
-            签发
-          </el-button>
-        </div>
-      </el-form>
-    </el-dialog>
-
-    <!-- 签发结果：明文仅此一次 -->
-    <el-dialog
-      :model-value="tokenReveal.visible"
-      title="API Token 已签发"
-      width="520px"
-      :close-on-click-modal="false"
-      @closed="closeTokenReveal"
-    >
-      <p class="hint small">明文仅本次展示，服务端只保存 SHA-256 校验值；关闭后将无法再次查看。</p>
-      <div class="token-box">
-        <span class="mono">{{ tokenReveal.token }}</span>
-      </div>
-      <div class="row dialog-actions">
-        <el-button @click="closeTokenReveal">关闭</el-button>
-        <el-button type="primary" :icon="CopyDocument" @click="copyToken">复制 Token</el-button>
-      </div>
-    </el-dialog>
   </section>
 </template>
 

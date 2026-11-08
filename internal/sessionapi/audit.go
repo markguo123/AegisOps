@@ -37,14 +37,17 @@ func (s *Server) WithAudit(sink AuditSink) *Server {
 //
 // 只记身份与动作，绝不记会话正文、消息内容或审批回传值：这些通道可能携带
 // Secret 取值（handleApprove 的 respond 通道），明文一旦进 payload 就破了红线。
-// 审计写失败不阻断业务请求，只降级为告警日志。
-func (s *Server) recordCrossUserAction(r *http.Request, sess *session.Session, action, eventType string, extra map[string]any) {
-	if s.audit == nil || sess == nil {
-		return
+// 平台治理访问在审计写入成功后执行。
+func (s *Server) recordCrossUserAction(r *http.Request, sess *session.Session, action, eventType string, extra map[string]any) bool {
+	if sess == nil {
+		return false
 	}
 	principal, ok := principalFrom(r)
 	if !ok || principal.User.ID == sess.UserID {
-		return
+		return true
+	}
+	if s.audit == nil {
+		return s.platform == nil
 	}
 	payload := map[string]any{
 		"targetSessionId": sess.ID,
@@ -58,7 +61,7 @@ func (s *Server) recordCrossUserAction(r *http.Request, sess *session.Session, a
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		slog.Warn("sessionapi: 跨用户会话审计序列化失败", "session", sess.ID, "action", action, "error", err)
-		return
+		return false
 	}
 	if err := s.audit(r.Context(), store.AuditEvent{
 		SessionID:     sess.ID,
@@ -73,7 +76,9 @@ func (s *Server) recordCrossUserAction(r *http.Request, sess *session.Session, a
 		Status:        "success",
 	}); err != nil {
 		slog.Warn("sessionapi: 跨用户会话审计写入失败", "session", sess.ID, "action", action, "error", err)
+		return false
 	}
+	return true
 }
 
 // operationOf 把动作名映射到审计 operation（便于按动作过滤检索）。

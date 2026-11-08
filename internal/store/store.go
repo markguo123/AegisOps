@@ -87,6 +87,7 @@ func IsReady(ctx context.Context, st Store) error {
 
 // UserStore 管理产品内用户（P1.5）。
 type UserStore interface {
+	IdentityStore
 	Create(ctx context.Context, u *User) error
 	Get(ctx context.Context, id string) (*User, error)
 	GetByUsername(ctx context.Context, username string) (*User, error)

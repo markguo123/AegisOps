@@ -1,12 +1,14 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/manifestx"
 )
@@ -14,12 +16,14 @@ import (
 // AccessScope 是当前 Agent 运行可访问的 Kubernetes 资源范围。
 // 它是执行前门禁，不是提示词约束。
 type AccessScope struct {
-	ClusterID     string   `json:"clusterId,omitempty"`
-	Namespaces    []string `json:"namespaces"`
-	ClusterScoped bool     `json:"clusterScoped"`
-	IsAdmin       bool     `json:"isAdmin"`
-	CanWrite      bool     `json:"canWrite"`
-	CanDestroy    bool     `json:"canDestroy"`
+	Policy        *authz.EffectiveAccess                      `json:"policy,omitempty"`
+	Refresh       func(context.Context) (*AccessScope, error) `json:"-"`
+	ClusterID     string                                      `json:"clusterId,omitempty"`
+	Namespaces    []string                                    `json:"namespaces"`
+	ClusterScoped bool                                        `json:"clusterScoped"`
+	IsAdmin       bool                                        `json:"isAdmin"`
+	CanWrite      bool                                        `json:"canWrite"`
+	CanDestroy    bool                                        `json:"canDestroy"`
 }
 
 var (
@@ -99,6 +103,10 @@ func NormalizeScope(s AccessScope) AccessScope {
 
 // Prompt 提供给模型的授权范围说明。安全边界仍由 Check 强制执行。
 func (s AccessScope) Prompt() string {
+	if s.Policy != nil {
+		b, _ := json.Marshal(s.Policy)
+		return "当前集群与授权范围（只在这些范围内诊断；未获准的证据标注为未采集）：" + string(b)
+	}
 	if s.IsAdmin || s.ClusterScoped {
 		return "## 当前授权范围\n当前账号拥有集群级管理权限，可查询全部命名空间及 Node、PV、StorageClass 等集群资源。"
 	}
@@ -117,6 +125,9 @@ func (s AccessScope) Prompt() string {
 
 // Check 在执行工具前校验资源作用域。error 文本是给模型与用户的稳定拒绝原因。
 func (s AccessScope) Check(toolName string, input json.RawMessage) error {
+	if s.Policy != nil {
+		return s.policyCheck(toolName, input)
+	}
 	s = NormalizeScope(s)
 	if s.IsAdmin || s.ClusterScoped {
 		return nil

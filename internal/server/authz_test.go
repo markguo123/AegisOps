@@ -181,7 +181,7 @@ func TestAuthzTokenCRUDHashNeverEchoed(t *testing.T) {
 func TestAuthzPermissionDenied(t *testing.T) {
 	p := newPlatformServer(t)
 	tokens := map[string]string{}
-	for _, role := range []string{auth.RoleUser, auth.RoleOperator} {
+	for _, role := range []string{auth.RoleUser} {
 		tokens[role] = createUserWithRole(t, p, "denied-"+role, role)
 	}
 	admin := userByUsername(t, p.store, auth.DefaultAdminUsername)

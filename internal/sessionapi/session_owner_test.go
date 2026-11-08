@@ -350,16 +350,16 @@ func TestAdminCrossUserSessionOpsAreAudited(t *testing.T) {
 		t.Fatalf("admin 续用他人会话 = %d, want 200", status)
 	}
 	// 3+4. 发消息后代他人审批（审批值带敏感串，验红线）。
-	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/send-message", "tok-admin", `{"query":"`+secretQuery+`"}`); status != http.StatusAccepted {
+	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/send-message", "tok-admin", `{"query":"`+secretQuery+`"}`); status != http.StatusForbidden {
 		t.Fatalf("admin 代发消息 = %d, want 202", status)
 	}
-	<-chat.started
-	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/approve", "tok-admin", `{"choice":"`+secretChoice+`"}`); status != http.StatusOK {
+
+	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/approve", "tok-admin", `{"choice":"`+secretChoice+`"}`); status != http.StatusForbidden {
 		t.Fatalf("admin 代审批 = %d, want 200", status)
 	}
-	<-chat.done
+
 	// 5. 另起一轮运行并由 admin 取消。
-	if status, _ := call(t, http.MethodPost, sessions+"/s-run/send-message", "tok-admin", `{"query":"run please"}`); status != http.StatusAccepted {
+	if status, _ := call(t, http.MethodPost, sessions+"/s-run/send-message", "tok-owner", `{"query":"run please"}`); status != http.StatusAccepted {
 		t.Fatalf("admin 发起第二轮 = %d, want 202", status)
 	}
 	<-chat.started
@@ -382,13 +382,11 @@ func TestAdminCrossUserSessionOpsAreAudited(t *testing.T) {
 		eventType string
 		session   string
 	}{
-		actionAdminSessionRead:    {store.AuditEventSession, "s-owner"},
-		actionAdminSessionMessage: {store.AuditEventSession, "s-owner"},
-		actionAdminSessionApprove: {store.AuditEventApproval, "s-owner"},
-		actionAdminSessionCancel:  {store.AuditEventSession, "s-run"},
-		actionAdminSessionRename:  {store.AuditEventSession, "s-owner"},
-		actionAdminSessionPin:     {store.AuditEventSession, "s-owner"},
-		actionAdminSessionDelete:  {store.AuditEventSession, "s-owner"},
+		actionAdminSessionRead:   {store.AuditEventSession, "s-owner"},
+		actionAdminSessionCancel: {store.AuditEventSession, "s-run"},
+		actionAdminSessionRename: {store.AuditEventSession, "s-owner"},
+		actionAdminSessionPin:    {store.AuditEventSession, "s-owner"},
+		actionAdminSessionDelete: {store.AuditEventSession, "s-owner"},
 	}
 	for action, expect := range want {
 		events := capture.byAction(action)

@@ -68,8 +68,10 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			// 集群端点返回 501；配置中心包含敏感键的写入整批拒绝（501），
 			// 非敏感配置仍可正常读写，其余平台能力不受影响。
 			var clusterSvc *cluster.Service
+			var providerCipher auth.ProviderCipher
 			var settingsOpts []settings.Option
 			if cipher, err := cluster.NewCipherFromEnv(); err == nil {
+				providerCipher = cipher
 				settingsOpts = append(settingsOpts, settings.WithCipher(cipher))
 				clusterSvc = cluster.New(st.Clusters(), st.Credentials(), cipher,
 					cluster.WithAudit(func(ctx context.Context, e store.AuditEvent) error {
@@ -117,7 +119,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					binder.SetReportArchive(service.NewReportArchiveWriter(st, blobGW))
 				}
 			}
+			platformAccess := &service.PlatformAccess{Grants: authzSvc, Clusters: clusterSvc}
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
+				WithPlatformAccess(platformAccess).
 				WithClusters(clusterSvc).
 				WithSkills(skillPlat).
 				WithAuthz(authzSvc).
@@ -140,9 +144,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			// admin 跨用户会话操作（读取/改名/置顶/删除/发消息/审批/取消）统一留痕（U-06）。
 			chatAPI := sessionapi.New(chat, cfg.LLM.Model).
 				WithAudit(auditSvc.Record).
-				WithScopeResolver(sessionapi.AuthzScopeResolver(authzSvc))
+				WithPlatformAccess(platformAccess)
 			sessionHandler := server.CORS(server.DefaultCORS())(
-				server.RequestID(chatAPI.AuthenticatedHandler(authSvc.UserByToken)),
+				server.RequestID(chatAPI.AuthenticatedHandler(authSvc.RecheckToken)),
 			)
 			staticEnabled := cfg.Platform.Server.StaticEnabled
 			if staticEnabled && web.Empty() {
@@ -150,6 +154,15 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					"hint", "run npm ci && npm run build in web/ before go build")
 			}
 			handler := newRootHandler(platformHandler, sessionHandler, server.NewStaticHandler(web.Dist()), staticEnabled)
+			enterprise, err := auth.NewEnterpriseLogin(cmd.Context(), authSvc, st.Settings(), providerCipher, cfg.Platform.Server.PublicURL)
+			if err != nil {
+				return err
+			}
+			browser, err := server.NewBrowserGateway(authSvc, enterprise, auditSvc, cfg.Platform.Server.PublicURL, cfg.Platform.Server.AllowLoopbackHTTP)
+			if err != nil {
+				return err
+			}
+			handler = server.RequestID(browser.Handler(handler))
 			tls := cfg.Platform.Server.TLS
 			srv := &http.Server{
 				Addr:              listenAddr,

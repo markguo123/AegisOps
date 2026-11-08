@@ -1,6 +1,6 @@
 // 用户/角色管理（P3.11a /users /roles）的应用服务。
 // 安全约定：密码用 argon2id 哈希落库，PasswordHash 由模型 json:"-" 遮挡，
-// 任何返回体/日志/审计都不携带明文或哈希；内置 admin 用户受保护不可删除/停用/降级。
+// 任何返回体/日志/审计都不携带明文或哈希；最后一个本地管理员由 Store 事务保护。
 package auth
 
 import (
@@ -19,7 +19,7 @@ var (
 	ErrUserExists    = errors.New("auth: user already exists")
 	ErrRoleNotFound  = errors.New("auth: role not found")
 	ErrInvalidUser   = errors.New("auth: invalid user data")
-	ErrProtectedUser = errors.New("auth: protected user cannot be modified")
+	ErrProtectedUser = store.ErrProtectedUser
 )
 
 // minPasswordLength 是新设/重置密码的最短长度。
@@ -27,9 +27,9 @@ const minPasswordLength = 8
 
 // allowedRoleNames 是平台开放的角色白名单：user / operator / admin 三角色。
 var allowedRoleNames = map[string]bool{
-	RoleUser:     true,
-	RoleOperator: true,
-	RoleAdmin:    true,
+	RoleUser: true,
+
+	RoleAdmin: true,
 }
 
 // CreateUserRequest 是 POST /api/v1/users 的请求体。
@@ -57,7 +57,13 @@ func (s *Service) ListUsers(ctx context.Context) ([]*store.User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: list users: %w", err)
 	}
-	return list, nil
+	out := make([]*store.User, 0, len(list))
+	for _, u := range list {
+		if u.Status != "deleted" {
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }
 
 // ListRoles 返回全部角色及其权限（管理端只读视图）。
@@ -87,8 +93,7 @@ func roleOrder(name string) int {
 	switch name {
 	case RoleUser:
 		return 0
-	case RoleOperator:
-		return 1
+
 	case RoleAdmin:
 		return 2
 	default:
@@ -146,7 +151,7 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*store
 }
 
 // UpdateUser 支持 displayName / password / roleID / status 的部分更新。
-// 内置 admin 受保护：不可停用，也不可改到非 admin 角色。
+// 最后一个可用本地管理员由 Store 事务保护，安全字段变化撤销旧令牌。
 func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (*store.User, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, ErrUserNotFound
@@ -158,8 +163,11 @@ func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserReque
 		}
 		return nil, fmt.Errorf("auth: get user: %w", err)
 	}
-	isBootstrapAdmin := u.Username == DefaultAdminUsername
 
+	if u.Status == "deleted" {
+		return nil, ErrUserNotFound
+	}
+	versionBefore := u.SessionVersion
 	if req.DisplayName != nil {
 		u.DisplayName = strings.TrimSpace(*req.DisplayName)
 	}
@@ -168,9 +176,6 @@ func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserReque
 		if status != "active" && status != "disabled" {
 			return nil, fmt.Errorf("%w: status must be active or disabled", ErrInvalidUser)
 		}
-		if isBootstrapAdmin && status == "disabled" {
-			return nil, fmt.Errorf("%w: cannot disable the built-in admin account", ErrProtectedUser)
-		}
 		u.Status = status
 	}
 	if req.RoleID != nil {
@@ -178,12 +183,12 @@ func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserReque
 		if rerr != nil {
 			return nil, rerr
 		}
-		if isBootstrapAdmin && role.Name != RoleAdmin {
-			return nil, fmt.Errorf("%w: cannot change the built-in admin role", ErrProtectedUser)
-		}
 		u.RoleID = role.ID
 	}
 	if req.Password != nil {
+		if u.PasswordHash == "" {
+			return nil, fmt.Errorf("%w: OIDC-only user has no local password", ErrInvalidUser)
+		}
 		pw := *req.Password
 		if pw == "" || len(pw) < minPasswordLength {
 			return nil, fmt.Errorf("%w: password must be at least %d characters", ErrInvalidUser, minPasswordLength)
@@ -197,10 +202,13 @@ func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserReque
 	if err := s.users.Update(ctx, u); err != nil {
 		return nil, fmt.Errorf("auth: update user: %w", err)
 	}
+	if u.SessionVersion != versionBefore {
+		s.revokeUser(u.ID)
+	}
 	return u, nil
 }
 
-// DeleteUser 删除非内置 admin 用户；内置 admin 返回 ErrProtectedUser。
+// DeleteUser 保留内部身份引用并注销用户，最后一个本地管理员不能被删除。
 func (s *Service) DeleteUser(ctx context.Context, id string) error {
 	if strings.TrimSpace(id) == "" {
 		return ErrUserNotFound
@@ -212,19 +220,23 @@ func (s *Service) DeleteUser(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("auth: get user: %w", err)
 	}
-	if u.Username == DefaultAdminUsername {
-		return fmt.Errorf("%w: cannot delete the built-in admin account", ErrProtectedUser)
+
+	if u.Status == "deleted" {
+		return ErrUserNotFound
 	}
-	if err := s.users.Delete(ctx, id); err != nil {
+	u.Status = "deleted"
+	u.Username = "deleted-" + u.ID
+	if err := s.users.Update(ctx, u); err != nil {
 		return fmt.Errorf("auth: delete user: %w", err)
 	}
+	s.revokeUser(u.ID)
 	return nil
 }
 
 // ChangePassword 修改当前用户口令（P6.12 自助改密）：必须携带旧密码，
 // 校验通过后用 argon2id 重哈希新密码并落库。新密码沿用平台最小长度
 // （8 位）。错误口令统一返回 ErrInvalidCredentials，不区分账号状态。
-// 当前登录会话保持有效；会话退出后需用新口令重新登录。
+// 所有已有登录令牌随用户版本变化撤销，需重新登录。
 func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
 	if strings.TrimSpace(userID) == "" {
 		return ErrInvalidCredentials
@@ -238,6 +250,9 @@ func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPa
 			return ErrInvalidCredentials
 		}
 		return fmt.Errorf("auth: get user: %w", err)
+	}
+	if u.Status != "active" {
+		return ErrInvalidCredentials
 	}
 	ok, err := verifyPassword(u.PasswordHash, oldPassword)
 	if err != nil || !ok {
@@ -258,6 +273,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPa
 	if err := s.users.Update(ctx, u); err != nil {
 		return fmt.Errorf("auth: update password: %w", err)
 	}
+	s.revokeUser(u.ID)
 	return nil
 }
 

@@ -5,6 +5,8 @@ package sessionapi
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -43,8 +46,9 @@ type PrincipalResolver func(ctx context.Context, token string) (*store.User, *st
 type ScopeResolver func(ctx context.Context, user *store.User, role *store.Role) (*tools.AccessScope, error)
 
 type requestPrincipal struct {
-	User *store.User
-	Role *store.Role
+	recheck func(context.Context) (*store.User, *store.Role, error)
+	User    *store.User
+	Role    *store.Role
 }
 
 type principalContextKey struct{}
@@ -108,10 +112,18 @@ func (b *Broadcaster) broadcast(msg []byte) {
 }
 
 // Server 是 Web chat HTTP 服务。
+type confirmationTicket struct {
+	id      string
+	expires time.Time
+	reply   chan string
+}
+
 type Server struct {
-	chat  chatService
-	model string
-	scope ScopeResolver
+	tickets  map[string]confirmationTicket
+	chat     chatService
+	model    string
+	platform *service.PlatformAccess
+	scope    ScopeResolver
 	// audit 写跨用户会话操作留痕（U-06）；nil 时跳过，不影响业务请求。
 	audit AuditSink
 
@@ -136,10 +148,10 @@ func New(chat chatService, model string) *Server {
 		chat:         chat,
 		model:        model,
 		broadcasters: map[string]*Broadcaster{},
-		pending:      map[string]chan string{},
-		runs:         map[string]context.CancelFunc{},
-		eventSeq:     map[string]uint64{},
-		eventLogs:    map[string][]bufferedEvent{},
+		tickets:      map[string]confirmationTicket{}, pending: map[string]chan string{},
+		runs:      map[string]context.CancelFunc{},
+		eventSeq:  map[string]uint64{},
+		eventLogs: map[string][]bufferedEvent{},
 	}
 	// 服务端事件路由：统一事件按 session_id 扇出到对应 Broadcaster；
 	// 旧 ChatEvent JSON 仍在 handleSendMessage 里并行广播，两者不互相覆盖。
@@ -180,6 +192,8 @@ func (s *Server) WithScopeResolver(resolve ScopeResolver) *Server {
 	return s
 }
 
+func (s *Server) WithPlatformAccess(p *service.PlatformAccess) *Server { s.platform = p; return s }
+
 // Handler 返回路由。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -204,13 +218,15 @@ func (s *Server) AuthenticatedHandler(resolve PrincipalResolver) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		user, role, err := resolve(r.Context(), bearerToken(r))
+		token := bearerToken(r)
+		recheck := func(ctx context.Context) (*store.User, *store.Role, error) { return resolve(ctx, token) }
+		user, role, err := recheck(r.Context())
 		if err != nil || user == nil || role == nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), requestPrincipal{
-			User: user,
+			recheck: recheck, User: user,
 			Role: role,
 		})))
 	})
@@ -231,6 +247,12 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
+	if s.platform != nil && principal.canReadAllSessions() {
+		if s.audit == nil || s.audit(r.Context(), store.AuditEvent{Action: actionAdminSessionRead, EventType: store.AuditEventSession, UserID: principal.User.ID, ResourceKind: "SessionList", Status: "success"}) != nil {
+			writeError(w, 503, fmt.Errorf("audit unavailable"))
+			return
+		}
+	}
 	var (
 		list []session.Session
 		err  error
@@ -245,6 +267,8 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type item struct {
+		ClusterID    string    `json:"clusterId,omitempty"`
+		OwnerID      string    `json:"ownerId,omitempty"`
 		ID           string    `json:"id"`
 		Name         string    `json:"name"`
 		State        string    `json:"state"`
@@ -265,9 +289,16 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	})
 	out := make([]item, 0, len(list))
 	for _, sess := range list {
+		if s.platform != nil && !principal.canReadAllSessions() {
+			full, e := s.chat.GetSession(sess.ID)
+			if e != nil || !s.covered(r.Context(), full, principal.User.ID) {
+				out = append(out, item{ID: sess.ID, Name: "权限已变化", State: "restricted", LastModified: sess.LastModified})
+				continue
+			}
+		}
 		out = append(out, item{
-			ID:           sess.ID,
-			Name:         sessionTitle(sess),
+			ID:   sess.ID,
+			Name: sessionTitle(sess), ClusterID: sess.Cluster, OwnerID: sess.UserID,
 			State:        sess.State,
 			Model:        sess.Model,
 			MessageCount: sess.TotalMessages(),
@@ -297,7 +328,7 @@ func (s *Server) ownedSession(r *http.Request, id string) (*session.Session, err
 
 // createOwnedSession 创建或获取会话。admin 可通过已存在的 session ID
 // 获取任意会话并继续操作。
-func (s *Server) createOwnedSession(r *http.Request, id string) (*session.Session, error) {
+func (s *Server) createOwnedSession(r *http.Request, id, cluster string) (*session.Session, error) {
 	principal, ok := principalFrom(r)
 	if !ok {
 		return nil, session.ErrForbidden
@@ -307,10 +338,30 @@ func (s *Server) createOwnedSession(r *http.Request, id string) (*session.Sessio
 		if !principal.canManageAllSessions() && sess.UserID != principal.User.ID {
 			return nil, session.ErrNotFound
 		}
-		return sess, nil
+		if cluster != "" && cluster != sess.Cluster {
+			return nil, session.ErrForbidden
+		}
+		return s.readableSession(r, id)
 	}
 	if !errors.Is(err, session.ErrNotFound) {
 		return nil, err
+	}
+	if s.platform != nil {
+		a, e := s.platform.Grants.EffectiveAccess(r.Context(), principal.User.ID, cluster)
+		if e != nil || len(a.Coverage().Targets) == 0 {
+			return nil, session.ErrForbidden
+		}
+		creator, ok := s.chat.(interface {
+			NewClusterSession(string, string, string, string, []byte) (*session.Session, error)
+		})
+		if !ok {
+			return nil, session.ErrForbidden
+		}
+		data, e := json.Marshal(a.Coverage())
+		if e != nil {
+			return nil, e
+		}
+		return creator.NewClusterSession(id, principal.User.ID, cluster, s.model, data)
 	}
 	sess, err = s.chat.GetOrCreateSessionForUser(id, principal.User.ID, "", s.model)
 	if errors.Is(err, session.ErrForbidden) {
@@ -330,12 +381,23 @@ func (s *Server) readableSession(r *http.Request, id string) (*session.Session, 
 	if err != nil {
 		return nil, err
 	}
+	if !principal.canReadAllSessions() && s.platform != nil && !s.covered(r.Context(), sess, principal.User.ID) {
+		return nil, session.ErrNotFound
+	}
 	if principal.canReadAllSessions() || principal.canManageAllSessions() || sess.UserID == principal.User.ID {
 		return sess, nil
 	}
 	return nil, session.ErrNotFound
 }
 
+func (s *Server) covered(ctx context.Context, sess *session.Session, uid string) bool {
+	var c authz.Coverage
+	if json.Unmarshal(sess.Coverage, &c) != nil || c.ClusterID != sess.Cluster {
+		return false
+	}
+	a, err := s.platform.Grants.EffectiveAccess(ctx, uid, c.ClusterID)
+	return err == nil && c.CoveredBy(a)
+}
 func writeSessionAccessError(w http.ResponseWriter, err error) {
 	if errors.Is(err, session.ErrNotFound) || errors.Is(err, session.ErrForbidden) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
@@ -372,17 +434,21 @@ func (s *Server) sessionToken(sessionID string) *session.TokenUsage {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ClusterID string `json:"clusterId"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
-	sess, err := s.createOwnedSession(r, body.ID)
+	sess, err := s.createOwnedSession(r, body.ID, body.ClusterID)
 	if err != nil {
 		writeSessionAccessError(w, err)
 		return
 	}
 	// admin 经 chat.manage.all 续用他人会话同样要留痕。
-	s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil)
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if body.Name != "" && body.Name != sess.Name {
 		if err := s.chat.RenameSession(sess.ID, body.Name); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -411,11 +477,14 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRename, store.AuditEventSession, map[string]any{"name": body.Name}) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.RenameSession(id, body.Name); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.recordCrossUserAction(r, sess, actionAdminSessionRename, store.AuditEventSession, map[string]any{"name": body.Name})
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "name": body.Name})
 }
 
@@ -434,11 +503,14 @@ func (s *Server) handlePinSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionPin, store.AuditEventSession, map[string]any{"pinned": body.Pinned}) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.PinSession(id, body.Pinned); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.recordCrossUserAction(r, sess, actionAdminSessionPin, store.AuditEventSession, map[string]any{"pinned": body.Pinned})
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "pinned": body.Pinned})
 }
 
@@ -449,12 +521,15 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionDelete, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.DeleteSession(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	// 审计在内存态清理前写：删除后已无法从会话里取回 owner。
-	s.recordCrossUserAction(r, sess, actionAdminSessionDelete, store.AuditEventSession, nil)
 	s.mu.Lock()
 	if cancel, ok := s.runs[id]; ok {
 		cancel()
@@ -482,9 +557,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// admin 读取他人会话的历史快照/事件流属于跨用户读取，必须留痕。
-	s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil)
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
 	// 反向代理（Nginx 等）默认缓冲响应体，会把 SSE 攒成一段一段；显式关闭本响应的
 	// 缓冲，代理配置遗漏时也能正常推流（P6.11）。
@@ -510,15 +588,27 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		logs := append([]bufferedEvent(nil), s.eventLogs[id]...)
 		s.mu.Unlock()
 		for _, item := range logs {
+			if !s.canStream(r, sess) {
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", item.raw)
 			flusher.Flush()
 		}
 	}
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
+		case <-ticker.C:
+			if !s.canStream(r, sess) {
+				return
+			}
 		case <-r.Context().Done():
 			return
 		case msg := <-ch:
+			if !s.canStream(r, sess) {
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
 		}
@@ -526,6 +616,21 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSendMessage 发起一轮 Chat 并把事件广播到会话的 SSE 客户端。
+func (s *Server) canStream(r *http.Request, sess *session.Session) bool {
+	principal, ok := principalFrom(r)
+	if !ok {
+		return false
+	}
+	if principal.recheck != nil {
+		user, role, err := principal.recheck(r.Context())
+		if err != nil || user == nil || role == nil {
+			return false
+		}
+		principal.User = user
+		principal.Role = role
+	}
+	return s.platform == nil || principal.canReadAllSessions() || sess.UserID == principal.User.ID && s.covered(r.Context(), sess, principal.User.ID)
+}
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -546,6 +651,36 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	caller, _ := principalFrom(r)
+	if caller.User == nil || sess.UserID != caller.User.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the session owner can perform this action"})
+		return
+	}
+	var bound *service.BoundRun
+	if s.platform != nil {
+		var c authz.Coverage
+		if json.Unmarshal(sess.Coverage, &c) != nil || c.ClusterID != sess.Cluster {
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
+		bound, err = s.platform.Bind(r.Context(), caller.User.ID, c, func(ctx context.Context) error {
+			u, role, e := caller.recheck(ctx)
+			if e != nil || u == nil || role == nil || u.ID != caller.User.ID {
+				return session.ErrForbidden
+			}
+			return nil
+		})
+		if err != nil {
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
+	}
+	handedOff := false
+	defer func() {
+		if bound != nil && !handedOff {
+			bound.Close()
+		}
+	}()
 	s.mu.Lock()
 	if _, running := s.pending[id]; running {
 		s.mu.Unlock()
@@ -554,6 +689,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	respond := make(chan string, 1)
 	chatCtx, cancelChat := context.WithCancel(context.Background())
+	if bound != nil {
+		go bound.Watch(chatCtx, cancelChat)
+	}
 	s.pending[id] = respond
 	s.runs[id] = cancelChat
 	s.mu.Unlock()
@@ -581,9 +719,66 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		if resolved == nil {
+			cancelChat()
+			s.mu.Lock()
+			delete(s.pending, id)
+			delete(s.runs, id)
+			s.mu.Unlock()
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
 		accessScope = resolved
+		accessScope.Refresh = func(ctx context.Context) (*tools.AccessScope, error) {
+			u, role, err := principal.recheck(ctx)
+			if err != nil || u == nil || role == nil {
+				return nil, session.ErrForbidden
+			}
+			return s.scope(ctx, u, role)
+		}
 	}
-	events, err := s.chat.Chat(chatCtx, service.ChatRequest{
+	var kubePath string
+	var check func(*http.Request) error
+	if bound != nil {
+		refresh := func(ctx context.Context) (*tools.AccessScope, error) {
+			a, e := bound.Access(ctx)
+			if e != nil {
+				return nil, e
+			}
+			return &tools.AccessScope{Policy: a, ClusterID: a.ClusterID}, nil
+		}
+		accessScope = &tools.AccessScope{Policy: &authz.EffectiveAccess{ClusterID: sess.Cluster}, ClusterID: sess.Cluster, Refresh: refresh}
+		if fresh, e := refresh(r.Context()); e == nil {
+			accessScope.Policy = fresh.Policy
+		}
+		kubePath = bound.Path
+		check = bound.CheckRequest
+	}
+	var confirm service.Confirmation
+	if s.platform != nil {
+		confirm = func(ctx context.Context, data sse.ApprovalData) (string, <-chan string, func(), error) {
+			if s.audit == nil {
+				return "", nil, nil, fmt.Errorf("audit unavailable")
+			}
+			key, ch, done := s.newConfirmation(id)
+			raw, _ := json.Marshal(data)
+			payload, _ := json.Marshal(map[string]any{"planSHA256": fmt.Sprintf("%x", sha256.Sum256(raw)), "sessionVersion": principal.User.SessionVersion, "credentialVersion": bound.CredentialVersion, "expiresAt": time.Now().UTC().Add(5 * time.Minute), "target": data.Target})
+			if e := s.audit(ctx, store.AuditEvent{Action: "approval.request", EventType: store.AuditEventApproval, SessionID: id, UserID: principal.User.ID, ClusterID: sess.Cluster, ApprovalID: key, Payload: string(payload), Operation: data.Operation, Risk: data.Risk, Status: "pending"}); e != nil {
+				done()
+				return "", nil, nil, e
+			}
+			return key, ch, done, nil
+		}
+	}
+	var coverageSnapshot func() []byte
+	if bound != nil {
+		coverageSnapshot = bound.CoverageSnapshot
+	}
+	approvalContext := ""
+	if bound != nil {
+		approvalContext = fmt.Sprintf("%x", sha256.Sum256([]byte(bound.CredentialVersion+":"+bearerToken(r))))
+	}
+	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, KubeconfigPath: kubePath, RequestCheck: check,
 		SessionID:       id,
 		Query:           body.Query,
 		UserID:          principal.User.ID,
@@ -610,7 +805,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// 只记身份，不记 query 内容。
 	s.recordCrossUserAction(r, sess, actionAdminSessionMessage, store.AuditEventSession, nil)
 	b := s.broadcaster(id)
+	handedOff = true
 	go func() {
+		if bound != nil {
+			defer bound.Close()
+		}
 		defer cancelChat()
 		defer func() {
 			s.mu.Lock()
@@ -645,8 +844,11 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Errorf("no active run for session %s", id))
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionCancel, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	cancel()
-	s.recordCrossUserAction(r, sess, actionAdminSessionCancel, store.AuditEventSession, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": id})
 }
 
@@ -654,7 +856,8 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Choice string `json:"choice"`
+		ApprovalID string `json:"approvalId"`
+		Choice     string `json:"choice"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -665,12 +868,35 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	caller, _ := principalFrom(r)
+	if caller.User == nil || sess.UserID != caller.User.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the session owner can perform this action"})
+		return
+	}
 	s.mu.Lock()
 	respond, ok := s.pending[id]
+	if s.platform != nil {
+		ticket, exists := s.tickets[id]
+		ok = ok && exists && body.ApprovalID == ticket.id && time.Now().Before(ticket.expires)
+		if ok {
+			delete(s.tickets, id)
+			respond = ticket.reply
+		}
+	}
 	s.mu.Unlock()
 	if !ok {
 		writeError(w, http.StatusConflict, fmt.Errorf("no pending approval for session %s", id))
 		return
+	}
+	if s.platform != nil {
+		decision := "confirmed"
+		if body.Choice == "no" {
+			decision = "rejected"
+		}
+		if s.audit == nil || s.audit(r.Context(), store.AuditEvent{Action: "approval.answer", EventType: store.AuditEventApproval, SessionID: id, ClusterID: sess.Cluster, UserID: caller.User.ID, ApprovalID: body.ApprovalID, Decision: decision, Status: "success"}) != nil {
+			writeError(w, 503, fmt.Errorf("audit unavailable"))
+			return
+		}
 	}
 	select {
 	case respond <- body.Choice:
@@ -683,6 +909,19 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) newConfirmation(sessionID string) (string, <-chan string, func()) {
+	ticket := confirmationTicket{rand.Text(), time.Now().Add(5 * time.Minute), make(chan string, 1)}
+	s.mu.Lock()
+	s.tickets[sessionID] = ticket
+	s.mu.Unlock()
+	return ticket.id, ticket.reply, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.tickets[sessionID].id == ticket.id {
+			delete(s.tickets, sessionID)
+		}
+	}
+}
 func (s *Server) broadcaster(id string) *Broadcaster {
 	s.mu.Lock()
 	defer s.mu.Unlock()
