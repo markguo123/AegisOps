@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"github.com/k8s-ai/k8s-ai/internal/auth"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 func TestBrowserCookieOriginAndLogout(t *testing.T) {
 	fixture := newPlatformServer(t)
 	a := auth.New(fixture.store.Users(), fixture.store.Roles())
-	enterprise, e := auth.NewEnterpriseLogin(context.Background(), a, fixture.store.Settings(), nil, "https://platform.test")
+	enterprise, e := auth.NewEnterpriseLogin(context.Background(), a, fixture.store.Settings(), nil, "https://platform.test", nil, false, false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -57,5 +58,19 @@ func TestBrowserCookieOriginAndLogout(t *testing.T) {
 	}
 	if request("POST", "logout", "", origin, csrf).Code != 200 || request("GET", "me", "", "", "").Code != 401 {
 		t.Fatal("logged-out cookie still valid")
+	}
+}
+
+// TestEnterpriseLoginHintCoversEveryReason 保证以后新增失败分类时不会漏配提示：漏了就退化成
+// 「平台侧失败 + 500」，配置问题会被当成服务故障来查。
+func TestEnterpriseLoginHintCoversEveryReason(t *testing.T) {
+	for _, e := range []error{auth.ErrLoginTxInvalid, auth.ErrLoginStateMismatch, auth.ErrLoginExchange, auth.ErrLoginIDToken, auth.ErrLoginGroupDenied, auth.ErrLoginConfigChanged, auth.ErrLoginNotReady} {
+		reason, hint := enterpriseLoginHint(e)
+		if reason == "failed" || hint == "" {
+			t.Fatalf("%v has no browser hint", e)
+		}
+	}
+	if reason, _ := enterpriseLoginHint(errors.New("store unavailable")); reason != "failed" {
+		t.Fatalf("a non-login error must count as a platform-side failure, got %q", reason)
 	}
 }

@@ -87,7 +87,7 @@ func TestEnterpriseLoginCodeFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	login, err := NewEnterpriseLogin(ctx, svc, st.Settings(), cipher, "https://platform.test")
+	login, err := NewEnterpriseLogin(ctx, svc, st.Settings(), cipher, "https://platform.test", nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

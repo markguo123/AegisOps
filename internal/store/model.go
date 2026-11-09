@@ -12,6 +12,15 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/skills"
 )
 
+// 账号来源口径（用户管理列表展示用）：与登录会话 source 同一套词汇，
+// 见 auth.Service.issue。local=只有本地口令，oidc=只有外部身份，
+// local+oidc=本地口令账号已绑定外部身份（两种登录方式都可用）。
+const (
+	UserSourceLocal = "local"
+	UserSourceOIDC  = "oidc"
+	UserSourceBoth  = "local+oidc"
+)
+
 // User 是产品内用户（D-05：仅作用于 Web/API，不进入 CLI）。
 type User struct {
 	ID             string    `json:"id"`
@@ -24,6 +33,10 @@ type User struct {
 	SessionVersion int64     `json:"-"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+	// Source 是账号来源，由 Users().List 与 Users().Get 关联 user_identities 派生：
+	// users 表没有这一列，Create/Update 不写它，GetByUsername（只服务口令登录）也不回填。
+	// 空串表示尚未判定的本地账号，由 auth 层兜底为 UserSourceLocal。
+	Source string `json:"source,omitempty"`
 }
 
 // Role 是产品内角色。Permission 以 JSON 数组存储，业务判定只依赖

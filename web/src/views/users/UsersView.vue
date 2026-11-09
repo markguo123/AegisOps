@@ -117,6 +117,28 @@ function principalTypeText(type?: string): string {
   return type === 'group' ? '组' : '用户'
 }
 
+/** 账号来源标签：后端只给 local / oidc / local+oidc，未知值原样展示不猜。 */
+const SOURCE_LABELS: Record<string, string> = {
+  local: '本地',
+  oidc: '企业SSO',
+  'local+oidc': '本地+SSO',
+}
+
+function sourceLabel(source?: string): string {
+  const key = source || 'local'
+  return SOURCE_LABELS[key] ?? key
+}
+
+function sourcePillClass(source?: string): string {
+  return !source || source === 'local' ? 'mute' : 'sso'
+}
+
+/** 下拉/列表里优先给姓名，再带上登录账号，避免只剩一串 oidc 随机串。 */
+function userLabel(user: AuthUser): string {
+  const name = user.displayName?.trim()
+  return name && name !== user.username ? `${name}（${user.username}）` : user.username
+}
+
 function grantPermissionText(permission: string): string {
   return permission
 }
@@ -472,9 +494,14 @@ async function handleRevokeGrant(target: AuthzGrant): Promise<void> {
                     <span class="t mono">{{ target.username }}</span>
                     <span class="pill role">{{ roleName(target.roleId) }}</span>
                     <span class="pill" :class="userStatusType(target.status)">{{ userStatusText(target.status) }}</span>
+                    <span class="pill" :class="sourcePillClass(target.source)">{{ sourceLabel(target.source) }}</span>
                   </div>
                   <div class="muted meta">
                     <span>{{ target.displayName || '—' }}</span>
+                    <template v-if="target.email">
+                      <span class="faint">·</span>
+                      <span class="mono faint">{{ target.email }}</span>
+                    </template>
                     <span class="faint">·</span>
                     <span class="mono faint">{{ target.id }}</span>
                   </div>
@@ -647,7 +674,7 @@ async function handleRevokeGrant(target: AuthzGrant): Promise<void> {
       @closed="resetGrantForm"
     >
       <el-form label-position="top" @submit.prevent="submitGrant">
-        <el-form-item label="用户"><el-select v-model="grantForm.principalId" filterable :disabled="grantForm.mode==='edit'"><el-option v-for="u in users.filter(u=>u.status==='active' && roleName(u.roleId)!=='admin')" :key="u.id" :value="u.id" :label="u.username"/></el-select></el-form-item>
+        <el-form-item label="用户"><el-select v-model="grantForm.principalId" filterable :disabled="grantForm.mode==='edit'"><el-option v-for="u in users.filter(u=>u.status==='active' && roleName(u.roleId)!=='admin')" :key="u.id" :value="u.id" :label="userLabel(u)"/></el-select></el-form-item>
         <el-form-item label="集群"><el-select v-model="grantForm.clusterId" :disabled="grantForm.mode==='edit'"><el-option v-for="c in registered" :key="c.id" :value="c.id" :label="c.name"/></el-select></el-form-item>
         <el-form-item label="资源范围"><el-select v-model="grantForm.scopeType" @change="grantForm.permissions=['read']"><el-option label="命名空间内的资源" value="namespace"/><el-option label="集群级对象（不含命名空间内的资源）" value="cluster"/></el-select></el-form-item>
         <el-form-item v-if="grantForm.scopeType==='namespace'" label="命名空间"><el-input v-model="grantForm.namespacesText" placeholder="多个名称用逗号分隔；* 包含现在和未来全部命名空间" /></el-form-item>
@@ -898,6 +925,11 @@ async function handleRevokeGrant(target: AuthzGrant): Promise<void> {
 .pill.mute {
   background: var(--app-surface-hover);
   color: var(--app-muted);
+}
+
+.pill.sso {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fbbf24;
 }
 
 .list {

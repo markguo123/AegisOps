@@ -78,7 +78,9 @@ const menuGroups = computed(() =>
 
 const activeMenu = computed(() => route.path)
 const pageTitle = computed<string>(() => (route.meta.title as string | undefined) ?? '控制台')
-const displayName = computed(() => auth.user?.username ?? '未登录')
+// 右上角只放登录名：本地账号是用户名本身，企业 SSO 账号是 IdP 的登录名，
+// 不再暴露内部建档用的 oidc- 随机串（口径见 auth store 的 loginName）。
+const displayName = computed(() => auth.loginName || '未登录')
 const displayRole = computed(() => auth.user?.role ?? 'user')
 const userInitial = computed(() => displayName.value.charAt(0).toUpperCase() || 'K')
 

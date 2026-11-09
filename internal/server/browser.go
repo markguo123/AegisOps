@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -185,10 +187,18 @@ func (g *BrowserGateway) Handler(next http.Handler) http.Handler {
 			}
 			sess, err := g.enterprise.Finish(r.Context(), c.Value, r.URL.Query().Get("state"), r.URL.Query().Get("code"), token)
 			if err != nil {
+				reason, hint := enterpriseLoginHint(err)
+				// 根因只进日志（含 IdP 返回的协议错误，已去凭据），审计里只留粗粒度原因。
+				slog.Warn("server: 企业登录失败", "request_id", RequestIDFrom(r.Context()), "reason", reason, "error", err)
 				if g.audit != nil {
-					_ = g.audit.Record(r.Context(), store.AuditEvent{Action: store.ActionAuthLogin, EventType: store.EventTypeForAction(store.ActionAuthLogin), Status: "error", RequestID: RequestIDFrom(r.Context()), ResourceKind: "auth", ResultSummary: "enterprise authentication failed"})
+					_ = g.audit.Record(r.Context(), store.AuditEvent{Action: store.ActionAuthLogin, EventType: store.EventTypeForAction(store.ActionAuthLogin), Status: "error", RequestID: RequestIDFrom(r.Context()), ResourceKind: "auth", ResultSummary: "enterprise authentication failed: " + reason})
 				}
-				writeError(w, r, 401, codeUnauthorized, "enterprise login failed")
+				status, code := http.StatusUnauthorized, codeUnauthorized
+				if reason == "failed" {
+					// 不是登录流程本身的失败（存储、角色解析等），别用 401 误导排查。
+					status, code = http.StatusInternalServerError, codeInternal
+				}
+				writeError(w, r, status, code, hint)
 				return
 			}
 			if err = g.record(r, sess.UserID, store.ActionAuthLogin); err != nil {
@@ -288,13 +298,39 @@ func (g *BrowserGateway) begin(w http.ResponseWriter, r *http.Request, bind *sto
 	}
 	key, redirect, err := g.enterprise.Begin(r.Context(), bind, token)
 	if err != nil {
+		slog.Warn("server: 发起企业登录失败", "request_id", RequestIDFrom(r.Context()), "error", err)
 		writeError(w, r, 503, codeInternal, "enterprise login unavailable")
 		return
 	}
+	// 回调 cookie 的存活时间要盖住服务端登录事务的 5 分钟，否则浏览器先丢 key。
 	g.cookie(w, r, "login", key, 300, true)
 	if bind != nil {
 		writeOK(w, r, 200, map[string]string{"redirect": redirect})
 		return
 	}
 	http.Redirect(w, r, redirect, http.StatusFound)
+}
+
+// enterpriseLoginHint 把企业登录失败分成「原因 + 可执行提示」。原因进服务端日志和审计，
+// 提示回到浏览器：企业 IdP 对接的失败大多不是密码错，而是回调地址、客户端凭据、根 CA、
+// groups 准入或登录超时，光一句 enterprise login failed 用户只能瞎猜。
+func enterpriseLoginHint(err error) (reason, hint string) {
+	switch {
+	case errors.Is(err, auth.ErrLoginTxInvalid):
+		return "login-expired", "enterprise login expired or was already used; start the login again and finish the enterprise page within 5 minutes"
+	case errors.Is(err, auth.ErrLoginStateMismatch):
+		return "state-mismatch", "enterprise login state mismatch; start the login again"
+	case errors.Is(err, auth.ErrLoginExchange):
+		return "token-exchange-rejected", "the enterprise identity provider rejected the token exchange; check client id, client secret and the registered callback URL"
+	case errors.Is(err, auth.ErrLoginIDToken):
+		return "id-token-rejected", "the enterprise identity token failed validation; check issuer, audience and the clock difference with the provider"
+	case errors.Is(err, auth.ErrLoginGroupDenied):
+		return "group-denied", "your enterprise account groups are not allowed to sign in; ask an administrator to adjust the admission rule"
+	case errors.Is(err, auth.ErrLoginConfigChanged):
+		return "config-changed", "enterprise login configuration changed during the login; start the login again"
+	case errors.Is(err, auth.ErrLoginNotReady):
+		return "not-configured", "enterprise login is not configured on this platform"
+	default:
+		return "failed", "enterprise login could not be completed on the platform side; check the platform log with this request id"
+	}
 }

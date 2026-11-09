@@ -127,6 +127,15 @@ func TestInstallScriptCoversRequiredBehavior(t *testing.T) {
 		// 只会退化去读恒为 db 的 ConfigMap），且四个 driver 都得显式下发 driver（否则 s3 切回 db 读不到旧后端）。
 		{"闸门按 env 变量名读 driver", `containers[*].env[?(@.name=="AEGISOPS_PLATFORM_BLOBS_DRIVER")]`},
 		{"db 后端也显式下发 driver", `db) out="${indent}- name: AEGISOPS_PLATFORM_BLOBS_DRIVER`},
+		// 企业 IdP 自建 CA：CA 注进 ConfigMap、配置项指向容器内落点，两处都得有实现标记。
+		{"企业 IdP 根 CA 注入 ConfigMap", "append_oidc_ca_key"},
+		{"企业 IdP 根 CA 配置项锚点", "oidc_ca_file"},
+		// PKCE 兼容开关（IdP 自己不保存 code_challenge 时的唯一出路）：参数、默认值与渲染锚点都要在。
+		{"PKCE 兼容开关参数", "OIDC_DISABLE_PKCE"},
+		{"PKCE 兼容开关渲染锚点", "oidc_disable_pkce:[ \\t]*false"},
+		// nonce 兼容开关（IdP 收到 nonce 却不回传时的唯一出路）：参数与渲染锚点都要在。
+		{"nonce 兼容开关参数", "OIDC_ALLOW_MISSING_NONCE"},
+		{"nonce 兼容开关渲染锚点", "oidc_allow_missing_nonce:[ \\t]*false"},
 	}
 	for _, item := range required {
 		if !strings.Contains(body, item.needle) {

@@ -6,7 +6,7 @@
 
 在已有 `k8s-ai-test` 环境验收时，设置 `NAMESPACE=k8s-ai-test`、`INGRESS_HOST`、`PUBLIC_URL`、镜像和数据库参数，先执行 `deploy/install.sh --env-file install.env --dry-run` 检查渲染的 namespace、`public_url`、镜像和 Secret 引用，再 `--diff`。确认 MySQL 备份与旧 operator/legacy Grant 预检结果后正式安装。迁移 Job 必须成功，再检查 Deployment `/readyz`。旧库迁移若被旧授权数据阻断，先按设计方案显式处置这些授权，不要强行跳过。
 
-登录后在“用户与权限”配置企业 OIDC，IdP 登记上述精确回调；在平台先登记真实集群凭据并授予测试用户所需集群/namespace Grant，再依次验证首次登录无授权、只读体检、跨 namespace 拒绝、写操作审批、撤权后会话/报告不可读和审计。Kubernetes ServiceAccount 的实际 RBAC 仍是最终执行边界。
+登录后在“用户与权限”配置企业 OIDC，IdP 登记上述精确回调；在平台先登记真实集群凭据并授予测试用户所需集群/namespace Grant，再依次验证首次登录无授权、只读体检、跨 namespace 拒绝、写操作审批、撤权后会话/报告不可读和审计。企业 IdP 用自建或自签 CA 时，还要给安装参数 `OIDC_CA_FILE` 提供它的根 CA，否则服务端到 IdP 的 OIDC discovery 会因镜像系统信任链不认而失败（追加信任的口径与处置步骤见部署手册 §4.18，平台不提供跳过证书校验）。Kubernetes ServiceAccount 的实际 RBAC 仍是最终执行边界。
 
 本机也能用真实 kubeconfig 验证多数链路：以 SQLite 启动最新代码，设置 `platform.server.allow_loopback_http: true`、`public_url: ""`，仅在 `http://127.0.0.1:8080` 打开页面。此模式可测本地账号、Grant、真实集群读写/审批和报告；企业 OIDC 回调需要固定 HTTPS 地址，不能用这个 HTTP 调试入口验证。
 
@@ -41,7 +41,7 @@ deploy/
   example/       参考与补丁示例，不是清单，不能 apply
   rbac-write.example.yaml  可选：开放写权限的 ClusterRole（跨形态）
   install.sh     一键安装/重装的九阶段调谐器（唯一的发布执行者）
-  install.env.example      42 个安装参数的全注释模板（纯占位值）
+  install.env.example      全部安装参数的全注释模板（纯占位值）
   upgrade.sh     发布/升级驱动器：取码 + TAG 绑定 commit + 发布后验收 + 记账 + 一键回滚（发布仍委托 install.sh）
 ```
 
@@ -122,7 +122,7 @@ deploy/
 暴露层和验收摘要串成九阶段，失败会停在当阶段并给出根因与下一条可复制命令，全程 tee 到 `install-<ts>.log`。
 
 ```bash
-cp deploy/install.env.example install.env    # 42 个参数全注释模板，值全是占位符
+cp deploy/install.env.example install.env    # 全参数全注释模板，值全是占位符
 chmod 600 install.env                        # 里面有 DSN，按密钥管理
 
 deploy/install.sh --env-file install.env --dry-run   # 只渲染清单 + 占位符残留断言，不碰集群

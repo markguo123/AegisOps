@@ -241,6 +241,27 @@ type PlatformAuthConfig struct {
 	AdminUsername string        `mapstructure:"admin_username"`
 	TokenTTL      time.Duration `mapstructure:"token_ttl"`
 	SessionStore  string        `mapstructure:"session_store"` // memory（本期）
+	// OIDCCAFile 是企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径，用于对接内部自建
+	// CA 签发的 IdP：OIDC discovery、令牌交换与 JWKS 拉取都在系统信任链之上追加这批
+	// 根证书。只增不减，公网 IdP 照旧可信；刻意不提供「跳过证书校验」开关——那等于
+	// 接受任意来源签发的身份令牌。留空 = 仅用镜像系统信任链。
+	// 值是容器内路径，部署时由 aegisops-config 卷提供（见 deploy/base/configmap.yaml）。
+	OIDCCAFile string `mapstructure:"oidc_ca_file"`
+	// OIDCDisablePKCE 是「企业 IdP 自己把 PKCE 处理坏了」时的兼容开关：true 时授权请求
+	// 不带 code_challenge、令牌交换不带 code_verifier。默认 false。
+	// 只在现场 IdP 声称支持 PKCE、实际却不保存 challenge（例：某些 Dex 分支把 PKCE 参数
+	// 丢掉，或把 code_challenge_method 落成 plain 又拿空 challenge 去比对）时打开，
+	// 表现为单点登录每次都在令牌交换那一步被拒。关掉 PKCE 会削弱授权码被截获后的防线，
+	// 因此必须同时保留 HTTPS 入口与一次性短寿命登录事务，且不要把开关写进公网部署。
+	OIDCDisablePKCE bool `mapstructure:"oidc_disable_pkce"`
+	// OIDCAllowMissingNonce 是「企业 IdP 收到 nonce 却不回传」时的兼容开关：true 时只容忍
+	// id_token 完全没有 nonce 声明这一种情形，且追加「iat 不得早于本次登录事务开始」来挡住
+	// 旧令牌重放。只要 IdP 回了 nonce 却与本次登录不符，无论开关如何一律拒绝。默认 false。
+	// 现场触发条件是 IdP 在授权请求里收到 nonce 却不持久化（例：某些 Dex 分支的 AuthRequest
+	// 没有 nonce 字段，其自定义登录页还会把 nonce 从 back 参数里丢掉），表现为单点登录每次
+	// 都在「id token nonce 不匹配」上失败。这是拿一次性随机数绑定换兼容性，必须同时保留
+	// HTTPS 入口与短寿命登录事务，且不要把开关写进公网部署。
+	OIDCAllowMissingNonce bool `mapstructure:"oidc_allow_missing_nonce"`
 }
 
 // LoadOptions controls a single Load call.
@@ -424,6 +445,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.auth.admin_username", "admin")
 	v.SetDefault("platform.auth.token_ttl", 24*time.Hour)
 	v.SetDefault("platform.auth.session_store", "memory")
+	// 企业 IdP 根 CA 文件路径：留空即用系统信任链，不追加任何自定义信任。
+	v.SetDefault("platform.auth.oidc_ca_file", "")
+	v.SetDefault("platform.auth.oidc_disable_pkce", false)
+	v.SetDefault("platform.auth.oidc_allow_missing_nonce", false)
 	// 执行通道默认开启（D-33）：关闭是给无 shell 镜像变体的现场用的。
 	v.SetDefault("platform.exec.shell_enabled", true)
 }

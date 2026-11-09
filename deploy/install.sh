@@ -61,6 +61,9 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 : "${NODE_PORT:=}"
 : "${INGRESS_HOST:=}"
 : "${PUBLIC_URL:=}"
+: "${OIDC_CA_FILE:=}"
+: "${OIDC_DISABLE_PKCE:=false}"
+: "${OIDC_ALLOW_MISSING_NONCE:=false}"
 : "${INGRESS_CLASS:=}"
 : "${INGRESS_CLASS_DEFAULT:=nginx}"
 : "${ENABLE_WRITE:=false}"
@@ -94,7 +97,9 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 # 参数名清单：env 文件与通用 --KEY=VALUE 都按这张表识别，避免拼错键被静默忽略。
 PARAM_KEYS="IMAGE TAG IMAGE_WEB BUILD PUSH LOAD_TAR NAMESPACE FORM STORE_DRIVER MYSQL_DSN
 SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST
-INGRESS_CLASS PUBLIC_URL ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY IMAGE_PULL_SECRET
+INGRESS_CLASS PUBLIC_URL OIDC_CA_FILE ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY
+OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE
+IMAGE_PULL_SECRET
 IMAGE_PULL_POLICY BLOBS_BACKEND BLOBS_ENDPOINT BLOBS_BUCKET BLOBS_ACCESS_KEY BLOBS_SECRET_KEY
 BLOBS_REGION BLOBS_PATH_STYLE ENABLE_MINIO MINIO_STORAGE_SIZE ENC_KEY ENC_KEY_BACKUP_DIR
 BLOBS_USE_TLS BLOBS_CREATE_BUCKET BLOBS_PREFIX BLOBS_TMP_DIR ALLOW_DRIVER_MISMATCH
@@ -270,6 +275,21 @@ AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一�
   INGRESS_HOST          给了才建 Ingress（自定义域名需要客户端能解析）
   INGRESS_CLASS         IngressClass 名，留空用 nginx；先 kubectl get ingressclass 确认现场类名
   PUBLIC_URL            浏览器访问的 HTTPS 根地址，OIDC 回调与 Cookie/CSRF 使用
+  OIDC_CA_FILE          企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径（宿主机路径，可选）。
+                        内部 IdP 常用集群自建 CA，镜像的系统信任链不认，配企业登录会报
+                        OIDC discovery failed；给了它就把它注进平台容器并让
+                        platform.auth.oidc_ca_file 指向它，不必去动 IdP 所在环境的证书
+  OIDC_DISABLE_PKCE     true 时企业登录（OIDC）不发送 PKCE 参数（code_challenge/code_verifier），
+                        默认 false。只给「声称支持 PKCE、实际却不保存 code_challenge」的 IdP
+                        兜底：这类 IdP 会让单点登录每次都在令牌交换那一步被拒。关掉会削弱
+                        授权码被截获后的防线，能用默认值就别开。
+  OIDC_ALLOW_MISSING_NONCE
+                        true 时容忍企业 IdP 签发的 id_token 完全没有 nonce 声明，默认 false。
+                        只给「授权请求里收到 nonce 却不持久化」的 IdP 兜底：这类 IdP（部分 Dex
+                        分支，其自定义登录页还会把 nonce 从 back 参数里丢掉）会让单点登录每次都
+                        报 id token nonce 不匹配。放宽面刻意只此一种——IdP 回了 nonce 却对不上
+                        仍然拒绝，放行时还要求 id_token 的 iat 不早于本次登录事务开始，旧令牌
+                        重放不成立。会削弱一次性随机数的防重放强度，能用默认值就别开。
   ENABLE_WRITE          true 时显式 apply 写权限 RBAC，并二次确认；默认 false 只读
   ADMIN_USERNAME        首启管理员用户名，留空用配置中心 platform.auth.admin_username
   ADMIN_PASSWORD        缺省随机生成，只打印一次，不落文件；重跑不覆盖已存在口令
@@ -422,6 +442,8 @@ validate_config() {
   require_bool ENABLE_WRITE; require_bool BLOBS_PATH_STYLE; require_bool ENABLE_MINIO
   require_bool BLOBS_USE_TLS; require_bool BLOBS_CREATE_BUCKET
   require_bool ALLOW_DRIVER_MISMATCH
+  require_bool OIDC_DISABLE_PKCE
+  require_bool OIDC_ALLOW_MISSING_NONCE
 
   require_param IMAGE "镜像地址由现场仓库决定，脚本刻意不内置默认仓库。"
   require_param TAG "镜像标签缺失会导致拉到意外版本。"
@@ -451,6 +473,15 @@ validate_config() {
   esac
   if [[ -n "$PUBLIC_URL" && ! "$PUBLIC_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ ]]; then
     die "PUBLIC_URL 必须是无路径的 HTTPS 根地址：${PUBLIC_URL}" "例如 https://aegisops.internal.example"
+  fi
+  # 企业 IdP 的根 CA：给了就要读得到、且真是 PEM 证书。装完才发现注不进去的话，现场只会
+  # 看到一句「discovery failed」，根本想不到是 CA 文件的问题，所以在这里就拦住。
+  if [[ -n "$OIDC_CA_FILE" ]]; then
+    [[ -f "$OIDC_CA_FILE" ]] || die "OIDC_CA_FILE 指向的文件不存在：${OIDC_CA_FILE}" \
+      "先从 IdP 所在命名空间导出 CA（Secret 里的 ca.crt 一般是 base64，要解码）：kubectl -n <idp-ns> get secret <idp-secret> -o jsonpath='{.data.ca\\.crt}' | base64 -d > oidc-ca.crt"
+    grep -q -- "-----BEGIN CERTIFICATE-----" "$OIDC_CA_FILE" ||
+      die "OIDC_CA_FILE 里没有 PEM 证书：${OIDC_CA_FILE}" \
+        "文件要含 -----BEGIN CERTIFICATE----- 文本；链上有中间 CA 就多张拼接，别贴单行 base64"
   fi
   if [[ -n "$NODE_PORT" ]] && [[ ! "$NODE_PORT" =~ ^[0-9]+$ ]]; then
     die "NODE_PORT 必须是数字，当前值：${NODE_PORT}" "留空表示让集群随机分配"
@@ -629,6 +660,18 @@ END {
       if (l ~ /^[ \t]*public_url:[ \t]*""/) {
         p = l; sub(/""/, "\"" PUBLICURL "\"", p); l = p
       }
+      # 企业 IdP 根 CA：给了 CA 文件就把配置项指向它在容器里的落点。
+      if (CAKEY != "" && l ~ /^[ \t]*oidc_ca_file:[ \t]*""/) {
+        p = l; sub(/""/, "\"" CAKEY "\"", p); l = p
+      }
+      # PKCE 兼容开关：只在显式 true 时把默认值 false 改成 true，行尾注释不动。
+      if (DISABLEPKCE == "true" && l ~ /^[ \t]*oidc_disable_pkce:[ \t]*false/) {
+        p = l; sub(/false/, "true", p); l = p
+      }
+      # nonce 兼容开关：同上，只在显式 true 时改值。
+      if (ALLOWNONCE == "true" && l ~ /^[ \t]*oidc_allow_missing_nonce:[ \t]*false/) {
+        p = l; sub(/false/, "true", p); l = p
+      }
       # 行尾还留着注释，所以只替换值本身，不动注释。
       if (DRIVER != "mysql" && l ~ /^[ \t]*driver:[ \t]*mysql([^A-Za-z0-9]|$)/) {
         p = l; sub(/mysql/, DRIVER, p); l = p
@@ -732,6 +775,34 @@ extra_env_block() {
 
 NL=$'\n'
 
+# --- 企业 IdP 根 CA（OIDC）注入 ------------------------------------------------
+# aegisops-config 卷在四份清单里都是整目录挂到 /etc/aegisops，所以只要给这个 ConfigMap
+# 多一个 oidc-ca.crt 数据键，文件就自动出现在容器里，Deployment / Job / CronJob 一行
+# 都不用改；配置项由 awk 锚点渲染成该路径。证书公钥不是机密，进 ConfigMap 不进 Secret。
+OIDC_CA_KEY="oidc-ca.crt"
+
+oidc_ca_container_path() {
+  [[ -n "$OIDC_CA_FILE" ]] || return 0
+  printf '/etc/aegisops/%s' "$OIDC_CA_KEY"
+}
+
+# PEM 是多行文本：用 sed 缩进整段追加，不能走 awk -v（-v 会吃掉反斜杠转义，而换行必须
+# 原样保住）。顺带去掉 CRLF 的 \r，Windows 上导出的 CA 也能直接用。
+append_oidc_ca_key() {
+  [[ -n "$OIDC_CA_FILE" ]] || return 0
+  local dst="${RENDER_DIR}/base/configmap.yaml"
+  [[ -f "$dst" ]] || return 0
+  # 模板末尾不一定留换行，直接追加会把注释粘到最后一行尾巴上。
+  [[ -z "$(tail -c1 "$dst")" ]] || printf '\n' >>"$dst"
+  {
+    printf '  # 企业 IdP（OIDC）根 CA：install.sh 从现场文件注入，键名即容器内文件名。\n'
+    printf '  # 只在平台侧追加信任，不改 IdP 所在环境的任何配置。\n'
+    printf '  %s: |\n' "$OIDC_CA_KEY"
+    sed 's/\r$//; s/^/    /' "$OIDC_CA_FILE"
+  } >>"$dst"
+  detail "注入企业 IdP 根 CA：${OIDC_CA_FILE} -> ConfigMap 键 ${OIDC_CA_KEY}（容器内 /etc/aegisops/${OIDC_CA_KEY}）"
+}
+
 render_one() {
   local rel="$1"
   local src="${SCRIPT_DIR}/${rel}" dst="${RENDER_DIR}/${rel}"
@@ -742,6 +813,9 @@ render_one() {
       -v PULLSEC="$PULLED_SECRET_NAME" -v EXPOSED="$EXPOSED_SVC" -v NODEPORT="$NODE_PORT" \
       -v REPORTS_PVC="$PERSIST_REPORTS" -v DATA_PVC="$DATA_ON_PVC" -v PVC="$PVC_NAME" \
       -v DRIVER="$STORE_DRIVER" -v SQLITE="$SQLITE_PATH" -v PUBLICURL="$PUBLIC_URL" \
+      -v CAKEY="$(oidc_ca_container_path)" \
+      -v DISABLEPKCE="$(is_true "$OIDC_DISABLE_PKCE" && echo true || echo false)" \
+      -v ALLOWNONCE="$(is_true "$OIDC_ALLOW_MISSING_NONCE" && echo true || echo false)" \
       -v EXTRAENV="$(extra_env_block)" \
       "$RENDER_AWK" "$src" >"$dst"
   detail "渲染 deploy/${rel} -> ${dst}"
@@ -785,6 +859,7 @@ render_all() {
   is_true "$ENABLE_WRITE" && RENDER_LIST+=("rbac-write.example.yaml")
 
   for rel in "${RENDER_LIST[@]}"; do render_one "$rel"; done
+  append_oidc_ca_key
   assert_rendered_clean
   ok "已渲染 ${#RENDER_LIST[@]} 份清单到 ${RENDER_DIR}（仓库清单未被改写）"
 }

@@ -214,6 +214,24 @@ func TestUsersProtectedAdmin(t *testing.T) {
 
 }
 
+// TestMeReportsAccountSource 锁 /auth/me 的来源字段：未绑定外部身份的账号一律报 local，
+// 前端据此决定右上角显示登录名（本地账号）还是 IdP 回传的登录名（企业 SSO 账号）。
+func TestMeReportsAccountSource(t *testing.T) {
+	p := newPlatformServer(t)
+	token := p.tokenAs(t, "admin", "admin-pw")
+	resp, raw := p.do(t, http.MethodGet, "/api/v1/auth/me", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("读取自身信息应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	var me struct {
+		User store.User `json:"user"`
+	}
+	decodeData(t, mustReplay(t, raw), &me)
+	if me.User.Username != auth.DefaultAdminUsername || me.User.Source != store.UserSourceLocal {
+		t.Fatalf("/auth/me 应回填 source=%s, got %+v", store.UserSourceLocal, me.User)
+	}
+}
+
 // TestUsersNeverEchoPassword 是红线用例：创建/列表响应不得出现明文口令，
 // 且解码出的 PasswordHash 字段必须为空（json:"-" 已遮挡）。
 func TestUsersNeverEchoPassword(t *testing.T) {
@@ -242,5 +260,35 @@ func TestUsersNeverEchoPassword(t *testing.T) {
 	}
 	if strings.Contains(raw, plain) {
 		t.Fatal("用户列表泄漏口令明文")
+	}
+}
+
+// TestUsersListMarksSource 锁企业登录账号在用户列表里的可见性：账号本身、
+// 身份资料（displayName/email）与来源标识 source 都要能拿到，
+// 否则管理员只能看到一串 oidc-随机串，分不清账号从哪来。
+func TestUsersListMarksSource(t *testing.T) {
+	p := newPlatformServer(t)
+	token := p.tokenAs(t, "admin", "admin-pw")
+	userRole := roleIDByName(t, p.store, auth.RoleUser)
+
+	candidate := &store.User{
+		ID:          "u-src-ext",
+		Username:    "oidc-SRCOIDC",
+		DisplayName: "外部用户",
+		Email:       "ext@example.com",
+		RoleID:      userRole,
+	}
+	if _, err := p.store.Users().ResolveIdentity(context.Background(), "https://idp.example.com/oidc", "subject-ext", candidate); err != nil {
+		t.Fatalf("resolve identity: %v", err)
+	}
+
+	resp, raw := p.do(t, http.MethodGet, "/api/v1/users", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /users 应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	for _, want := range []string{`"username":"oidc-SRCOIDC"`, `"displayName":"外部用户"`, `"email":"ext@example.com"`, `"source":"oidc"`, `"source":"local"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("用户列表应包含 %s, got %s", want, raw)
+		}
 	}
 }

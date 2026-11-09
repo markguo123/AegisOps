@@ -51,7 +51,8 @@ type UpdateUserRequest struct {
 	Status      *string `json:"status"`
 }
 
-// ListUsers 返回全部用户（敏感字段不回读）。
+// ListUsers 返回全部用户（敏感字段不回读），并为每个账号补齐来源标识：
+// Store 只在账号绑定外部身份时给出 oidc / local+oidc，其余一律归为 local。
 func (s *Service) ListUsers(ctx context.Context) ([]*store.User, error) {
 	list, err := s.users.List(ctx)
 	if err != nil {
@@ -59,9 +60,13 @@ func (s *Service) ListUsers(ctx context.Context) ([]*store.User, error) {
 	}
 	out := make([]*store.User, 0, len(list))
 	for _, u := range list {
-		if u.Status != "deleted" {
-			out = append(out, u)
+		if u.Status == "deleted" {
+			continue
 		}
+		if u.Source == "" {
+			u.Source = store.UserSourceLocal
+		}
+		out = append(out, u)
 	}
 	return out, nil
 }

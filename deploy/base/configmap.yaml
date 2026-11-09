@@ -58,6 +58,29 @@ data:
         admin_username: admin    # 空库首启时创建的内置管理员用户名
         token_ttl: 24h           # 平台登录会话有效期
         session_store: memory    # 本期固定内存态；扩副本前需先支持持久化会话
+        # 企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径；留空 = 只用镜像系统信任链。
+        # 内部 IdP 多用集群自建 CA 签发证书，系统信任链不认，配置企业登录会直接报
+        # OIDC discovery failed: x509 certificate signed by unknown authority。这里在系统
+        # 信任链之上追加该根证书（只增不减，公网 IdP 照旧可信），刻意不提供「跳过证书
+        # 校验」开关：那等于接受任意来源签发的身份令牌。
+        # 集群内用法：install.env 给 OIDC_CA_FILE=<宿主机上的 CA 文件>，脚本把 PEM 注入
+        # 本 ConfigMap 的 oidc-ca.crt 数据键（本卷整目录挂到 /etc/aegisops，键名即文件名），
+        # 并把下面这项渲染成 /etc/aegisops/oidc-ca.crt。手动部署就把 PEM 直接贴进本文件
+        # 的 data 段，或另建一个 CA ConfigMap 挂进来，再填路径。
+        oidc_ca_file: ""
+        # PKCE 兼容开关，默认 false（授权请求带 code_challenge、令牌交换带 code_verifier）。
+        # 只给「discovery 里声称支持 PKCE、实际却不保存 code_challenge」的企业 IdP 兜底：这类 IdP
+        # 会让单点登录每次都在令牌交换那一步被拒。关掉 PKCE 会降低授权码被截获后的防线，
+        # 正常 IdP 保持 false。集群内用法：install.env 给 OIDC_DISABLE_PKCE=true，脚本把下面
+        # 这项渲染成 true。
+        oidc_disable_pkce: false
+        # id_token nonce 兼容开关，默认 false（严格校验：id_token 的 nonce 必须等于本次登录发出的一次性随机数）。
+        # 只给「授权请求里收到 nonce 却不持久化」的企业 IdP 兜底：这类 IdP（部分 Dex 分支，其自定义登录页还会
+        # 把 nonce 从 back 参数里丢掉）签发的 id_token 永远没有 nonce 声明，导致单点登录每次都报
+        # id token nonce does not match this login。放宽面只有「完全没有 nonce 声明」这一种，IdP 回了 nonce
+        # 却对不上仍然拒绝；放行时额外要求 iat 不早于本次登录事务开始，旧令牌重放不成立。正常 IdP 保持 false。
+        # 集群内用法：install.env 给 OIDC_ALLOW_MISSING_NONCE=true，脚本把下面这项渲染成 true。
+        oidc_allow_missing_nonce: false
       exec:
         shell_enabled: true      # 含管道/串联/重定向的 shell 命令通道（P6.3 / D-33）：默认开启，
                                  # 这类命令一律经真人审批且不被 --skip-permissions 免除。

@@ -3,9 +3,9 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiGet, apiPatch, apiPost } from '@/api/request'
 
-interface Provider { enabled: boolean; issuer: string; clientId: string; clientSecret?: string; displayName: string; groupsClaim?: string; allowedGroups?: string[] }
+interface Provider { enabled: boolean; issuer: string; clientId: string; clientSecret?: string; displayName: string; groupsClaim?: string; allowedGroups?: string[]; usernameClaim?: string; usernameClaimOverride?: boolean }
 interface View {provider: Provider; hasSecret: boolean; callback: string}
-const form = reactive<Provider>({ enabled: false, issuer: '', clientId: '', clientSecret: '', displayName: '' })
+const form = reactive<Provider>({ enabled: false, issuer: '', clientId: '', clientSecret: '', displayName: '', usernameClaim: '', usernameClaimOverride: false })
 const groups = ref('')
 const hasSecret = ref(false)
 const callback = ref('')
@@ -35,6 +35,8 @@ onMounted(()=>load().catch(()=>ElMessage.error('无法读取企业登录配置')
     <el-form-item label="回调地址">{{ callback || '请先设置 platform.server.public_url' }}</el-form-item>
     <el-form-item label="用户组 Claim"><el-input v-model="form.groupsClaim" placeholder="groups" /></el-form-item>
     <el-form-item label="准入用户组（可选，逗号分隔）"><el-input v-model="groups" /></el-form-item>
+    <el-form-item label="登录名 Claim"><el-input v-model="form.usernameClaim" placeholder="preferred_username" /></el-form-item>
+    <el-form-item label="强制使用该 Claim"><el-switch v-model="form.usernameClaimOverride" /></el-form-item>
     <el-button :loading="busy" @click="submit(true)">测试连接</el-button>
     <el-button type="primary" native-type="submit" :loading="busy">保存</el-button>
   </el-form>

@@ -72,6 +72,68 @@ describe('auth store（P2.2/P2.3 真实认证接入）', () => {
     expect(fresh.user).toBeNull()
   })
 
+  it('loginName：本地账号始终显示登录用户名，不受 displayName 影响', async () => {
+    authApi.me.mockResolvedValue({
+      user: { id: 'u-local', username: 'user-test', displayName: '测试同学' },
+      role: { name: 'user', permissions: [] },
+    })
+
+    const auth = useAuthStore()
+    await auth.restore()
+    expect(auth.loginName).toBe('user-test')
+  })
+
+  it('loginName：企业 SSO 建档账号显示 IdP 登录名，不暴露 oidc- 随机串', async () => {
+    authApi.me.mockResolvedValue({
+      user: {
+        id: 'u-oidc',
+        username: 'oidc-HOLOYFOLN5ER7D6VHTNDII6KVH',
+        displayName: 'p6070718',
+        source: 'oidc',
+      },
+      role: { name: 'user', permissions: [] },
+    })
+
+    const auth = useAuthStore()
+    await auth.restore()
+    expect(auth.loginName).toBe('p6070718')
+  })
+
+  it('loginName：判来源看 source，不靠用户名长相', async () => {
+    // 已绑定企业身份的本地账号：登录用的是自己的用户名，显示名只是备注。
+    authApi.me.mockResolvedValue({
+      user: { id: 'u-both', username: 'zhangsan', displayName: '张三', source: 'local+oidc' },
+      role: { name: 'user', permissions: [] },
+    })
+    const bound = useAuthStore()
+    await bound.restore()
+    expect(bound.loginName).toBe('zhangsan')
+
+    // 纯企业账号即便用户名不带 oidc- 前缀（管理员手工建的映射账号）也显示 IdP 登录名。
+    setActivePinia(createPinia())
+    authApi.me.mockResolvedValue({
+      user: { id: 'u-sso', username: 'svc-build', displayName: 'ci-runner', source: 'oidc' },
+      role: { name: 'user', permissions: [] },
+    })
+    const sso = useAuthStore()
+    await sso.restore()
+    expect(sso.loginName).toBe('ci-runner')
+  })
+
+  it('loginName：SSO 账号缺少 IdP 姓名时回落到用户名，未登录时为空', async () => {
+    authApi.me.mockResolvedValue({
+      user: { id: 'u-oidc-2', username: 'oidc-ABCDEFG', displayName: '', source: 'oidc' },
+      role: { name: 'user', permissions: [] },
+    })
+    const auth = useAuthStore()
+    await auth.restore()
+    expect(auth.loginName).toBe('oidc-ABCDEFG')
+
+    localStorage.clear()
+    setActivePinia(createPinia())
+    expect(useAuthStore().loginName).toBe('')
+  })
+
   it('登出清理本地会话', async () => {
     localStorage.setItem(TOKEN_KEY, 'tok-4')
     authApi.logout.mockResolvedValue(undefined)

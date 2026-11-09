@@ -430,6 +430,152 @@ func TestInstallScriptInjectsImagePullSecretsInEveryPod(t *testing.T) {
 	}
 }
 
+// renderConfigMapData 解析渲染出的 aegisops-config，返回它的数据键。
+func renderConfigMapData(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "base", "configmap.yaml"))
+	if err != nil {
+		t.Fatalf("读取渲染出的 ConfigMap 失败：%v", err)
+	}
+	var doc struct {
+		Kind string            `yaml:"kind"`
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("渲染出的 ConfigMap 不是合法 YAML（kubectl apply 会直接失败）：%v\n%s", err, tailLines(string(raw), 15))
+	}
+	if doc.Kind != "ConfigMap" {
+		t.Fatalf("渲染出的 ConfigMap kind=%s", doc.Kind)
+	}
+	return doc.Data
+}
+
+// configMapKeys 只列键名：断言失败时不要把整份 config.yaml 也印出来。
+func configMapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// grepLine 取第一行含 needle 的文本：断言失败时只回显那一行。
+func grepLine(text, needle string) string {
+	for _, l := range strings.Split(text, "\n") {
+		if strings.Contains(l, needle) {
+			return strings.TrimRight(l, " \t")
+		}
+	}
+	return "(找不到包含 " + needle + " 的行)"
+}
+
+// TestInstallScriptRendersEnterpriseOIDCCA 覆盖企业 IdP 根 CA 的注入链路：PEM 进
+// aegisops-config 的 oidc-ca.crt 数据键（该卷整目录挂到 /etc/aegisops，所以四份清单都
+// 不用改），配置项同时指向容器内落点。这两处任缺其一，现场看到的都只是「测试连接失败」，
+// 而且第二次重跑安装会把 CA 键冲掉——所以两处都钉住。
+func TestInstallScriptRendersEnterpriseOIDCCA(t *testing.T) {
+	bash := findBash()
+	if bash == "" {
+		t.Skip("找不到可用 bash，跳过 install.sh 渲染测试")
+	}
+	// CA 文件由 bash 侧创建：传给 install.sh 的路径就是它自己能读的那种。
+	out, err := exec.Command(bash, "-c", `f=$(mktemp /tmp/aegisops-oidc-ca.XXXXXX); printf '%s\n' "-----BEGIN CERTIFICATE-----" "VEVTVElORw==" "-----END CERTIFICATE-----" >"$f"; printf '%s' "$f"`).Output()
+	if err != nil {
+		t.Fatalf("创建测试 CA 文件失败：%v", err)
+	}
+	caPath := strings.TrimSpace(string(out))
+	if caPath == "" {
+		t.Fatal("没能拿到测试 CA 文件路径")
+	}
+	t.Cleanup(func() {
+		_ = exec.Command(bash, "-c", fmt.Sprintf("rm -f -- %q", caPath)).Run()
+	})
+
+	base := []string{
+		"--IMAGE=registry.local/aegisops/aegisops",
+		"--STORE_DRIVER=mysql",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+	}
+	data := renderConfigMapData(t, renderManifests(t, bash, append([]string{"--OIDC_CA_FILE=" + caPath}, base...)...))
+	pem, ok := data["oidc-ca.crt"]
+	if !ok {
+		t.Fatalf("ConfigMap 没注入 oidc-ca.crt 数据键，现有键：%v", configMapKeys(data))
+	}
+	if !strings.Contains(pem, "-----BEGIN CERTIFICATE-----") {
+		t.Errorf("注入的 CA 内容不是 PEM：%q", pem)
+	}
+	if !strings.Contains(data["config.yaml"], `oidc_ca_file: "/etc/aegisops/oidc-ca.crt"`) {
+		t.Errorf("config.yaml 没把 oidc_ca_file 指向容器内 CA 文件，实际：%s", grepLine(data["config.yaml"], "oidc_ca_file"))
+	}
+
+	// 没配 CA 时不能留下悬空引用：路径保持为空，也不得多出数据键。
+	data = renderConfigMapData(t, renderManifests(t, bash, base...))
+	if _, ok := data["oidc-ca.crt"]; ok {
+		t.Error("未配置 OIDC_CA_FILE 时也注入了 oidc-ca.crt")
+	}
+	if !strings.Contains(data["config.yaml"], `oidc_ca_file: ""`) {
+		t.Errorf("未配置 OIDC_CA_FILE 时 oidc_ca_file 必须留空，实际：%s", grepLine(data["config.yaml"], "oidc_ca_file"))
+	}
+}
+
+// TestInstallScriptRendersOIDCPKCEFlag 盯 PKCE 兼容开关的渲染：默认必须是 false（不给 IdP 悄悄降级），
+// 显式 --OIDC_DISABLE_PKCE=true 才把配置项翻成 true。这个开关是「企业 IdP 自己把 PKCE
+// 处理坏了、单点登录每次都在令牌交换被拒」的唯一出路，渲染不生效就等于现场无解。
+func TestInstallScriptRendersOIDCPKCEFlag(t *testing.T) {
+	bash := findBash()
+	if bash == "" {
+		t.Skip("找不到可用 bash，跳过 install.sh 渲染测试")
+	}
+	base := []string{
+		"--IMAGE=registry.local/aegisops/aegisops",
+		"--STORE_DRIVER=mysql",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+	}
+
+	data := renderConfigMapData(t, renderManifests(t, bash, base...))
+	if !strings.Contains(data["config.yaml"], "oidc_disable_pkce: false") {
+		t.Errorf("默认必须保留 PKCE，实际：%s", grepLine(data["config.yaml"], "oidc_disable_pkce"))
+	}
+
+	data = renderConfigMapData(t, renderManifests(t, bash, append([]string{"--OIDC_DISABLE_PKCE=true"}, base...)...))
+	if !strings.Contains(data["config.yaml"], "oidc_disable_pkce: true") {
+		t.Errorf("--OIDC_DISABLE_PKCE=true 没把开关渲染成 true，实际：%s", grepLine(data["config.yaml"], "oidc_disable_pkce"))
+	}
+}
+
+// TestInstallScriptRendersOIDCNonceFlag 盯 id_token nonce 兼容开关的渲染：默认必须仍是 false
+// （不给 IdP 悄悄降级），显式 --OIDC_ALLOW_MISSING_NONCE=true 才翻成 true。企业 IdP 收到 nonce
+// 却不持久化时，这是单点登录唯一的出路，渲染不生效现场就只能在页面看见一句 enterprise login failed。
+func TestInstallScriptRendersOIDCNonceFlag(t *testing.T) {
+	bash := findBash()
+	if bash == "" {
+		t.Skip("找不到可用 bash，跳过 install.sh 渲染测试")
+	}
+	base := []string{
+		"--IMAGE=registry.local/aegisops/aegisops",
+		"--STORE_DRIVER=mysql",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+	}
+
+	data := renderConfigMapData(t, renderManifests(t, bash, base...))
+	if !strings.Contains(data["config.yaml"], "oidc_allow_missing_nonce: false") {
+		t.Errorf("默认必须保持 nonce 严格校验，实际：%s", grepLine(data["config.yaml"], "oidc_allow_missing_nonce"))
+	}
+
+	data = renderConfigMapData(t, renderManifests(t, bash, append([]string{"--OIDC_ALLOW_MISSING_NONCE=true"}, base...)...))
+	if !strings.Contains(data["config.yaml"], "oidc_allow_missing_nonce: true") {
+		t.Errorf("--OIDC_ALLOW_MISSING_NONCE=true 没把开关渲染成 true，实际：%s", grepLine(data["config.yaml"], "oidc_allow_missing_nonce"))
+	}
+	// 两个开关同时打开时互不干扰：awk 是按行改值，锚点串彼此是独立配置项。
+	data = renderConfigMapData(t, renderManifests(t, bash,
+		append([]string{"--OIDC_DISABLE_PKCE=true", "--OIDC_ALLOW_MISSING_NONCE=true"}, base...)...))
+	for _, want := range []string{"oidc_disable_pkce: true", "oidc_allow_missing_nonce: true"} {
+		if !strings.Contains(data["config.yaml"], want) {
+			t.Errorf("两个开关同时开启时缺少 %q", want)
+		}
+	}
+}
+
 // tailLines 取输出尾部：失败时给现场看的是结尾几行，而不是整段安装日志。
 func tailLines(s string, n int) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")

@@ -42,13 +42,19 @@ func (st *userStore) ResolveIdentity(ctx context.Context, issuer, subject string
 	defer tx.Rollback()
 	var id string
 	err = tx.QueryRowContext(ctx, "SELECT user_id FROM user_identities WHERE identity_key=?", key).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
+	fresh := errors.Is(err, sql.ErrNoRows)
+	if fresh {
 		id = candidate.ID
 		now := time.Now().UTC()
 		_, err = tx.ExecContext(ctx, "INSERT INTO users(id,username,display_name,email,password_hash,role_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", id, candidate.Username, candidate.DisplayName, candidate.Email, "", candidate.RoleID, "active", now, now)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, "INSERT INTO user_identities(identity_key,user_id,issuer,subject,created_at) VALUES(?,?,?,?,?)", key, id, issuer, subject, now)
 		}
+	} else if err == nil {
+		// 已有账号：只在库里该字段为空时用本次 IdP claim 补齐。Dex 每次登录都用
+		// connector claims 覆盖用户资料，但它没有「管理员可编辑显示名」这件事；我们
+		// 只填空字段，人工改过的值不会被下次登录悄悄覆盖。
+		_, err = tx.ExecContext(ctx, "UPDATE users SET display_name=COALESCE(NULLIF(display_name,''),?), email=COALESCE(NULLIF(email,''),?), updated_at=? WHERE id=?", candidate.DisplayName, candidate.Email, time.Now().UTC(), id)
 	}
 	if err != nil {
 		return nil, err

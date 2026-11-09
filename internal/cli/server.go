@@ -154,7 +154,24 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					"hint", "run npm ci && npm run build in web/ before go build")
 			}
 			handler := newRootHandler(platformHandler, sessionHandler, server.NewStaticHandler(web.Dist()), staticEnabled)
-			enterprise, err := auth.NewEnterpriseLogin(cmd.Context(), authSvc, st.Settings(), providerCipher, cfg.Platform.Server.PublicURL)
+			// 企业 IdP 常用集群自建 CA，镜像的系统信任链不认（platform.auth.oidc_ca_file，
+			// P6 登录网关）。文件读不到就直接起不来：静默回落到系统信任链只会把故障推迟
+			// 到用户点「企业登录」的那一刻，而那时只剩一句「enterprise login unavailable」。
+			var oidcCAPEM []byte
+			if caFile := strings.TrimSpace(cfg.Platform.Auth.OIDCCAFile); caFile != "" {
+				if oidcCAPEM, err = os.ReadFile(caFile); err != nil {
+					return fmt.Errorf("read platform.auth.oidc_ca_file %s: %w", caFile, err)
+				}
+			}
+			if cfg.Platform.Auth.OIDCDisablePKCE {
+				// 关掉 PKCE 是降低安全强度换兼容性，必须在启动日志里留痕，不能让人以为还开着。
+				slog.Warn("OIDC PKCE is disabled by platform.auth.oidc_disable_pkce: authorization code requests are sent without code_challenge; only keep this on for an identity provider that mishandles PKCE")
+			}
+			if cfg.Platform.Auth.OIDCAllowMissingNonce {
+				// 容忍 id_token 缺 nonce 同样是降低安全强度换兼容性，启动日志必须留痕。
+				slog.Warn("OIDC id_token nonce check is relaxed by platform.auth.oidc_allow_missing_nonce: id tokens without a nonce claim are accepted when issued inside the current login transaction; only keep this on for an identity provider that drops the nonce claim")
+			}
+			enterprise, err := auth.NewEnterpriseLogin(cmd.Context(), authSvc, st.Settings(), providerCipher, cfg.Platform.Server.PublicURL, oidcCAPEM, cfg.Platform.Auth.OIDCDisablePKCE, cfg.Platform.Auth.OIDCAllowMissingNonce)
 			if err != nil {
 				return err
 			}

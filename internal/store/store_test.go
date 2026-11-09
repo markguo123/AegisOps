@@ -667,6 +667,7 @@ func runAllStoreCRUD(t *testing.T, s Store) {
 	runClusterCredentialCRUD(t, s)
 	runAuthzGrantCRUD(t, s)
 	runApiTokenCRUD(t, s)
+	runUserSource(t, s)
 }
 
 // TestStoresSQLite 覆盖 SQLite 默认驱动的全量 CRUD。

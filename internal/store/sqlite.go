@@ -52,14 +52,30 @@ func (st *userStore) Create(ctx context.Context, u *User) error {
 
 func (st *userStore) Get(ctx context.Context, id string) (*User, error) {
 	u := &User{}
+	var issuer sql.NullString
 	err := st.s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
-		FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt)
+		SELECT u.id, u.username, u.display_name, u.password_hash, u.role_id, u.status, u.email, u.session_version, u.created_at, u.updated_at,
+		       (SELECT MIN(i.issuer) FROM user_identities i WHERE i.user_id = u.id)
+		FROM users u WHERE u.id = ?`, id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt, &issuer)
 	if err != nil {
 		return nil, mapErr(err, "get user")
 	}
+	u.Source = userSourceFrom(issuer, u.PasswordHash)
 	return u, nil
+}
+
+// userSourceFrom 把「是否绑定外部身份」与「有没有本地口令」折成来源标识，口径见
+// UserSource* 常量。外部身份用标量子查询取，不用 JOIN：user_identities.user_id
+// 唯一，异常数据下也不会把行数放大。
+func userSourceFrom(issuer sql.NullString, passwordHash string) string {
+	if !issuer.Valid || issuer.String == "" {
+		return ""
+	}
+	if passwordHash == "" {
+		return UserSourceOIDC
+	}
+	return UserSourceBoth
 }
 
 func (st *userStore) GetByUsername(ctx context.Context, username string) (*User, error) {
@@ -80,8 +96,9 @@ func (st *userStore) Update(ctx context.Context, u *User) error {
 
 func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
-		FROM users ORDER BY created_at`)
+		SELECT u.id, u.username, u.display_name, u.password_hash, u.role_id, u.status, u.email, u.session_version, u.created_at, u.updated_at,
+		       (SELECT MIN(i.issuer) FROM user_identities i WHERE i.user_id = u.id)
+		FROM users u ORDER BY u.created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -89,9 +106,11 @@ func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	var out []*User
 	for rows.Next() {
 		u := &User{}
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		var issuer sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt, &issuer); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
+		u.Source = userSourceFrom(issuer, u.PasswordHash)
 		out = append(out, u)
 	}
 	return out, rows.Err()
