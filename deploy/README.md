@@ -1,5 +1,7 @@
 # AegisOps 部署清单（四期 P6.2 / P6.5）
 
+> **2026-11-10 架构与计划更新**：目标已收口为默认 Web+Backend、可选内嵌 SPA，Agent 留在后端，单 Chart 与 HTTPS；多集群完成后由 P11 迁移。见 [方案 21](../docs/02-架构与设计/21-方案-Agent服务拆分与多Agent部署收敛-四期.md)。下文仍是当前可执行安装方式，不提前使用目标 Chart 或 role 参数。
+
 ## 身份权限重构验收入口
 
 当前登录网关使用 Secure Cookie。集群验收须提供浏览器可访问的 HTTPS 同源地址；仅有 HTTP NodePort 时无法完成登录/OIDC 验证。`deploy/install.sh` 现接受 `PUBLIC_URL=https://<域名>` 并写入 ConfigMap 的 `platform.server.public_url`；OIDC 回调固定为 `<PUBLIC_URL>/api/v1/auth/oidc/callback`。Ingress 清单仍需按现场证书 Secret 增加 `spec.tls`，并确保浏览器访问的域名和 `PUBLIC_URL` 一致。不要在服务端配置 `allow_loopback_http: true` 来放开集群 HTTP。
