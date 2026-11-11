@@ -5,7 +5,8 @@
 # aegisops-config（platform: 静态段）。平台 Web 配置中心的设置不会影响本 CronJob。
 #
 # 依赖（按序）：namespace / serviceaccount / clusterrole / clusterrolebinding /
-#   deploy/scan/configmap.yaml / deploy/base/pvc.yaml（报告要跨重启保留就必须有）。
+#   deploy/scan/configmap.yaml / deploy/base/pvc.yaml（报告要跨重启保留就必须有；
+#   /reports 用的是独立 reports PVC aegisops-reports，与平台 /data 的 aegisops-data 分离）。
 # 可选：aegisops-llm Secret（模型密钥）；没有就把 scan 配置里的 llm.enabled 改成 false。
 # spec.timeZone 需要 Kubernetes >= 1.27。
 apiVersion: batch/v1
@@ -75,7 +76,7 @@ spec:
                 name: aegisops-scan-config
             - name: reports
               persistentVolumeClaim:
-                claimName: aegisops-data
+                claimName: aegisops-reports
             - name: data
               emptyDir: {}
           securityContext:

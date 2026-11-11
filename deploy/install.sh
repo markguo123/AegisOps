@@ -49,8 +49,8 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 : "${IMAGE:=}"
 : "${TAG:=}"
 : "${IMAGE_WEB:=}"
-: "${BUILD:=false}"
-: "${PUSH:=false}"
+: "${BUILD:=true}"
+: "${PUSH:=true}"
 : "${LOAD_TAR:=}"
 : "${NAMESPACE:=aegisops}"
 : "${FORM:=allinone}"
@@ -59,6 +59,7 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 : "${SQLITE_PATH:=/data/aegisops.db}"
 : "${STORAGE_CLASS:=}"
 : "${REPORT_STORAGE_SIZE:=5Gi}"
+: "${DATA_STORAGE_SIZE:=}"   # 留空 = 跟随 REPORT_STORAGE_SIZE
 : "${PERSIST_REPORTS:=true}"
 : "${EXPOSE:=nodeport}"
 : "${NODE_PORT:=}"
@@ -99,7 +100,7 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 
 # 参数名清单：env 文件与通用 --KEY=VALUE 都按这张表识别，避免拼错键被静默忽略。
 PARAM_KEYS="PROFILE ALLOW_QUICKSTART_HTTP RELEASE_REPOSITORY IMAGE TAG IMAGE_WEB BUILD PUSH LOAD_TAR NAMESPACE FORM STORE_DRIVER MYSQL_DSN
-SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST
+SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE DATA_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST
 INGRESS_CLASS PUBLIC_URL OIDC_CA_FILE ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY
 OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE
 IMAGE_PULL_SECRET
@@ -136,6 +137,7 @@ SEC_ADMIN=aegisops-admin
 SEC_LLM=aegisops-llm
 SEC_BLOBS=aegisops-blobs
 PVC_NAME=aegisops-data
+REPORTS_PVC_NAME=aegisops-reports
 PVC_DEFER_BIND=0   # WaitForFirstConsumer 存储类：把 Bound 校验推迟到工作负载就绪之后
 
 # --- 输出与日志 --------------------------------------------------------------
@@ -267,8 +269,8 @@ AegisOps 四期一键安装脚本（P6.4）：快速体验 / 变量文件生产�
   IMAGE★                后端镜像地址，不含标签，例 registry.local/aegisops
   TAG★                  镜像标签，例 4.0.0
   IMAGE_WEB             前端镜像地址（FORM=separated 必填），不含标签
-  BUILD                 是否由脚本构建镜像，默认 false；显式开启才构建
-  PUSH                  构建后是否推送，默认 false
+  BUILD                 是否由脚本构建镜像，默认 true；显式 BUILD=false 关闭
+  PUSH                  构建后是否推送，默认 true
   LOAD_TAR              离线导入：docker load -i <tar> 后按 IMAGE:TAG 发布，跳过构建
   NAMESPACE             命名空间，默认 aegisops
   FORM                  minimal/allinone 内嵌 SPA / standard/separated 前后端分离
@@ -276,8 +278,9 @@ AegisOps 四期一键安装脚本（P6.4）：快速体验 / 变量文件生产�
   MYSQL_DSN★            STORE_DRIVER=mysql 时必填；只写进 Secret，不进 ConfigMap
   SQLITE_PATH           sqlite 库文件路径，默认 /data/aegisops.db（/data 必须落 PVC）
   STORAGE_CLASS         空 = 使用集群默认存储类（不是不建 PVC）；给了名字就用它
-  REPORT_STORAGE_SIZE   数据/报告 PVC 容量，默认 5Gi
-  PERSIST_REPORTS       默认 true；false 时 /reports 退化 emptyDir（重启即清）
+  REPORT_STORAGE_SIZE   reports 报告 PVC 容量（/reports），默认 5Gi
+  DATA_STORAGE_SIZE     data 数据 PVC 容量（/data）；留空 = 跟随 REPORT_STORAGE_SIZE
+  PERSIST_REPORTS       默认 true；false 时两个 PVC 都不建，/data 与 /reports 退化 emptyDir
   EXPOSE                nodeport（默认）/ ingress / none；给了 INGRESS_HOST 则两者并存
   NODE_PORT             空 = 集群在 NodePort 区间随机分配，末行回显实际端口与节点 URL
   INGRESS_HOST          给了才建 Ingress（自定义域名需要客户端能解析）
@@ -660,8 +663,17 @@ END {
     }
 
     # 锚点 5：PVC 容量与存储类（SC 为空 = 删掉占位注释，走集群默认存储类）
+    # pvc.yaml 里 data 与 reports 是两份独立 PVC，容量按各自参数出：
+    # data 用 SIZE_D（= DATA_STORAGE_SIZE，留空跟随 SIZE），reports 用 SIZE（= REPORT_STORAGE_SIZE）。
+    # pvcname 跨行保持最近一次的 PVC 名（name 行在 storage 行之前，逐块生效）。
     if (base == "pvc.yaml") {
-      if (l ~ /^[ \t]*storage:[ \t]*[0-9]+Mi[ \t]*$/ || l ~ /^[ \t]*storage:[ \t]*[0-9]+Gi[ \t]*$/) {
+      if (l ~ /^[ \t]*name:[ \t]*aegisops-(data|reports)[ \t]*$/) {
+        pvcname = l; sub(/^.*name:[ \t]*/, "", pvcname)
+      }
+      if (pvcname == "aegisops-data" && l ~ /^[ \t]*storage:[ \t]*[0-9]+[MG]i[ \t]*$/) {
+        p = l; sub(/storage:.*$/, "", p); l = p "storage: " SIZE_D
+      }
+      if (pvcname == "aegisops-reports" && l ~ /^[ \t]*storage:[ \t]*[0-9]+[MG]i[ \t]*$/) {
         p = l; sub(/storage:.*$/, "", p); l = p "storage: " SIZE
       }
       if (l ~ /REPLACE_WITH_STORAGE_CLASS/) {
@@ -722,7 +734,9 @@ END {
       p = l; sub(/type:.*$/, "", p); l = p "type: NodePort"
     }
 
-    # 锚点 9：reports / data 卷由 emptyDir 换成 PVC 声明
+    # 锚点 9：reports / data 卷由 emptyDir 换成各自独立的 PVC 声明
+    #（reports → REPORTS_PVC_NAME，data → PVC_NAME：两块卷必须指向不同 Claim，
+    #  否则单 RWO PVC 被同 Pod 的多个卷项引用会让 kubelet 第二次 NodePublish 挂起。）
     if (i > 1 && l ~ /^[ \t]+emptyDir:[ \t]*\{\}[ \t]*$/) {
       prev = lines[i - 1]; want = ""
       if (prev ~ /-[ \t]+name:[ \t]*reports[ \t]*$/ && REPORTS_PVC == "true") want = "reports"
@@ -730,19 +744,20 @@ END {
       if (want != "") {
         p = l; sub(/emptyDir:.*$/, "", p)
         print p "persistentVolumeClaim:"
-        print p "  claimName: " PVC
+        print p "  claimName: " (want == "reports" ? REPORTS_PVC_NAME : PVC)
         skip = 1
       }
     }
 
-    # 锚点 9b：清单里的 /data 默认就写 PVC（跨重启保留）。PERSIST_REPORTS（REPORTS_PVC）
-    # 为 false 时不建 PVC，必须把这条卷退回 emptyDir，否则 Pod 会去 Claim 一个不存在的 PVC
-    # 而卡 Pending。全清单只有 /data 用 persistentVolumeClaim，按声明行直接还原最稳。
+    # 锚点 9b：清单默认就写 PVC（跨重启保留）。PERSIST_REPORTS（REPORTS_PVC）为 false 时
+    # 两个 PVC 都不建，必须把持久卷声明退回 emptyDir，否则 Pod 会去 Claim 一个不存在的 PVC
+    # 而卡 Pending。全清单用 persistentVolumeClaim 的只有 /data 与 /reports 两卷，按声明行
+    # 直接还原最稳（data 与 reports 的 claimName 都会命中）。
     if (REPORTS_PVC == "false") {
       if (l ~ /^[ \t]+persistentVolumeClaim:[ \t]*$/) {
         pvcind = l; sub(/persistentVolumeClaim:.*$/, "", pvcind)
         skip = 1; drop_claim = 1
-      } else if (drop_claim == 1 && l ~ /^[ \t]+claimName:[ \t]*aegisops-data[ \t]*$/) {
+      } else if (drop_claim == 1 && l ~ /^[ \t]+claimName:[ \t]*aegisops-(data|reports)[ \t]*$/) {
         print pvcind "emptyDir: {}"
         skip = 1; drop_claim = 0
       } else {
@@ -843,8 +858,10 @@ render_one() {
   mkdir -p "$(dirname "$dst")"
   awk -v NS="$NAMESPACE" -v IMGREF="$IMAGE_REF" -v WEBREF="$WEB_IMAGE_REF" -v POLICY="$IMAGE_PULL_POLICY" \
       -v HOST="$INGRESS_HOST" -v CLASS="$INGRESS_CLASS" -v SC="$STORAGE_CLASS" -v SIZE="$REPORT_STORAGE_SIZE" \
+      -v SIZE_D="${DATA_STORAGE_SIZE:-$REPORT_STORAGE_SIZE}" \
       -v PULLSEC="$PULLED_SECRET_NAME" -v EXPOSED="$EXPOSED_SVC" -v NODEPORT="$NODE_PORT" \
       -v REPORTS_PVC="$PERSIST_REPORTS" -v DATA_PVC="$DATA_ON_PVC" -v PVC="$PVC_NAME" \
+      -v REPORTS_PVC_NAME="$REPORTS_PVC_NAME" \
       -v DRIVER="$STORE_DRIVER" -v SQLITE="$SQLITE_PATH" -v PUBLICURL="$PUBLIC_URL" \
       -v QUICKHTTP="$ALLOW_QUICKSTART_HTTP" -v CAKEY="$(oidc_ca_container_path)" \
       -v DISABLEPKCE="$(is_true "$OIDC_DISABLE_PKCE" && echo true || echo false)" \
@@ -1043,9 +1060,9 @@ stage_secrets() {
 # 要不要等 Bound，取决于存储类的 volumeBindingMode：Immediate 当场供给，等 Bound 有意
 # 义；WaitForFirstConsumer 必须等工作负载调度到节点才供给，此时在这里等必然白等到超时，
 # 所以改成阶段 6 工作负载就绪后再校验（pvc_verify_deferred_bind）。
-pvc_resolve_class() { # 输出本次 PVC 实际用的存储类名：PVC 已有值 > STORAGE_CLASS > 集群默认
-  local name=""
-  name="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
+pvc_resolve_class() { # $1=PVC 名（默认 $PVC_NAME）；输出该 PVC 实际用的存储类名：PVC 已有值 > STORAGE_CLASS > 集群默认
+  local pvc="${1:-$PVC_NAME}" name=""
+  name="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
   if [[ -z "$name" ]]; then name="$STORAGE_CLASS"; fi
   if [[ -z "$name" ]]; then
     name="$("$KUBECTL_BIN" get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null | tr -d ' ' || true)"
@@ -1057,17 +1074,18 @@ sc_field() { # $1=存储类名 $2=字段名（volumeBindingMode / provisioner）
   "$KUBECTL_BIN" get storageclass "$1" -o "jsonpath={.$2}" 2>/dev/null || true
 }
 
-pvc_diag() { # PVC 没 Bound 时的统一排障输出
-  _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o wide 2>&1 || true)"
-  _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" describe pvc "$PVC_NAME" 2>&1 | tail -n 25 || true)"
+pvc_diag() { # $1=PVC 名（默认 $PVC_NAME）；PVC 没 Bound 时的统一排障输出
+  local pvc="${1:-$PVC_NAME}"
+  _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$pvc" -o wide 2>&1 || true)"
+  _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" describe pvc "$pvc" 2>&1 | tail -n 25 || true)"
   _emit "$("$KUBECTL_BIN" get storageclass 2>&1 || true)"
 }
 
-pvc_wait_bound() { # $1=timeout seconds
-  local timeout="$1" deadline phase
+pvc_wait_bound() { # $1=timeout seconds $2=PVC 名（默认 $PVC_NAME）
+  local timeout="$1" pvc="${2:-$PVC_NAME}" deadline phase
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    phase="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    phase="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     if [[ "$phase" == "Bound" ]]; then
       return 0
     fi
@@ -1082,8 +1100,16 @@ pvc_wait_bound() { # $1=timeout seconds
 pvc_align_class() {
   is_true "$PERSIST_REPORTS" || return 0
   local existing
-  if "$KUBECTL_BIN" -n "$NAMESPACE" get deployment aegisops-server >/dev/null 2>&1; then
-    die "发现没有安装记录的既有实例，拒绝快速体验覆盖" "备份后使用生产变量文件显式升级"
+  # 快速体验撞上「没有安装记录的既有实例」才拒绝覆盖；生产升级走 check_ownership +
+  # drain_existing_backend 的确认停机路径，命中既有 Deployment 是合法升级，不能在这里拦。
+  # 仅当安装记录 CM 不存在或 manager 不是 script 时判定为「无记录」，否则快速体验
+  # 升级自己之前装过的持久化实例也应放行。
+  if [[ "$PROFILE" == "quickstart" ]] && "$KUBECTL_BIN" -n "$NAMESPACE" get deployment aegisops-server >/dev/null 2>&1; then
+    local record
+    record="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.manager}' --ignore-not-found 2>/dev/null || true)"
+    if [[ "$record" != "script" ]]; then
+      die "发现没有安装记录的既有实例，拒绝快速体验覆盖" "备份后使用生产变量文件显式升级"
+    fi
   fi
   existing="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
   [[ -n "$existing" ]] || return 0
@@ -1105,33 +1131,44 @@ stage_pvc() {
     warn "PERSIST_REPORTS=false：/data 与 /reports 用临时卷，Pod 重建后清空（仅适合临时验证）"
     stage_done; return 0
   fi
-  pvc_align_class   # 先对齐不可变的 storageClassName，再下发
+
+  # 先对齐两份 PVC 各自不可变的 storageClassName，再一次性下发 base/pvc.yaml（两份 Claim 同文件）。
+  pvc_align_class "$PVC_NAME"
+  pvc_align_class "$REPORTS_PVC_NAME"
   apply_rendered base/pvc.yaml
 
-  local class mode phase
-  class="$(pvc_resolve_class)"
-  mode="$(sc_field "${class:-none}" volumeBindingMode)"
-  phase="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  local pvc class mode phase size
+  PVC_DEFER_BIND=0
+  for pvc in "$PVC_NAME" "$REPORTS_PVC_NAME"; do
+    class="$(pvc_resolve_class "$pvc")"
+    mode="$(sc_field "${class:-none}" volumeBindingMode)"
+    phase="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "$pvc" == "$REPORTS_PVC_NAME" ]]; then
+      size="$REPORT_STORAGE_SIZE"
+    else
+      size="${DATA_STORAGE_SIZE:-$REPORT_STORAGE_SIZE}"
+    fi
 
-  if [[ "$phase" == "Bound" ]]; then
-    ok "PVC ${PVC_NAME} 已 Bound（${REPORT_STORAGE_SIZE}，存储类 ${class:-<未知>}）"
-    stage_done; return 0
-  fi
+    if [[ "$phase" == "Bound" ]]; then
+      ok "PVC ${pvc} 已 Bound（${size}，存储类 ${class:-<未知>}）"
+      continue
+    fi
 
-  if [[ "$mode" == "WaitForFirstConsumer" ]]; then
-    info "存储类 ${class} 的绑定模式是 WaitForFirstConsumer（延迟绑定）：PVC 此刻 Pending 属正常"
-    info "  卷要等阶段 6 的工作负载调度到节点时才供给，本阶段不等待，改到工作负载就绪后校验"
-    PVC_DEFER_BIND=1
-    stage_done; return 0
-  fi
+    if [[ "$mode" == "WaitForFirstConsumer" ]]; then
+      info "存储类 ${class} 的绑定模式是 WaitForFirstConsumer（延迟绑定）：PVC ${pvc} 此刻 Pending 属正常"
+      info "  卷要等阶段 6 的工作负载调度到节点时才供给，本阶段不等待，改到工作负载就绪后校验"
+      PVC_DEFER_BIND=1
+      continue
+    fi
 
-  info "等待 PVC Bound（存储类 ${class:-<未指定>}，绑定模式 ${mode:-<未知>}，最多 ${WAIT_TIMEOUT}s）"
-  if ! pvc_wait_bound "$WAIT_TIMEOUT"; then
-    pvc_diag
-    die "PVC ${PVC_NAME} 在 ${WAIT_TIMEOUT}s 内没有 Bound" \
-      "看上面 events：多为存储类无 provisioner、容量超限、访问模式不匹配（多副本要 RWX）；绑定模式为 WaitForFirstConsumer 时属正常延迟，本脚本会自动改到阶段 6 之后校验"
-  fi
-  ok "PVC ${PVC_NAME} 已 Bound（${REPORT_STORAGE_SIZE}，存储类 ${class:-集群默认}）"
+    info "等待 PVC ${pvc} Bound（存储类 ${class:-<未指定>}，绑定模式 ${mode:-<未知>}，最多 ${WAIT_TIMEOUT}s）"
+    if ! pvc_wait_bound "$WAIT_TIMEOUT" "$pvc"; then
+      pvc_diag "$pvc"
+      die "PVC ${pvc} 在 ${WAIT_TIMEOUT}s 内没有 Bound" \
+        "看上面 events：多为存储类无 provisioner、容量超限、访问模式不匹配（多副本要 RWX）；绑定模式为 WaitForFirstConsumer 时属正常延迟，本脚本会自动改到阶段 6 之后校验"
+    fi
+    ok "PVC ${pvc} 已 Bound（${size}，存储类 ${class:-集群默认}）"
+  done
   stage_done
 }
 
@@ -1139,16 +1176,18 @@ stage_pvc() {
 # （provisioner 不健康、NFS 目录不可写、节点没有本地盘等），Pod 会卡在 Pending。
 pvc_verify_deferred_bind() {
   [[ $PVC_DEFER_BIND -eq 1 ]] || return 0
-  local class
-  class="$(pvc_resolve_class)"
-  info "校验延迟绑定的 PVC ${PVC_NAME}（存储类 ${class:-<未知>}）"
-  if ! pvc_wait_bound 60; then
-    pvc_diag
-    _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" get pods -o wide 2>&1 | tail -n 12 || true)"
-    die "延迟绑定模式下 PVC 仍未 Bound：${class} 的 provisioner 没能创建出卷" \
-      "看上面 events 里 provisioner 的报错（NFS/CSI 常见是导出目录不存在、权限不足或后端不可达）；修好后原地重跑本脚本"
-  fi
-  ok "PVC ${PVC_NAME} 已随工作负载 Bound"
+  local pvc class
+  for pvc in "$PVC_NAME" "$REPORTS_PVC_NAME"; do
+    class="$(pvc_resolve_class "$pvc")"
+    info "校验延迟绑定的 PVC ${pvc}（存储类 ${class:-<未知>}）"
+    if ! pvc_wait_bound 60 "$pvc"; then
+      pvc_diag "$pvc"
+      _emit "$("$KUBECTL_BIN" -n "$NAMESPACE" get pods -o wide 2>&1 | tail -n 12 || true)"
+      die "延迟绑定模式下 PVC ${pvc} 仍未 Bound：${class} 的 provisioner 没能创建出卷" \
+        "看上面 events 里 provisioner 的报错（NFS/CSI 常见是导出目录不存在、权限不足或后端不可达）；修好后原地重跑本脚本"
+    fi
+    ok "PVC ${pvc} 已随工作负载 Bound"
+  done
 }
 
 # --- 阶段 5：迁移 Job --------------------------------------------------------
@@ -1428,7 +1467,7 @@ banner() {
   _emit "${C_BLU}AegisOps 安装（${PROFILE}）${C_OFF}  形态=${FORM}  命名空间=${NAMESPACE}  存储=${STORE_DRIVER}"
   _emit "  镜像      ：${IMAGE_REF}${WEB_IMAGE_REF:+ / ${WEB_IMAGE_REF}}   拉取策略=${IMAGE_PULL_POLICY}"
   _emit "  暴露方式  ：${EXPOSE}${INGRESS_HOST:+ + ingress(${INGRESS_HOST})}${NODE_PORT:+  nodePort=${NODE_PORT}(空=随机)}"
-  _emit "  持久化    ：PVC=${PERSIST_REPORTS} 容量=${REPORT_STORAGE_SIZE} 存储类=${STORAGE_CLASS:-<集群默认>}"
+  _emit "  持久化    ：reports=${REPORTS_PVC_NAME}(${REPORT_STORAGE_SIZE}) data=${PVC_NAME}(${DATA_STORAGE_SIZE:-$REPORT_STORAGE_SIZE}) 存储类=${STORAGE_CLASS:-<集群默认>}"
   _emit "  对象存储  ：${BLOBS_BACKEND}${BLOBS_BUCKET:+ bucket=${BLOBS_BUCKET}}   写权限 RBAC=${ENABLE_WRITE}"
   _emit "  日志      ：${LOG_FILE}"
   if [[ -n "$ENV_FILE_PATH" ]]; then _emit "  参数文件  ：${ENV_FILE_PATH}（CLI > 环境变量 > 文件 > 内置默认）"; fi
@@ -1732,7 +1771,7 @@ prepare_installation() {
 }
 
 resolve_quickstart_storage() {
-  local state sc existing installed phase actual
+  local state sc existing_data existing_reports installed phase actual
   state="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.persistence}' --ignore-not-found)" ||
     die "无法读取安装记录" "检查集群连接和 ConfigMap 读取权限"
   if [[ "$state" == "true" || "$state" == "false" ]]; then
@@ -1750,8 +1789,10 @@ resolve_quickstart_storage() {
     fi
     return
   fi
-  existing="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get pvc aegisops-data -o name --ignore-not-found)" || die "无法检查数据 PVC" "检查读取权限"
-  if [[ -n "$existing" ]]; then PERSIST_REPORTS=true; return; fi
+  # 双 PVC 同总开关创建：检出任一即说明上个版本开启了持久化（data/reports 各一）。
+  existing_data="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get pvc aegisops-data -o name --ignore-not-found)" || die "无法检查数据 PVC" "检查读取权限"
+  existing_reports="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get pvc aegisops-reports -o name --ignore-not-found)" || die "无法检查报告 PVC" "检查读取权限"
+  if [[ -n "$existing_data" || -n "$existing_reports" ]]; then PERSIST_REPORTS=true; return; fi
   sc="$("$KUBECTL_BIN" --request-timeout=15s get storageclass -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{" "}{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}{"\n"}{end}')" ||
     die "无法读取 StorageClass" "检查集群访问权限"
   sc="$(printf '%s\n' "$sc" | awk '$2 == "true" || $3 == "true" {print $1}')"

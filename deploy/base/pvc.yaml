@@ -1,16 +1,37 @@
 # 持久卷（P6.2 / P6.5 / D-31）：默认建议创建（install.sh 会建，PERSIST_REPORTS=false 才不建）。
-# 后端 Deployment 的 /data 默认就落在本 PVC 上（会话/审计 + SQLite 兜底时的库文件），
-# 因此需要创建。额外的留档需求：
-#   1) 报告与导出需要跨重启保留——/reports 默认是 emptyDir，重启即清，要留档就换到本 Claim。
+# 数据与报告是两个独立 PVC，各自跨 Pod 重启保留、互不共享：
 #
-# 挂载方式：/data 已默认引用本 Claim；要把 /reports 也换成 Claim 就 apply
-# deploy/example/deployment-reports-pvc.yaml。
-# 容量与访问模式按现场存储能力调整（install.sh 用 REPORT_STORAGE_SIZE 渲染，默认 5Gi）；
-# 单副本 RWO 足够，扩副本前改 RWX。
+#   1) aegisops-data     —— 后端 Deployment 的 /data（会话/审计 + SQLite 兜底时的库文件，
+#                            以及 BLOBS_BACKEND=dir 时的对象副本）。由 DATA_ON_PVC 决定是否挂载。
+#   2) aegisops-reports  —— /reports 报告留档目录（latest.md / latest.json / 日报）。
+#                            由 PERSIST_REPORTS 决定是否挂载。
+#
+# 两个 Claim 区分挂载，避免单 RWO PVC 被同一 Pod 的多个卷项同时引用导致 kubelet
+# 第二次 NodePublish 挂起（Pod 卡 ContainerCreating）。
+# 容量与访问模式按现场存储能力调整（install.sh 用 REPORT_STORAGE_SIZE 渲染 reports 容量，
+# DATA_STORAGE_SIZE 渲染 data 容量，默认各自 5Gi）；单副本 RWO 足够，扩副本前改 RWX。
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: aegisops-data
+  namespace: aegisops
+  labels:
+    app: aegisops
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+  # 保持注释 = 用集群默认存储类（install.sh 的 STORAGE_CLASS 留空就是这个语义）。
+  # 现场要指定就取消注释并改成 kubectl get storageclass 里的名字；
+  # 取消注释却仍保留下面这行的模板占位值，会让 PVC 一直卡在 Pending。
+  # storageClassName: REPLACE_WITH_STORAGE_CLASS
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aegisops-reports
   namespace: aegisops
   labels:
     app: aegisops

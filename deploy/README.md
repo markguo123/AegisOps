@@ -227,9 +227,13 @@ Deployment 即可，不需要先删；反向切换同理。
 
 ## 可选件
 
-- 报告跨重启保留：先 `kubectl apply -f deploy/base/pvc.yaml`（`storageClassName` 留注释=集群默认存储类，
-  要指定就改成现场存储类名），再
-  `kubectl -n aegisops patch deploy aegisops-server --type=strategic --patch-file deploy/example/deployment-reports-pvc.yaml`。
+- 数据与报告持久化（**双独立 PVC，随 `PERSIST_REPORTS` 总开关同生同灭**）：`deploy/base/pvc.yaml` 同时创建
+  `aegisops-data`（/data：会话/审计 + SQLite 兜底 + `blobs=dir` 时的对象副本）与 `aegisops-reports`
+  （/reports：报告留档）两块独立 RWO PVC；`storageClassName` 留注释=集群默认存储类，要指定就改成现场存储类名。
+  `install.sh` 的 `PERSIST_REPORTS=true` 为默认（`--PERSIST_REPORTS=false` 关闭）并同时控制两块——关闭时两卷
+  一起退化为 emptyDir（离线预演/quickstart 场景，Pod 重建即清）；data/reports 容量分别由
+  `DATA_STORAGE_SIZE`（留空跟随 `REPORT_STORAGE_SIZE`）/`REPORT_STORAGE_SIZE` 控制，PV 容量不可变，改参需重建 PVC。
+  `deploy/example/deployment-reports-pvc.yaml` 保留为手工迁移参考补丁（清单已是双 PVC 后一般不再需要）。
 - 部署期种子配置（模型地址/模型名/默认命名空间）：`deploy/example/env-overrides.example.yaml`。
   密钥态变量（DSN、`AEGISOPS_LLM_API_KEY`）恒优先，种子态只在配置库该键为空时生效一次。
 - 开放写操作：`kubectl apply -f deploy/rbac-write.example.yaml`，并在配置中心按命名空间授权；

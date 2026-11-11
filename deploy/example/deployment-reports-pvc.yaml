@@ -1,4 +1,4 @@
-# 把后端 /reports 的临时卷换成 PVC（P6.5：报告与导出跨重启保留）。
+# 把后端 /reports 的临时卷换成独立 reports PVC（P6.5：报告与导出跨重启保留）。
 #
 # 本文件是 strategic merge patch，不是可 apply 的清单（刻意不写 apiVersion/kind）：
 # 只能用 kubectl patch --patch-file，`kubectl apply -R -f deploy/` 会在它这里报校验错误。
@@ -11,8 +11,10 @@
 # 会被 API 校验拒绝。
 #
 # 什么时候真的需要：报告/导出要留档。SQLite 兜底存储时本文件不是必需——后端 Deployment
-# 的 /data 已默认落在同一个 PVC（aegisops-data）上，库文件/会话/审计自然被持久化；
-# 本文件只管把 /reports 也从 emptyDir 换到这个 Claim 上。
+# 的 /data 已默认落在数据 PVC（aegisops-data）上，库文件/会话/审计自然被持久化；
+# 本文件只管把 /reports 也从 emptyDir 换到独立的报告 PVC（aegisops-reports）上。
+# 两份 Claim 相互独立、各自 RWO，data 与 reports 分别为单独卷项，避免同一 RWO 卷
+# 被同一 Pod 引用两次导致第二次挂载挂起。
 spec:
   template:
     spec:
@@ -20,4 +22,4 @@ spec:
         - name: reports
           emptyDir: null
           persistentVolumeClaim:
-            claimName: aegisops-data
+            claimName: aegisops-reports

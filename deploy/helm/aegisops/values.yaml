@@ -14,9 +14,12 @@ database:
   existingSecret: "" # required for mysql; key: dsn (must include parseTime=true)
 persistence:
   enabled: true
-  existingClaim: ""
+  existingClaim: "" # bring-your-own claim for /data (aegisops-data); reports stays managed here
   storageClass: "" # cluster default
+  # Backward-compatible fallback for both volumes below (legacy single "size" key).
   size: 5Gi
+  dataSize: 5Gi # aegisops-data PV capacity (session/audit + sqlite fallback + blobs=dir copies)
+  reportsSize: 5Gi # aegisops-reports PV capacity (/reports report archive)
 credentials:
   existingSecret: "" # keys: key (64 hex chars), password; otherwise generated once
 server:

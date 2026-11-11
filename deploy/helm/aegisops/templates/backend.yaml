@@ -89,7 +89,12 @@ spec:
           emptyDir: {}
           {{- end }}
         - name: reports
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-reports" $name }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         - name: tmp
           emptyDir: {}
         - name: home

@@ -77,15 +77,18 @@ spec:
               mountPath: /etc/aegisops
               readOnly: true
             # 可写区：/data 会话与审计落盘、/reports 报告导出。业务数据的权威存储是
-            # MySQL，二进制对象落在对象存储后端。/data 默认就挂在 PVC aegisops-data 上
-            # （跨重启保留，SQLite 兜底时的库文件也在这里），/reports 默认 emptyDir。
-            # 要不要把 /reports 换 PVC 看三态：
+            # MySQL，二进制对象落在对象存储后端。/data 挂在 PVC aegisops-data 上、/reports
+            # 挂在 PVC aegisops-reports 上：两块各自独立的 RWO PVC（不能共用同一 Claim，
+            # 否则 kubelet 对同一卷第二次 NodePublish 会挂起，Pod 卡 ContainerCreating）。
+            # 两块卷同随 PERSIST_REPORTS 总开关创建/关闭（install.sh 渲染 base/pvc.yaml）：
+            #   true  → 两块都挂 PVC（生产默认）
+            #   false → 两个 PVC 都不建，/data 与 /reports 一起退化 emptyDir（预览/快速起）
+            # 什么时候必须持久化看三态：
             #   platform.store.driver=sqlite    → PVC 必需（平台库文件本身就在 /data）
             #   platform.blobs.driver=dir       → PVC 必需（对象只有 /data/blobs 这一份副本，
             #                                     Pod 重建即丢内容，登记表只剩 missing 行）
             #   platform.blobs.driver=s3 / db   → driver=s3 仅报告可选：对象在桶里、db 在库里，
             #                                     只有 report.directory 的兼容副本值得留卷
-            # /data 已默认 PVC；/reports 要跨重启保留就 apply deploy/example/deployment-reports-pvc.yaml。
             # /tmp 还兼作 driver=s3 的上传中转目录（platform.blobs.tmp_dir），必须保持可写。
             - name: data
               mountPath: /data
@@ -134,7 +137,8 @@ spec:
           persistentVolumeClaim:
             claimName: aegisops-data
         - name: reports
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: aegisops-reports
         - name: tmp
           emptyDir: {}
         - name: home
