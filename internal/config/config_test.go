@@ -145,6 +145,9 @@ func TestAgentValidateErrors(t *testing.T) {
 		{"timeout", func(c *Config) { c.Agent.Timeout = 0 }},
 		{"tool_calling", func(c *Config) { c.Agent.ToolCalling = "json" }},
 		{"result_max_bytes", func(c *Config) { c.Agent.ResultMaxBytes = 0 }},
+		{"context_window_small", func(c *Config) { c.Agent.ContextWindow = 1000 }},
+		{"context_window_output", func(c *Config) { c.Agent.ContextWindow = c.LLM.MaxTokens }},
+		{"context_window_large", func(c *Config) { c.Agent.ContextWindow = 4194305 }},
 		{"session_dir", func(c *Config) { c.Agent.SessionDir = "" }},
 		{"webui_addr", func(c *Config) { c.WebUI.Addr = "" }},
 	}

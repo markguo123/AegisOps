@@ -26,6 +26,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	a.SetState(AgentStateRunning)
 	defer func() { a.SetState(AgentStateDone) }()
 	a.clearSensitiveValues()
+	a.unknownWrite = false
 	defer a.clearSensitiveValues()
 
 	a.Session.AddMessage(session.Message{Role: "user", Type: "text", Content: query})
@@ -64,17 +65,34 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	toolCallsTotal := 0
 	turnBytes := 0
 	failedToolCalls := map[string]int{}
+	retryableFailures := map[string]bool{}
+	compactionRequests := 8
+	if a.resultCache != nil {
+		a.resultCache.entries = map[string]resultEntry{}
+		a.resultCache.bytes, a.resultCache.readBytes = 0, 0
+		defer func() { clear(a.resultCache.entries) }()
+	}
 
 	for iter := 0; iter < a.MaxIterations; iter++ {
 		// P1.8: 思考 Step 必须在发起本轮 LLM 调用之前开始。reason.started 若晚于
 		// reasoning 增量下发，前端只能收到一堆没有归属的思考分片（P0-3 同类顺序问题）。
 		reason := a.beginStep(ctx, session.StepReason, "", "")
 		req := llm.ChatRequest{Messages: msgs}
+		req.MaxTokens = a.OutputTokens
 		if mode == "native" {
 			req.Tools = a.Tools.Schemas()
 		} else {
 			req.JSONMode = true
 		}
+		prepared, compactUsage, budgetErr := a.prepareContext(ctx, msgs, req.Tools, query, &compactionRequests)
+		usage = addUsage(usage, compactUsage)
+		if budgetErr != nil {
+			a.completeStep(ctx, reason, false, budgetErr.Error())
+			a.turn.Token = toSessionUsage(usage)
+			_ = a.turn.Fail(budgetErr.Error())
+			return "", usage, budgetErr
+		}
+		msgs, req.Messages = prepared, prepared
 		a.audit(ctx, audit.ActionLLMRequest, map[string]any{"mode": mode, "messages": len(msgs), "tools": len(req.Tools)})
 		resp, streamed, err := a.chatOnce(ctx, mode, req)
 		if err != nil {
@@ -126,6 +144,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 
 		// 批量审批：native 模式下一轮返回 2+ 写工具调用时，合并为一次确认。
 		batchApproved, batchDeclined := a.batchApprove(ctx, step.calls)
+		answered := map[string]bool{}
 
 		for _, call := range step.calls {
 			toolCallsTotal++
@@ -135,14 +154,14 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				_ = a.turn.Fail(err.Error())
 				return "", usage, err
 			}
-			failureKey := toolCallFailureKey(call)
+			failureKey := normalizedFailureKey(call)
 			var tr tools.ToolResult
 			toolExecuted := false
 			// P1.8: 工具调用 Step（参数在落库前由 Store 统一脱敏）。
 			safeCallArgs := a.safeArguments(call.Arguments)
 			toolStep := a.beginStep(ctx, session.StepTool, call.Name, string(safeCallArgs))
 			started := time.Now()
-			if failedToolCalls[failureKey] > 0 {
+			if failedToolCalls[failureKey] > 0 && (!retryableFailures[failureKey] || failedToolCalls[failureKey] >= 2) {
 				// 同一工具、同一参数已经失败过，禁止原样重试；
 				// 让 LLM 更换参数或选择替代工具，避免耗尽工具调用预算。
 				tr = tools.ResultError("same tool call already failed; do not retry the identical call, change the arguments or choose another tool")
@@ -159,6 +178,13 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				}
 				tr = a.executeTool(ctx, call, batchApproved[call.ID])
 			}
+			readonly := false
+			if tool, exists := a.Tools.Lookup(call.Name); exists {
+				readonly = tool.IsReadOnly(call.Arguments) && !a.toolHasShell(tool, call.Arguments)
+			}
+			feedback := failureFeedback(tr, readonly)
+			code := tools.Present(tr).ErrorCode
+			retryableFailures[failureKey] = readonly && (code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable)
 			durationMs := time.Since(started).Milliseconds()
 			presentation := tools.Present(tr)
 			ok := presentation.Ok
@@ -185,10 +211,13 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			observe.ExitCode = presentation.ExitCode
 			observe.ErrorCode = presentation.ErrorCode
 			a.completeStep(ctx, observe, ok, truncateText(a.redactSensitive(tr.Text), 240))
-			if !ok && (toolExecuted || presentation.ErrorCode == tools.ErrorRBACDenied) {
+			if !ok && (toolExecuted || presentation.ErrorCode == tools.ErrorRBACDenied || presentation.ErrorCode == tools.ErrorScopeDenied || presentation.ErrorCode == tools.ErrorAuthentication) {
 				failedToolCalls[failureKey]++
 			}
-			text, _ := tools.MarshalForLLM(tr, a.ResultMaxBytes)
+			text := a.resultForModel(ctx, call, tr)
+			if feedback != "" {
+				text += "\nTool failure guidance: " + feedback
+			}
 			safeText, safeTruncated := tools.MarshalSafe(tr, a.ResultMaxBytes)
 			safeText = a.redactSensitive(safeText)
 			turnBytes += len(text)
@@ -201,6 +230,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			}
 			if mode == "native" {
 				msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: call.ID, Content: toolContent})
+				answered[call.ID] = true
 				a.Session.AddMessage(session.Message{
 					Role: "tool", Type: "tool-call-response", Name: call.Name, ToolCallID: call.ID,
 					Content: sessionContent, Arguments: safeCallArgs, Data: safeData, Ok: &ok,
@@ -234,6 +264,14 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			// 单轮上下文预算：超限后停止执行本批剩余工具，让 LLM 基于现有证据回答。
 			if budgetExceeded {
 				break
+			}
+		}
+		// Complete the protocol batch without executing skipped operations.
+		if mode == "native" {
+			for _, pending := range step.calls {
+				if !answered[pending.ID] {
+					msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: pending.ID, Content: "NOT EXECUTED: earlier tool failure, refusal or budget limit stopped this batch. Do not assume this operation was applied."})
+				}
 			}
 		}
 	}
@@ -645,7 +683,7 @@ func (a *Agent) approvalDecision(t tools.Tool, args json.RawMessage) approval.De
 func (a *Agent) batchApprove(ctx context.Context, calls []llm.ToolCall) (approved, declined map[string]bool) {
 	approved = map[string]bool{}
 	declined = map[string]bool{}
-	if a.Approver == nil || len(calls) < 2 {
+	if a.unknownWrite || a.Approver == nil || len(calls) < 2 {
 		return // 无 approver 或少于 2 个调用，走个体审批
 	}
 	// 收集需要审批的调用（非只读 + 未授权 + 未被硬拦截，或 shell 只读）。
@@ -759,6 +797,10 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	t, ok := a.Tools.Lookup(call.Name)
 	if !ok {
 		return tools.ResultError("unknown tool: " + call.Name)
+	}
+	if a.unknownWrite && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
+		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{"name": call.Name, "reason": "previous_write_outcome_unknown"})
+		return tools.ResultErrorWithCode(tools.ErrorConflict, "previous write outcome unknown; no further writes in this turn. Reconcile with authorized reads and ask a human to verify")
 	}
 	var argsView map[string]any
 	_ = json.Unmarshal(call.Arguments, &argsView)
@@ -932,6 +974,12 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	tr, err := t.Execute(execCtx, call.Arguments)
 	if err != nil {
 		tr = tools.ResultError(err.Error())
+	}
+	if !tools.Present(tr).Ok && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
+		code := tools.Present(tr).ErrorCode
+		if code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable || code == tools.ErrorToolFailed {
+			a.unknownWrite = true
+		}
 	}
 	a.recordSensitiveValues(tr.SensitiveValues)
 	hasErr := !tools.Present(tr).Ok

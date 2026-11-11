@@ -163,6 +163,9 @@ type RuntimeConfigBinder interface {
 	SetRuntimeConfigResolver(RuntimeConfigResolver)
 }
 
+// ChatResultStoreBinder reuses the platform object gateway for safe tool results.
+type ChatResultStoreBinder interface{ SetResultStore(agent.ResultStore) }
+
 type chatService struct {
 	cfg            *config.Config
 	sessions       *session.Manager
@@ -186,7 +189,8 @@ type chatService struct {
 	// 三期 ChatEvent 事件流原样保留（D-08：迁移期旧事件继续可消费）。
 	sink func(sse.Event)
 	// resolveCfg 非空时每轮 Chat 用它取生效配置（P6.1，配置中心 + env 覆盖）。
-	resolveCfg RuntimeConfigResolver
+	resolveCfg  RuntimeConfigResolver
+	resultStore agent.ResultStore
 }
 
 // NewChat 创建二期 Agent 服务。
@@ -280,6 +284,14 @@ func NewChatWithStoreAndSink(cfg *config.Config, newReader func() (scanner.Reade
 
 // SetRuntimeConfigResolver 实现 RuntimeConfigBinder（P6.1）。
 func (s *chatService) SetRuntimeConfigResolver(fn RuntimeConfigResolver) { s.resolveCfg = fn }
+
+func (s *chatService) SetResultStore(results agent.ResultStore) {
+	if gateway, ok := results.(*BlobGateway); ok && s.store != nil {
+		s.resultStore = chatResultStore{gateway: gateway, store: s.store}
+		return
+	}
+	s.resultStore = results
+}
 
 // effectiveConfig 返回本轮 Chat 的生效配置。装配了解析器时以其结果为准，解析失败
 // 直接向上报错——绝不静默回落到启动基线或内置默认模型地址（P6.1 验收口径）。
@@ -581,6 +593,10 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		ResultMaxBytes: cfg.Agent.ResultMaxBytes,
 		TurnMaxBytes:   cfg.Agent.TurnMaxBytes,
 		HistoryTurns:   cfg.Agent.HistoryTurns,
+		ContextWindow:  cfg.Agent.ContextWindow,
+		OutputTokens:   cfg.LLM.MaxTokens,
+		ResultStore:    s.resultStore,
+		DisabledTools:  cfg.Agent.DisabledTools,
 		TurnUserID:     req.UserID,
 		AccessScope:    req.AccessScope,
 	})

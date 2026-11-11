@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/k8s-ai/k8s-ai/internal/security"
 )
@@ -69,12 +70,28 @@ func truncate(s *string, maxBytes int) bool {
 	if len(*s) <= maxBytes {
 		return false
 	}
-	head := maxBytes / 4
-	tail := maxBytes - head - len("\n…[TRUNCATED]…\n")
+	const marker = "\n…[TRUNCATED]…\n"
+	if maxBytes <= len(marker) {
+		n := maxBytes
+		for n > 0 && !utf8.RuneStart((*s)[n]) {
+			n--
+		}
+		*s = (*s)[:n]
+		return true
+	}
+	head := min(maxBytes/4, maxBytes-len(marker))
+	for head > 0 && !utf8.RuneStart((*s)[head]) {
+		head--
+	}
+	tail := maxBytes - head - len(marker)
 	if tail < 0 {
 		tail = 0
 	}
-	*s = (*s)[:head] + "\n…[TRUNCATED]…\n" + (*s)[len(*s)-tail:]
+	tailStart := len(*s) - tail
+	for tailStart < len(*s) && !utf8.RuneStart((*s)[tailStart]) {
+		tailStart++
+	}
+	*s = (*s)[:head] + marker + (*s)[tailStart:]
 	return true
 }
 

@@ -147,6 +147,7 @@ agent:
   max_tool_calls: 20          # 单轮工具调用上限
   timeout: 5m                 # Agent 单次会话超时
   tool_calling: native        # native | shim | auto（auto 先 native，不支持时降级 shim）
+  context_window: 65536       # 模型上下文 Token 容量（含输出预留）；按所用模型设置
   approval_mode: strict       # strict | smart（smart 需显式开启）
   require_approval: true      # 写操作必须人工确认（false 仅用于 --skip-permissions 场景）
   skip_permissions: false     # true 时跳过审批（非交互自动化，慎用）

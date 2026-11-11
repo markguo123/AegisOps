@@ -68,6 +68,11 @@ type Options struct {
 	ResultMaxBytes int
 	TurnMaxBytes   int
 	HistoryTurns   int
+	// ContextWindow is the model's configured input+output token capacity.
+	ContextWindow int
+	OutputTokens  int
+	ResultStore   ResultStore
+	DisabledTools []string
 }
 
 // Agent 是 Agent 实例：消息总线 + 状态机 + Agentic Loop（P2）。
@@ -98,6 +103,11 @@ type Agent struct {
 	ResultMaxBytes int
 	TurnMaxBytes   int
 	HistoryTurns   int
+	ContextWindow  int
+	OutputTokens   int
+	ResultStore    ResultStore
+	resultCache    *resultCache
+	unknownWrite   bool
 
 	// turn 是当前聊天轮的运行轨迹（P1.8），Chat 执行期间非 nil。
 	turn            *session.Turn
@@ -129,6 +139,9 @@ func New(opts Options) *Agent {
 		ResultMaxBytes:  opts.ResultMaxBytes,
 		TurnMaxBytes:    opts.TurnMaxBytes,
 		HistoryTurns:    opts.HistoryTurns,
+		ContextWindow:   opts.ContextWindow,
+		OutputTokens:    opts.OutputTokens,
+		ResultStore:     opts.ResultStore,
 		sensitiveValues: map[string]struct{}{},
 	}
 	if a.MaxIterations <= 0 {
@@ -151,6 +164,32 @@ func New(opts Options) *Agent {
 	}
 	if a.HistoryTurns <= 0 {
 		a.HistoryTurns = 20
+	}
+	if a.ContextWindow <= 0 {
+		a.ContextWindow = 65536
+	}
+	if a.OutputTokens <= 0 {
+		a.OutputTokens = 4096
+	}
+	// Each run owns its reader and references; never modify a shared registry.
+	if opts.Tools != nil {
+		a.Tools = tools.NewRegistry()
+		for _, tool := range opts.Tools.All() {
+			_ = a.Tools.Register(tool)
+		}
+		disabledReader := false
+		for _, name := range opts.DisabledTools {
+			if name == "read_tool_result" {
+				disabledReader = true
+			}
+		}
+		if !disabledReader {
+			a.resultCache = &resultCache{agent: a, entries: map[string]resultEntry{}}
+		}
+		a.Tools.Remove("read_tool_result")
+		if !disabledReader {
+			_ = a.Tools.Register(a.resultCache)
+		}
 	}
 	if a.ApprovalPolicy == nil {
 		// 未显式指定时默认 strict + 要求审批，与 v1 行为一致。

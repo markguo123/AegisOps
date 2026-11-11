@@ -181,6 +181,8 @@ func classifyToolError(message string) string {
 	case strings.Contains(lower, "deadline exceeded"), strings.Contains(lower, "timed out"),
 		strings.Contains(lower, "timeout"):
 		return ErrorTimeout
+	case strings.Contains(lower, "connection refused"), strings.Contains(lower, "no route to host"), strings.Contains(lower, "connection reset"), strings.Contains(lower, "service unavailable"), strings.Contains(lower, "i/o timeout"):
+		return ErrorClusterUnavailable
 	case strings.Contains(lower, "executable file not found"), strings.Contains(lower, "kubectl not found"):
 		return ErrorToolUnavailable
 	case strings.Contains(lower, "unsupported"), strings.Contains(lower, "not supported"):

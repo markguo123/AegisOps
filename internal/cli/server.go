@@ -114,6 +114,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				return err
 			}
 			defer func() { _ = blobGW.Close() }()
+			if binder, ok := chat.(service.ChatResultStoreBinder); ok && cfg.Platform.Blobs.Enabled() {
+				binder.SetResultStore(blobGW)
+			}
 			if cfg.Platform.Blobs.Enabled() {
 				if binder, ok := scanSvc.(service.ReportArchiveBinder); ok {
 					binder.SetReportArchive(service.NewReportArchiveWriter(st, blobGW))

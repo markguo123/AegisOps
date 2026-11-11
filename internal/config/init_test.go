@@ -55,6 +55,7 @@ var serverTemplateKeys = []string{
 var cliTemplateKeys = []string{
 	"agent.approval_mode",
 	"agent.audit_dir",
+	"agent.context_window",
 	"agent.create.allow_kinds",
 	"agent.create.cluster_kinds",
 	"agent.create.deny_kinds",

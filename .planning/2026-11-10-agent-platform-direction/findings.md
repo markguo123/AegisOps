@@ -12,3 +12,13 @@ New priority: core first, multi-cluster immediately next; user explicitly narrow
 
 ## Multi-cluster scope refresh
 Current source confirms ExecutionConfig minifies selected kubeconfig; BoundRun rechecks grants and credential version. Chat diagnosis inherits target config via chatScanOptions; page scans bind target too. Existing revocation/credential-rotation test exists. Cluster handler interface lacks credential replacement. Keep one global scan slot for now; document explicit capacity. Central A -> B/C apiserver, no remote agents. Earlier memory about unbound cluster is stale and not reused as a current defect.
+
+## 2026-11-11 implementation audit
+
+Clean starting HEAD 67df0ef. Upstream HolmesGPT HEAD matches 27c623ee3ab074734cf0d72964bafd11245b5f80. Current Agent uses turn-based history truncation, byte-limited results and identical-failed-call suppression, with no full request context budget. Upstream result storage suggests cat/pipes without approval; this cannot be copied into AegisOps. Compaction must not receive current-turn approved Secret values. Full mapping is in design document 23. docs/CREDITS.md did not exist; added a truthful research-only entry, no claimed code transplant.
+
+P10.2 baseline exercises the actual Agent.Chat with a real opt-in model and a synthetic read-only tool. Three fixed cases (OOM, image pull, scheduling) carry SHA-256 fixtures and measured requests/tool calls/token usage/elapsed time. Scripted preflight is separate and is not a model-quality score. Real-model setup and manual evidence review remain required before runtime changes.
+
+User supplied local model.txt and kubeconfig (paths/credentials are not copied into product docs). Real baseline completed all three synthetic cases with DeepSeek-V4-Flash: OOM 3 requests/2 tool calls/15504 total tokens/7772ms; image pull 2/1/10196/3594ms; scheduling 3/2/15467/5177ms. Review found invented StatefulSet/container and Deployment repair targets in OOM/scheduling; completion/marker hits are not correctness scores. Added explicit target-owner/container evidence requirement. Logs remain in ignored .aegisops-test/p10. model.txt is locally excluded in .git/info/exclude.
+
+User directs implementing functions continuously then one concentrated validation, avoiding broad intermediate tests; user also directs direct copying wherever compatible. P10 implementation adopts upstream prompt text (with safety adaptations), ports bounded rolling compaction and preview/retrieval to Go, reuses BlobGateway + transactional Acquire/Release to enter existing orphan GC, and preserves current turn references only. No cluster fault injection or mutations performed.

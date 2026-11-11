@@ -99,6 +99,7 @@ type AgentConfig struct {
 	TurnMaxBytes    int           `mapstructure:"turn_max_bytes"`
 	CmdMaxBytes     int           `mapstructure:"cmd_max_bytes"`
 	HistoryTurns    int           `mapstructure:"history_turns"`
+	ContextWindow   int           `mapstructure:"context_window"`
 	SessionDir      string        `mapstructure:"session_dir"`
 	AuditDir        string        `mapstructure:"audit_dir"`
 	// SessionMaxBytes caps one session body as it is written to the platform store
@@ -393,6 +394,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.turn_max_bytes", 32*1024)
 	v.SetDefault("agent.cmd_max_bytes", 64*1024)
 	v.SetDefault("agent.history_turns", 20)
+	v.SetDefault("agent.context_window", 65536)
 	v.SetDefault("agent.session_dir", "~/.aegisops/sessions")
 	v.SetDefault("agent.audit_dir", "~/.aegisops/audit")
 	v.SetDefault("agent.session_max_bytes", defaultSessionMaxBytes())
@@ -601,6 +603,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.HistoryTurns <= 0 {
 		return fmt.Errorf("agent.history_turns must be > 0")
+	}
+	if c.Agent.ContextWindow < 8192 || c.Agent.ContextWindow > 4194304 || c.Agent.ContextWindow <= c.LLM.MaxTokens {
+		return fmt.Errorf("agent.context_window must be between 8192 and 4194304 and larger than llm.max_tokens")
 	}
 	if c.Agent.SessionMaxBytes < 0 {
 		return fmt.Errorf("agent.session_max_bytes must be > 0 (omit it or set %s to keep the default)", defaultSessionMaxBytesText)
