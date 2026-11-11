@@ -30,13 +30,15 @@ type BrowserGateway struct {
 	audit      auditWriter
 	publicURL  string
 	dev        bool
+	quickstart bool
 	key        [32]byte
 	mu         sync.Mutex
 	fails      map[string]failedLogin
 }
 
-func NewBrowserGateway(a *auth.Service, e *auth.EnterpriseLogin, audit auditWriter, origin string, dev bool) (*BrowserGateway, error) {
+func NewBrowserGateway(a *auth.Service, e *auth.EnterpriseLogin, audit auditWriter, origin string, dev bool, quickstart ...bool) (*BrowserGateway, error) {
 	g := &BrowserGateway{auth: a, enterprise: e, audit: audit, publicURL: strings.TrimSuffix(origin, "/"), dev: dev, fails: map[string]failedLogin{}}
+	g.quickstart = len(quickstart) > 0 && quickstart[0]
 	_, err := rand.Read(g.key[:])
 	return g, err
 }
@@ -51,7 +53,10 @@ func (g *BrowserGateway) secure(r *http.Request) bool {
 		u := url.URL{Host: r.Host}
 		host = u.Hostname()
 	}
-	return !(g.dev && r.TLS == nil && g.publicURL == "" && (host == "localhost" || net.ParseIP(host).IsLoopback()))
+	// Never trust a caller-supplied X-Forwarded-Proto. A configured public URL
+	// retains Secure cookies behind a TLS-terminating production proxy.
+	return !(r.TLS == nil && g.publicURL == "" && (g.quickstart ||
+		(g.dev && (host == "localhost" || net.ParseIP(host).IsLoopback()))))
 }
 func (g *BrowserGateway) name(r *http.Request, key string) string {
 	if g.secure(r) {

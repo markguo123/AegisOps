@@ -178,7 +178,7 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			browser, err := server.NewBrowserGateway(authSvc, enterprise, auditSvc, cfg.Platform.Server.PublicURL, cfg.Platform.Server.AllowLoopbackHTTP)
+			browser, err := server.NewBrowserGateway(authSvc, enterprise, auditSvc, cfg.Platform.Server.PublicURL, cfg.Platform.Server.AllowLoopbackHTTP, cfg.Platform.Auth.AllowQuickstartHTTP)
 			if err != nil {
 				return err
 			}

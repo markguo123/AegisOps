@@ -10,10 +10,9 @@
 # emptyDir 显式置空是必需的：同一个卷同时带 emptyDir 与 persistentVolumeClaim
 # 会被 API 校验拒绝。
 #
-# 什么时候真的需要：报告/导出要留档，或改用 SQLite 兜底存储（那时 /data 也要一起换成
-# 同一个 PVC——MySQL 主口径下业务数据都在库里，/data 只是临时落盘）。
-# SQLite 场景额外两步：ConfigMap 里 driver 改 sqlite，并把 mountPath 换成 /data 的
-# 卷名同样按本文件写法替换。
+# 什么时候真的需要：报告/导出要留档。SQLite 兜底存储时本文件不是必需——后端 Deployment
+# 的 /data 已默认落在同一个 PVC（aegisops-data）上，库文件/会话/审计自然被持久化；
+# 本文件只管把 /reports 也从 emptyDir 换到这个 Claim 上。
 spec:
   template:
     spec:

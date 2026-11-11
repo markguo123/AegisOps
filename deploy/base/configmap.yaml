@@ -55,6 +55,7 @@ data:
         session_data: false       # 会话正文外置；仅 driver=dir/s3 时建议开启
         gc_grace_period: 168h     # GC 宽限期
       auth:
+        allow_quickstart_http: false # 快速体验显式启用；生产保持 Secure Cookie
         admin_username: admin    # 空库首启时创建的内置管理员用户名
         token_ttl: 24h           # 平台登录会话有效期
         session_store: memory    # 本期固定内存态；扩副本前需先支持持久化会话

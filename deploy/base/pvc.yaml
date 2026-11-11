@@ -1,11 +1,10 @@
 # 持久卷（P6.2 / P6.5 / D-31）：默认建议创建（install.sh 会建，PERSIST_REPORTS=false 才不建）。
-# 下面两种情况必须创建：
-#   1) 报告与导出需要跨重启保留（不挂 PVC 时 /reports 是 emptyDir，重启即清）；
-#   2) 用 SQLite 兜底存储（platform.store.driver=sqlite）——此时库文件所在的
-#      /data 必须落 PVC，禁止写在容器可写层。MySQL 主口径下 PVC 不承载业务数据。
+# 后端 Deployment 的 /data 默认就落在本 PVC 上（会话/审计 + SQLite 兜底时的库文件），
+# 因此需要创建。额外的留档需求：
+#   1) 报告与导出需要跨重启保留——/reports 默认是 emptyDir，重启即清，要留档就换到本 Claim。
 #
-# 挂载方式：先 apply 本文件，再 apply deploy/example/deployment-reports-pvc.yaml
-# 把后端 Deployment 的 emptyDir 换成 Claim。
+# 挂载方式：/data 已默认引用本 Claim；要把 /reports 也换成 Claim 就 apply
+# deploy/example/deployment-reports-pvc.yaml。
 # 容量与访问模式按现场存储能力调整（install.sh 用 REPORT_STORAGE_SIZE 渲染，默认 5Gi）；
 # 单副本 RWO 足够，扩副本前改 RWX。
 apiVersion: v1

@@ -1,0 +1,29 @@
+{{- $name := include "aegisops.name" . -}}
+{{- $config := .Files.Get "files/config.yaml" | fromYaml -}}
+{{- $_ := set $config.platform.server "static_enabled" (eq .Values.mode "minimal") -}}
+{{- $_ := set $config.platform.server "public_url" .Values.server.publicURL -}}
+{{- $_ := set $config.platform.server "allow_loopback_http" .Values.server.allowLoopbackHTTP -}}
+{{- $_ := set $config.platform.auth "allow_quickstart_http" .Values.server.allowQuickstartHTTP -}}
+{{- $_ := set $config.platform.store "driver" .Values.database.driver -}}
+{{- $_ := set $config.platform.blobs "driver" .Values.blobs.driver -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-config
+  labels:
+    {{- include "aegisops.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml $config | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-installation
+  labels:
+    {{- include "aegisops.labels" . | nindent 4 }}
+data:
+  manager: helm
+  persistence: {{ .Values.persistence.enabled | quote }}
+  driver: {{ .Values.database.driver | quote }}
+  blobs: {{ .Values.blobs.driver | quote }}

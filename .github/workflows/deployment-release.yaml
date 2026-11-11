@@ -1,0 +1,69 @@
+name: Deployment release
+on:
+  push:
+    tags: ['v[0-9]*']
+permissions:
+  contents: write
+  packages: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - run: go test ./...
+      - run: go vet ./...
+      - run: |
+          bash -n deploy/install.sh deploy/package.sh
+          helm lint deploy/helm/aegisops --set image.tag=test --set database.existingSecret=mysql
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        shell: bash
+        run: echo "base=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          tags: ${{ steps.image.outputs.base }}:${{ github.ref_name }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/separated/web.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          tags: ${{ steps.image.outputs.base }}-web:${{ github.ref_name }}
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - name: Package and publish only after both images succeed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash deploy/package.sh dist-install
+          helm package deploy/helm/aegisops --version "${GITHUB_REF_NAME#v}" --app-version "$GITHUB_REF_NAME" --destination dist-install
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist-install/* deploy/install.sh
+          gh release edit "$GITHUB_REF_NAME" --draft=false

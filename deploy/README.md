@@ -1,3 +1,17 @@
+# 当前安装入口（P11）
+
+快速体验：`bash deploy/install.sh`，零参数走内置默认，无需新配置文件。
+生产脚本：编辑现有 `install.env`（PROFILE=production）后 `bash deploy/install.sh --env-file install.env`。
+原生 Helm：[独立安装说明](helm/aegisops/README.md)。脚本和 Helm 不互相依赖。
+
+快速体验默认 SQLite+db、minimal、自动 NodePort，显式启用 HTTP 登录；有默认 StorageClass 用 PVC，无默认类用临时卷并提示 Pod 重建丢数据。重复安装沿用存储选择；已有临时卷实例需先备份并确认处置，不自动重建。模型、集群、OIDC 都在页面后配。生产推荐外部 MySQL（DSN 含 parseTime=true）、固定镜像版本、PVC 和 HTTPS。
+
+镜像由版本流水线构建，安装默认不构建推送。远程入口自动下载匹配版本的校验安装包，不要求 Git/Go/Node/Docker/Helm。发布资产由 `bash deploy/package.sh` 生成，`.github/workflows/deployment-release.yaml` 配对发布两镜像/Chart/安装包；GHCR 镜像公开可见需发布方配置，本轮未执行发布或真实集群安装。
+
+以下保留旧路径和运维细节供迁移对照；其“默认构建/MySQL/自动读取 install.env”等旧默认以以上入口、脚本帮助和变量模板为准。`upgrade.sh` 仍保留原 Git 构建发布流程供既有环境兼容；生产发布包升级推荐直接用新版本 install.sh 和同一变量文件。安装方式切换不自动接管资源。
+
+---
+
 # AegisOps 部署清单（四期 P6.2 / P6.5）
 
 > **2026-11-10 架构与计划更新**：目标已收口为默认 Web+Backend、可选内嵌 SPA，Agent 留在后端，单 Chart 与 HTTPS；多集群完成后由 P11 迁移。见 [方案 21](../docs/02-架构与设计/21-方案-Agent服务拆分与多Agent部署收敛-四期.md)。下文仍是当前可执行安装方式，不提前使用目标 Chart 或 role 参数。

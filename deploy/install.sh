@@ -22,7 +22,7 @@
 # =============================================================================
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-./install.sh}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="${PWD}/install-${RUN_TS}.log"
@@ -43,11 +43,14 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 # 必填（★）在下面 validate_config 里校验：IMAGE / TAG，条件必填见同函数。
 # 一律用 ": "${KEY:=默认值}"" 形式：环境变量已经给了值就保留用户的值，否则才落默认值。
 # 直接 KEY=默认 会无条件冲掉导出的环境变量，那样「环境变量压过默认」就是空话。
+: "${PROFILE:=}"
+: "${ALLOW_QUICKSTART_HTTP:=false}"
+: "${RELEASE_REPOSITORY:=markguo123/AegisOps}"
 : "${IMAGE:=}"
 : "${TAG:=}"
 : "${IMAGE_WEB:=}"
-: "${BUILD:=true}"
-: "${PUSH:=true}"
+: "${BUILD:=false}"
+: "${PUSH:=false}"
 : "${LOAD_TAR:=}"
 : "${NAMESPACE:=aegisops}"
 : "${FORM:=allinone}"
@@ -95,7 +98,7 @@ key_from_cli() { [[ "$CLI_SET_KEYS" == *" $1 "* ]]; }
 : "${WAIT_TIMEOUT:=300}"
 
 # 参数名清单：env 文件与通用 --KEY=VALUE 都按这张表识别，避免拼错键被静默忽略。
-PARAM_KEYS="IMAGE TAG IMAGE_WEB BUILD PUSH LOAD_TAR NAMESPACE FORM STORE_DRIVER MYSQL_DSN
+PARAM_KEYS="PROFILE ALLOW_QUICKSTART_HTTP RELEASE_REPOSITORY IMAGE TAG IMAGE_WEB BUILD PUSH LOAD_TAR NAMESPACE FORM STORE_DRIVER MYSQL_DSN
 SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST
 INGRESS_CLASS PUBLIC_URL OIDC_CA_FILE ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD LLM_API_KEY
 OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE
@@ -236,7 +239,12 @@ backup_key() {
 # --- 使用帮助 ----------------------------------------------------------------
 usage() {
   cat <<'EOF'
-AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一条命令装完，不需要手改 YAML。
+快速体验：不带参数安装，使用最新发布镜像、SQLite 和 NodePort。
+  PROFILE               quickstart（零参数）/ production（变量文件安装）
+  ALLOW_QUICKSTART_HTTP  显式允许快速体验 HTTP 登录；生产默认 false
+  RELEASE_REPOSITORY    公开 GitHub 发布仓库，默认 markguo123/AegisOps
+
+AegisOps 四期一键安装脚本（P6.4）：快速体验 / 变量文件生产安装，不默认构建镜像，不需要手改 YAML。
 
 用法：
   deploy/install.sh [参数...] [模式开关]
@@ -259,18 +267,18 @@ AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一�
   IMAGE★                后端镜像地址，不含标签，例 registry.local/aegisops
   TAG★                  镜像标签，例 4.0.0
   IMAGE_WEB             前端镜像地址（FORM=separated 必填），不含标签
-  BUILD                 是否由脚本构建镜像，默认 true（探测不到容器运行时自动降级为只发布）
-  PUSH                  构建后是否推送，默认 true
+  BUILD                 是否由脚本构建镜像，默认 false；显式开启才构建
+  PUSH                  构建后是否推送，默认 false
   LOAD_TAR              离线导入：docker load -i <tar> 后按 IMAGE:TAG 发布，跳过构建
   NAMESPACE             命名空间，默认 aegisops
-  FORM                  allinone（形态 A 一体化，默认）/ separated（形态 B 前后端分离）
-  STORE_DRIVER          mysql（默认）/ sqlite（单机兜底，必须配 PVC）
+  FORM                  minimal/allinone 内嵌 SPA / standard/separated 前后端分离
+  STORE_DRIVER          生产 mysql；快速体验 sqlite（自动选择卷）
   MYSQL_DSN★            STORE_DRIVER=mysql 时必填；只写进 Secret，不进 ConfigMap
   SQLITE_PATH           sqlite 库文件路径，默认 /data/aegisops.db（/data 必须落 PVC）
   STORAGE_CLASS         空 = 使用集群默认存储类（不是不建 PVC）；给了名字就用它
   REPORT_STORAGE_SIZE   数据/报告 PVC 容量，默认 5Gi
   PERSIST_REPORTS       默认 true；false 时 /reports 退化 emptyDir（重启即清）
-  EXPOSE                nodeport（默认）/ ingress；给了 INGRESS_HOST 则两者并存
+  EXPOSE                nodeport（默认）/ ingress / none；给了 INGRESS_HOST 则两者并存
   NODE_PORT             空 = 集群在 NodePort 区间随机分配，末行回显实际端口与节点 URL
   INGRESS_HOST          给了才建 Ingress（自定义域名需要客户端能解析）
   INGRESS_CLASS         IngressClass 名，留空用 nginx；先 kubectl get ingressclass 确认现场类名
@@ -279,6 +287,7 @@ AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一�
                         内部 IdP 常用集群自建 CA，镜像的系统信任链不认，配企业登录会报
                         OIDC discovery failed；给了它就把它注进平台容器并让
                         platform.auth.oidc_ca_file 指向它，不必去动 IdP 所在环境的证书
+  OIDC_ALLOW_MISSING_NONCE 企业 IdP 缺失 nonce 的显式兼容（默认 false）
   OIDC_DISABLE_PKCE     true 时企业登录（OIDC）不发送 PKCE 参数（code_challenge/code_verifier），
                         默认 false。只给「声称支持 PKCE、实际却不保存 code_challenge」的 IdP
                         兜底：这类 IdP 会让单点登录每次都在令牌交换那一步被拒。关掉会削弱
@@ -322,7 +331,7 @@ AegisOps 四期一键安装脚本（P6.4）：构建镜像 + 发布服务，一�
 
 示例：
   # 最小可用：一条命令装完（NodePort 暴露、PVC 走集群默认存储类、只读 RBAC）
-  IMAGE=registry.local/aegisops TAG=4.0.0 MYSQL_DSN='user:pass@tcp(db:3306)/aegisops' deploy/install.sh
+  IMAGE=registry.local/aegisops TAG=4.0.0 MYSQL_DSN='user:pass@tcp(db:3306)/aegisops?parseTime=true' deploy/install.sh
 
   # 反复重跑：参数写进 install.env
   deploy/install.sh --env-file install.env
@@ -408,14 +417,9 @@ parse_args() {
     shift
   done
 
-  # env 文件：--env-file 优先，其次当前目录、脚本目录下的 install.env。
-  if [[ -n "$ENV_FILE" ]]; then
-    load_env_file "$ENV_FILE"
-  else
-    for candidate in "${PWD}/install.env" "${SCRIPT_DIR}/install.env"; do
-      if [[ -f "$candidate" ]]; then load_env_file "$candidate"; break; fi
-    done
-  fi
+  # Only explicitly selected files may alter an installation.
+  if [[ -n "$ENV_FILE" ]]; then load_env_file "$ENV_FILE"; fi
+
 }
 
 require_param() {
@@ -438,6 +442,7 @@ is_true() {
 }
 
 validate_config() {
+  require_bool ALLOW_QUICKSTART_HTTP
   require_bool BUILD; require_bool PUSH; require_bool PERSIST_REPORTS
   require_bool ENABLE_WRITE; require_bool BLOBS_PATH_STYLE; require_bool ENABLE_MINIO
   require_bool BLOBS_USE_TLS; require_bool BLOBS_CREATE_BUCKET
@@ -458,9 +463,14 @@ validate_config() {
 
   case "$STORE_DRIVER" in
     mysql)
-      require_param MYSQL_DSN "存储 DSN 含数据库口令，只写进 Secret；库与账号需 DBA 预建（建议 utf8mb4）。" ;;
+      if [[ -z "$MYSQL_DSN" ]] && [[ $DRY_RUN -eq 0 ]] && secret_exists "$SEC_STORE"; then :; else
+        require_param MYSQL_DSN "存储 DSN 含数据库口令，只写进 Secret；库与账号需 DBA 预建（建议 utf8mb4）。"
+      fi
+      if [[ -n "$MYSQL_DSN" && "$MYSQL_DSN" != *"parseTime=true"* ]]; then
+        die "MySQL DSN 必须包含 parseTime=true" "在连接串查询参数中设置 parseTime=true"
+      fi ;;
     sqlite)
-      if ! is_true "$PERSIST_REPORTS"; then
+      if ! is_true "$PERSIST_REPORTS" && [[ "$PROFILE" != "quickstart" ]]; then
         die "STORE_DRIVER=sqlite 必须持久化：库文件在 /data，不挂 PVC 时 Pod 重启即丢库" \
           "去掉 --PERSIST_REPORTS=false，或改用 --STORE_DRIVER=mysql"
       fi ;;
@@ -468,8 +478,8 @@ validate_config() {
   esac
 
   case "$EXPOSE" in
-    nodeport|ingress) ;;
-    *) die "EXPOSE 只能是 nodeport 或 ingress，当前值：${EXPOSE}" "没有真实域名就用默认 nodeport" ;;
+    nodeport|ingress|none) ;;
+    *) die "EXPOSE 只能是 nodeport、ingress 或 none，当前值：${EXPOSE}" "没有真实域名就用默认 nodeport" ;;
   esac
   if [[ -n "$PUBLIC_URL" && ! "$PUBLIC_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ ]]; then
     die "PUBLIC_URL 必须是无路径的 HTTPS 根地址：${PUBLIC_URL}" "例如 https://aegisops.internal.example"
@@ -616,7 +626,7 @@ END {
   base = FILENAME; sub(/^.*\//, "", base)
   # 会跑 Pod 的三份清单：后端 Deployment、形态 B 的前端 web-deployment、迁移 Job。
   podfile = (base ~ /deployment\.yaml$/ || base == "db-migrate-job.yaml") ? 1 : 0
-  pulled = 0; blobs = 0; npdone = 0
+  pulled = 0; blobs = 0; npdone = 0; drop_claim = 0
   # 清单里本来就写了 imagePullSecrets 就别再插一份：同一个 Pod 级键重复会让 apply 报错。
   for (i = 1; i <= n; i++) if (lines[i] ~ /^[ \t]*imagePullSecrets:/) pulled = 1
   for (i = 1; i <= n; i++) {
@@ -629,6 +639,10 @@ END {
     # 锚点 2：namespace.yaml 里的资源名（只在这个文件里改，Ingress 同名资源不受影响）
     if (base == "namespace.yaml" && l ~ /^  name:[ \t]*aegisops[ \t]*$/) l = "  name: " NS
 
+    if (NS != "aegisops") {
+      gsub(/aegisops-readonly/, NS "-aegisops-readonly", l)
+      gsub(/aegisops-write/, NS "-aegisops-write", l)
+    }
     # 锚点 3：镜像地址与拉取策略
     if (l ~ /image:[ \t]*aegisops-web:latest/) {
       p = l; sub(/image:[ \t]*aegisops-web:latest.*$/, "", p); l = p "image: " WEBREF
@@ -657,6 +671,7 @@ END {
 
     # 锚点 11：ConfigMap 里的存储驱动与 sqlite 路径（只在需要时改，mysql 口径原样不动）
     if (base == "configmap.yaml") {
+      if (l ~ /^[ \t]*allow_quickstart_http:/) sub(/false/, QUICKHTTP, l)
       if (l ~ /^[ \t]*public_url:[ \t]*""/) {
         p = l; sub(/""/, "\"" PUBLICURL "\"", p); l = p
       }
@@ -720,8 +735,26 @@ END {
       }
     }
 
+    # 锚点 9b：清单里的 /data 默认就写 PVC（跨重启保留）。PERSIST_REPORTS（REPORTS_PVC）
+    # 为 false 时不建 PVC，必须把这条卷退回 emptyDir，否则 Pod 会去 Claim 一个不存在的 PVC
+    # 而卡 Pending。全清单只有 /data 用 persistentVolumeClaim，按声明行直接还原最稳。
+    if (REPORTS_PVC == "false") {
+      if (l ~ /^[ \t]+persistentVolumeClaim:[ \t]*$/) {
+        pvcind = l; sub(/persistentVolumeClaim:.*$/, "", pvcind)
+        skip = 1; drop_claim = 1
+      } else if (drop_claim == 1 && l ~ /^[ \t]+claimName:[ \t]*aegisops-data[ \t]*$/) {
+        print pvcind "emptyDir: {}"
+        skip = 1; drop_claim = 0
+      } else {
+        drop_claim = 0
+      }
+    }
+
     if (!skip) {
       print l
+      if (podfile && l ~ /^[ \t]*image:/ && lines[i+1] !~ /^[ \t]*imagePullPolicy:/) {
+        p=l; sub(/image:.*/, "", p); print p "imagePullPolicy: " POLICY
+      }
       # 锚点 10：钉死 NodePort 端口号（NODE_PORT 为空则交给集群随机分配）
       if (base == EXPOSED && NODEPORT != "" && npdone == 0 && l ~ /^[ \t]+targetPort:/) {
         npdone = 1
@@ -813,7 +846,7 @@ render_one() {
       -v PULLSEC="$PULLED_SECRET_NAME" -v EXPOSED="$EXPOSED_SVC" -v NODEPORT="$NODE_PORT" \
       -v REPORTS_PVC="$PERSIST_REPORTS" -v DATA_PVC="$DATA_ON_PVC" -v PVC="$PVC_NAME" \
       -v DRIVER="$STORE_DRIVER" -v SQLITE="$SQLITE_PATH" -v PUBLICURL="$PUBLIC_URL" \
-      -v CAKEY="$(oidc_ca_container_path)" \
+      -v QUICKHTTP="$ALLOW_QUICKSTART_HTTP" -v CAKEY="$(oidc_ca_container_path)" \
       -v DISABLEPKCE="$(is_true "$OIDC_DISABLE_PKCE" && echo true || echo false)" \
       -v ALLOWNONCE="$(is_true "$OIDC_ALLOW_MISSING_NONCE" && echo true || echo false)" \
       -v EXTRAENV="$(extra_env_block)" \
@@ -1049,6 +1082,9 @@ pvc_wait_bound() { # $1=timeout seconds
 pvc_align_class() {
   is_true "$PERSIST_REPORTS" || return 0
   local existing
+  if "$KUBECTL_BIN" -n "$NAMESPACE" get deployment aegisops-server >/dev/null 2>&1; then
+    die "发现没有安装记录的既有实例，拒绝快速体验覆盖" "备份后使用生产变量文件显式升级"
+  fi
   existing="$("$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$PVC_NAME" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
   [[ -n "$existing" ]] || return 0
   if [[ -z "$STORAGE_CLASS" ]]; then
@@ -1066,7 +1102,7 @@ pvc_align_class() {
 stage_pvc() {
   stage "阶段 4/9 持久卷"
   if ! is_true "$PERSIST_REPORTS"; then
-    warn "PERSIST_REPORTS=false：/reports 用 emptyDir，Pod 重启即清空（仅适合临时验证）"
+    warn "PERSIST_REPORTS=false：/data 与 /reports 用临时卷，Pod 重建后清空（仅适合临时验证）"
     stage_done; return 0
   fi
   pvc_align_class   # 先对齐不可变的 storageClassName，再下发
@@ -1119,7 +1155,7 @@ pvc_verify_deferred_bind() {
 stage_migrate() {
   stage "阶段 5/9 数据库结构迁移"
   if [[ "$STORE_DRIVER" != "mysql" ]]; then
-    info "sqlite 模式跳过 Job：server 启动时执行同一套幂等 migrate（库文件在 PVC 上）"
+    info "SQLite 使用 server 启动时的幂等迁移（迁移与业务共用 /data，不创建独立临时卷）"
     stage_done; return 0
   fi
   # Job 的 spec 不可变：先删同名旧 Job（只删任务对象，不动数据）。
@@ -1235,10 +1271,12 @@ stage_summary() {
   _emit ""
   _emit "  凭据与密钥"
   if [[ -n "$ADMIN_PASSWORD_SHOWN" ]]; then
-    _emit "    首启管理员口令（只打印这一次，请立即保存）：${ADMIN_PASSWORD_SHOWN}"
+    _emit "    首启管理员口令：已安全保存在 Secret/${SEC_ADMIN}（不写入日志）"
   else
     _emit "    首启管理员口令：复用集群已有 Secret，本次未生成新口令"
   fi
+  _emit "    管理员账号：${ADMIN_USERNAME:-admin}"
+  _emit "    领取口令：kubectl -n ${NAMESPACE} get secret ${SEC_ADMIN} -o jsonpath=\'{.data.password}\' | base64 --decode; echo"
   _emit "    加密主密钥：${ENC_KEY_ORIGIN:-未改动}${ENC_KEY_BACKUP_PATH:+  本地备份=${ENC_KEY_BACKUP_PATH}}"
   _emit ""
   _emit "  自检命令"
@@ -1296,7 +1334,9 @@ run_rotate() {
 
 # --- 主流程 ------------------------------------------------------------------
 main() {
+  BOOTSTRAP_ARGS=("$@")
   parse_args "$@"
+  prepare_installation
   # 全程 tee：失败也留完整现场。放在参数解析之后，--help 不会留下空日志文件。
   if [[ "${AEGISOPS_INSTALL_NO_TEE:-0}" != "1" ]]; then
     exec > >(tee -a "$LOG_FILE") 2>&1
@@ -1321,19 +1361,22 @@ main() {
 
   stage_build
   stage_preflight
+  drain_existing_backend
   stage_base
   stage_secrets
   stage_pvc
   stage_migrate
+  record_installation pending
   stage_workloads
   stage_expose
   stage_write
+  record_installation complete
   stage_summary
 }
 
 # --- 派生值 ------------------------------------------------------------------
 compute_derived() {
-  IMAGE_REF="${IMAGE}:${TAG}"
+  if [[ "$IMAGE" == *@sha256:* ]]; then IMAGE_REF="$IMAGE"; else IMAGE_REF="${IMAGE}:${TAG}"; fi
   WEB_IMAGE_REF=""
   if [[ -n "$IMAGE_WEB" ]]; then
     # 已经带标签的地址照用，没带就沿用同一个 TAG，前后端版本不会错配。
@@ -1344,7 +1387,7 @@ compute_derived() {
   fi
 
   DATA_ON_PVC=false
-  if [[ "$STORE_DRIVER" == "sqlite" ]]; then DATA_ON_PVC=true; fi
+  if [[ "$STORE_DRIVER" == "sqlite" ]] && is_true "$PERSIST_REPORTS"; then DATA_ON_PVC=true; fi
   # dir 后端的对象副本同样在 /data，和 SQLite 一样钉死在 PVC 上。
   if [[ "$BLOBS_BACKEND" == "dir" ]]; then DATA_ON_PVC=true; fi
 
@@ -1382,7 +1425,7 @@ compute_derived() {
 
 banner() {
   _emit ""
-  _emit "${C_BLU}AegisOps 四期一键安装${C_OFF}  形态=${FORM}  命名空间=${NAMESPACE}  存储=${STORE_DRIVER}"
+  _emit "${C_BLU}AegisOps 安装（${PROFILE}）${C_OFF}  形态=${FORM}  命名空间=${NAMESPACE}  存储=${STORE_DRIVER}"
   _emit "  镜像      ：${IMAGE_REF}${WEB_IMAGE_REF:+ / ${WEB_IMAGE_REF}}   拉取策略=${IMAGE_PULL_POLICY}"
   _emit "  暴露方式  ：${EXPOSE}${INGRESS_HOST:+ + ingress(${INGRESS_HOST})}${NODE_PORT:+  nodePort=${NODE_PORT}(空=随机)}"
   _emit "  持久化    ：PVC=${PERSIST_REPORTS} 容量=${REPORT_STORAGE_SIZE} 存储类=${STORAGE_CLASS:-<集群默认>}"
@@ -1654,4 +1697,131 @@ stage_preflight() {
 }
 
 # 入口必须放在所有函数定义之后：bash 是按行执行的，提前调用会找不到后面定义的函数。
+# Installation profiles share the same renderer and public parameter file.
+prepare_installation() {
+  if [[ -z "$PROFILE" ]]; then
+    if [[ -n "$ENV_FILE" || -n "$IMAGE" ]]; then PROFILE=production; else PROFILE=quickstart; fi
+  fi
+  case "$FORM" in minimal) FORM=allinone ;; standard) FORM=separated ;; esac
+  case "$PROFILE" in
+    quickstart)
+      STORE_DRIVER=sqlite
+      ALLOW_QUICKSTART_HTTP=true
+      BUILD=false; PUSH=false
+      if ! key_from_env IMAGE && ! key_from_cli IMAGE; then IMAGE="ghcr.io/markguo123/aegisops"; fi
+      if ! key_from_env TAG && ! key_from_cli TAG && [[ -z "$TAG" ]]; then TAG=latest; fi
+      IMAGE_PULL_POLICY=Always
+      if ! key_from_env REPORT_STORAGE_SIZE && ! key_from_cli REPORT_STORAGE_SIZE; then REPORT_STORAGE_SIZE=2Gi; fi
+      if [[ "$TAG" == "latest" && $DRY_RUN -eq 0 ]]; then
+        resolve_latest_release
+      fi
+      if [[ $DRY_RUN -eq 1 ]]; then
+        # Offline preview cannot infer cluster storage. The live choice is recorded below.
+        PERSIST_REPORTS=false
+      else
+        command -v "$KUBECTL_BIN" >/dev/null || die "找不到 kubectl" "先配置 kubectl 和目标集群"
+        info "快速体验目标：$("$KUBECTL_BIN" config current-context) / namespace=${NAMESPACE}"
+        resolve_quickstart_storage
+      fi
+      ;;
+    production) ;;
+    *) die "PROFILE 只能是 quickstart 或 production" "修改现有 install.env" ;;
+  esac
+  bootstrap_resources
+  if [[ $DRY_RUN -eq 0 ]]; then check_ownership; fi
+}
+
+resolve_quickstart_storage() {
+  local state sc existing installed phase actual
+  state="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.persistence}' --ignore-not-found)" ||
+    die "无法读取安装记录" "检查集群连接和 ConfigMap 读取权限"
+  if [[ "$state" == "true" || "$state" == "false" ]]; then
+    PERSIST_REPORTS="$state"
+    if [[ "$state" == "false" ]] && "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get deployment aegisops-server >/dev/null 2>&1; then
+      installed="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.image}')" || die "无法检查安装版本" "检查访问权限"
+      phase="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.phase}')" || die "无法检查安装阶段" "检查连接"
+      actual="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get deployment aegisops-server -o 'jsonpath={.spec.replicas}{"|"}{.status.readyReplicas}{"|"}{.spec.template.spec.containers[0].image}')" || die "无法检查 Backend" "检查连接"
+      if [[ "$phase" == "complete" && "$installed" == "${IMAGE}:${TAG}" && "$actual" == "1|1|${installed}" ]]; then
+        info "快速体验版本 ${TAG} 已安装，本次不重建 Pod、不重置配置"
+        "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get service
+        exit 0
+      fi
+      die "已有临时存储体验实例，重装可能丢失页面配置" "先备份数据；确认可丢弃后显式删除旧 Deployment 再安装"
+    fi
+    return
+  fi
+  existing="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get pvc aegisops-data -o name --ignore-not-found)" || die "无法检查数据 PVC" "检查读取权限"
+  if [[ -n "$existing" ]]; then PERSIST_REPORTS=true; return; fi
+  sc="$("$KUBECTL_BIN" --request-timeout=15s get storageclass -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{" "}{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}{"\n"}{end}')" ||
+    die "无法读取 StorageClass" "检查集群访问权限"
+  sc="$(printf '%s\n' "$sc" | awk '$2 == "true" || $3 == "true" {print $1}')"
+  if [[ "$sc" == *$'\n'* ]]; then die "存在多个默认 StorageClass" "请先明确集群默认存储类"; fi
+  if [[ -n "$sc" ]]; then PERSIST_REPORTS=true; STORAGE_CLASS="$sc"; else
+    PERSIST_REPORTS=false
+    warn "快速体验使用临时 SQLite：Pod 重建、升级或卸载会丢失数据库及页面配置"
+  fi
+}
+
+check_ownership() {
+  local owner helm_owner
+  owner="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-installation -o 'jsonpath={.data.manager}' --ignore-not-found)" || die "无法检查安装归属" "检查连接和权限"
+  helm_owner="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get deployment aegisops-server -o 'jsonpath={.metadata.labels.app\.kubernetes\.io/managed-by}' --ignore-not-found)" || die "无法检查 Deployment 归属" "检查连接和权限"
+  local driver
+  driver="$("$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get configmap aegisops-config -o 'jsonpath={.data.config\.yaml}' --ignore-not-found)" || die "无法检查已有配置" "检查访问权限"
+  driver="$(printf '%s\n' "$driver" | awk '/^  store:/ {store=1;next} store && /^  [a-z_]+:/ {store=0} store && /driver:/ {print $2;exit}')"
+  if [[ -n "$driver" && "$driver" != "$STORE_DRIVER" ]]; then die "拒绝直接切换数据库驱动 ${driver} -> ${STORE_DRIVER}" "先备份并显式迁移数据"; fi
+  if [[ "$owner" == "helm" || "$helm_owner" == "Helm" ]]; then die "此实例由 Helm 管理" "请使用 Helm 升级；切换安装方式需先备份并迁移"; fi
+}
+
+drain_existing_backend() {
+  if "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" get deployment aegisops-server >/dev/null 2>&1; then
+    confirm "将停止现有 Backend 后迁移，请确认已备份数据库/内容/加密密钥且运行已排空" || die "升级已取消，未停止服务" "完成备份与排空后重试"
+    "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" scale deployment aegisops-server --replicas=0 >/dev/null || die "停止 Backend 失败" "检查权限与集群状态"
+    "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" rollout status deployment/aegisops-server --timeout="${WAIT_TIMEOUT}s" >/dev/null || die "Backend 未完成停止" "检查旧 Pod 后重试，勿并发迁移"
+  fi
+}
+
+record_installation() {
+  local values="${RENDER_DIR}/installation.env"
+  printf 'manager=script\npersistence=%s\nimage=%s\nphase=%s\n' "$PERSIST_REPORTS" "$IMAGE_REF" "${1:-pending}" >"$values"
+  "$KUBECTL_BIN" --request-timeout=15s -n "$NAMESPACE" create configmap aegisops-installation \
+    --from-env-file="$values" --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+}
+
+resolve_latest_release() {
+  command -v curl >/dev/null || die "自动选择最新版本需要 curl" "离线环境请设置 IMAGE/TAG 并使用发布安装包"
+  local url
+  url="$(curl --connect-timeout 15 --max-time 60 -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${RELEASE_REPOSITORY}/releases/latest")" || die "无法解析最新发布版本" "检查 GitHub 网络或使用版本化安装包"
+  TAG="${url##*/}"
+  [[ "$TAG" != "latest" && "$TAG" =~ ^[A-Za-z0-9._-]+$ ]] || die "未找到可用发布版本" "确认已发布镜像和安装包"
+}
+
+bootstrap_resources() {
+  [[ -f "${SCRIPT_DIR}/base/configmap.yaml" ]] && return 0
+  # A pipe-fed script has no adjacent resources. Fetch the exact release bundle.
+  command -v curl >/dev/null || die "远程安装需要 curl" "安装 curl 后重试"
+  local release version root archive
+  release="$TAG"
+  if [[ "$release" == "latest" ]]; then
+    # Follow GitHub's latest successful release redirect without parsing JSON.
+    version="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${RELEASE_REPOSITORY}/releases/latest")" || die "无法解析最新发布版本" "检查 GitHub 网络或使用离线安装包"
+    release="${version##*/}"
+    [[ "$release" != "latest" && "$release" =~ ^[A-Za-z0-9._-]+$ ]] || die "未找到可用发布版本" "确认仓库已发布安装包与镜像"
+    TAG="$release"
+  fi
+  [[ "$release" =~ ^[A-Za-z0-9._-]+$ ]] || die "非法发布版本" "使用有效 release tag"
+  root="${RENDER_DIR}/release"
+  mkdir -p "$root"
+  archive=aegisops-install.tar.gz
+  curl --connect-timeout 15 --max-time 120 -fsSL "https://github.com/${RELEASE_REPOSITORY}/releases/download/${release}/${archive}" -o "$root/$archive" || die "下载安装包失败" "确认该版本发布资产完整"
+  curl --connect-timeout 15 --max-time 120 -fsSL "https://github.com/${RELEASE_REPOSITORY}/releases/download/${release}/${archive}.sha256" -o "$root/${archive}.sha256" || die "下载校验和失败" "确认发布资产完整"
+  (cd "$root" && sha256sum -c "${archive}.sha256") || die "安装包校验失败" "重新下载可信发布包"
+  if tar -tzf "$root/$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "安装包包含非法路径" "重新发布安装包"; fi
+  tar -xzf "$root/$archive" -C "$root"
+  [[ -f "$root/deploy/install.sh" ]] || die "安装包目录不完整" "重新发布安装包"
+  # Execute the bundled script as well, so code and templates are from one release.
+  bash "$root/deploy/install.sh" "${BOOTSTRAP_ARGS[@]}" --PROFILE="$PROFILE" --IMAGE="$IMAGE" --TAG="$TAG" --NAMESPACE="$NAMESPACE"
+  exit $?
+}
+
 main "$@"

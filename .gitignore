@@ -22,3 +22,6 @@ install-*.log
 deploy/kubectl/*
 !deploy/kubectl/.gitkeep
 !deploy/kubectl/README.md
+
+# Versioned deployment release artifacts
+dist-install/

@@ -1,0 +1,11 @@
+AegisOps installed. Models and clusters are configured in the Web UI after login.
+Backend is single-replica. Database migrations run in the Pod init container.
+Credential Secret: {{ include "aegisops.credentials" . }} (password and encryption key; back it up).
+Retrieve initial password locally:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "aegisops.credentials" . }} -o jsonpath='{.data.password}' | base64 --decode
+{{ if .Values.ingress.enabled }}URL: {{ .Values.server.publicURL }}{{ else }}
+Port forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aegisops.name" . }}-{{ if eq .Values.mode "standard" }}web 18080:80{{ else }}server 18080:8080{{ end }}
+Plain HTTP login requires server.allowQuickstartHTTP or server.allowLoopbackHTTP.
+{{ end }}
+PVC and generated credentials are retained on uninstall. Delete them only after backing up.

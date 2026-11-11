@@ -209,7 +209,7 @@ func TestInstallScriptRendersParseableManifests(t *testing.T) {
 	)
 	mysql := []string{
 		"--STORE_DRIVER=mysql",
-		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/k8s_ai",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/k8s_ai?parseTime=true",
 	}
 	separated := append([]string{
 		"--FORM=separated",
@@ -375,7 +375,7 @@ func TestInstallScriptInjectsImagePullSecretsInEveryPod(t *testing.T) {
 	base := []string{
 		"--IMAGE=registry.local/k8s-ai/k8s-ai",
 		"--STORE_DRIVER=mysql",
-		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/k8s_ai",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/k8s_ai?parseTime=true",
 	}
 	separated := []string{"--FORM=separated", "--IMAGE_WEB=registry.local/k8s-ai/aegisops-web"}
 	separated = append(separated, base...)
@@ -494,7 +494,7 @@ func TestInstallScriptRendersEnterpriseOIDCCA(t *testing.T) {
 	base := []string{
 		"--IMAGE=registry.local/aegisops/aegisops",
 		"--STORE_DRIVER=mysql",
-		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops?parseTime=true",
 	}
 	data := renderConfigMapData(t, renderManifests(t, bash, append([]string{"--OIDC_CA_FILE=" + caPath}, base...)...))
 	pem, ok := data["oidc-ca.crt"]
@@ -529,7 +529,7 @@ func TestInstallScriptRendersOIDCPKCEFlag(t *testing.T) {
 	base := []string{
 		"--IMAGE=registry.local/aegisops/aegisops",
 		"--STORE_DRIVER=mysql",
-		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops?parseTime=true",
 	}
 
 	data := renderConfigMapData(t, renderManifests(t, bash, base...))
@@ -554,7 +554,7 @@ func TestInstallScriptRendersOIDCNonceFlag(t *testing.T) {
 	base := []string{
 		"--IMAGE=registry.local/aegisops/aegisops",
 		"--STORE_DRIVER=mysql",
-		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops",
+		"--MYSQL_DSN=user:pass@tcp(mysql:3306)/aegisops?parseTime=true",
 	}
 
 	data := renderConfigMapData(t, renderManifests(t, bash, base...))

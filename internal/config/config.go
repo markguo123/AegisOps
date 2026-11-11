@@ -239,9 +239,11 @@ func (p PlatformStoreConfig) IsMySQL() bool {
 
 // PlatformAuthConfig 控制平台内建账号与登录会话参数。
 type PlatformAuthConfig struct {
-	AdminUsername string        `mapstructure:"admin_username"`
-	TokenTTL      time.Duration `mapstructure:"token_ttl"`
-	SessionStore  string        `mapstructure:"session_store"` // memory（本期）
+	// AllowQuickstartHTTP permits plain HTTP only for explicitly opted-in experience installations.
+	AllowQuickstartHTTP bool          `mapstructure:"allow_quickstart_http"`
+	AdminUsername       string        `mapstructure:"admin_username"`
+	TokenTTL            time.Duration `mapstructure:"token_ttl"`
+	SessionStore        string        `mapstructure:"session_store"` // memory（本期）
 	// OIDCCAFile 是企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径，用于对接内部自建
 	// CA 签发的 IdP：OIDC discovery、令牌交换与 JWKS 拉取都在系统信任链之上追加这批
 	// 根证书。只增不减，公网 IdP 照旧可信；刻意不提供「跳过证书校验」开关——那等于
@@ -444,6 +446,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.blobs.gc_grace_period", 168*time.Hour)
 	v.SetDefault("platform.server.public_url", "")
 	v.SetDefault("platform.server.allow_loopback_http", false)
+	v.SetDefault("platform.auth.allow_quickstart_http", false)
 	v.SetDefault("platform.auth.admin_username", "admin")
 	v.SetDefault("platform.auth.token_ttl", 24*time.Hour)
 	v.SetDefault("platform.auth.session_store", "memory")

@@ -1,0 +1,75 @@
+platform:
+  server:
+    addr: ":8080"            # 监听地址（编排层 --addr 可覆盖）
+    public_url: ""            # 浏览器访问的 HTTPS 根地址；OIDC 回调与 CSRF Origin 使用，安装时由 PUBLIC_URL 渲染
+    allow_loopback_http: false # 仅本机 localhost HTTP 调试可打开；集群部署保持 false
+    static_enabled: true     # 形态 A 内嵌 SPA；形态 B 用 deploy/separated/deployment.yaml（env 置 false）
+    tls:
+      enabled: false         # 需要 TLS 时挂证书卷并把 cert_file/key_file 配成一对
+      cert_file: ""
+      key_file: ""
+  store:
+    driver: mysql                    # 四期主存储；sqlite 为本地/单机兜底
+    sqlite_path: "/data/aegisops.db"   # 仅 driver=sqlite 使用，容器内必须落 PVC
+    dsn: ""                          # 只经 AEGISOPS_PLATFORM_STORE_DSN（Secret）注入
+  blobs:                      # 二进制对象后端（P8.1 / D-32）：附件、报告产物、可选会话正文外置
+    driver: db                # off | db | dir | s3；默认 db，未接对象存储时行为与四期前一致
+    prefix: aegisops             # 对象键首段，≤32 字符
+    dir: ""                   # driver=dir 才用；容器内留空 = /data/blobs（须挂可写卷）
+    endpoint: ""              # driver=s3 才用；现场地址属环境专有值，经 Secret/env 注入
+    region: us-east-1         # 签名区域；MinIO 默认 us-east-1
+    use_tls: false            # 集群内自建 MinIO 常见 false
+    path_style: true          # MinIO/Ceph 必须 true
+    bucket: aegisops            # driver=s3 必填
+    access_key: ""            # 只经 AEGISOPS_PLATFORM_BLOBS_ACCESS_KEY（Secret）注入
+    secret_key: ""            # 只经 AEGISOPS_PLATFORM_BLOBS_SECRET_KEY（Secret）注入
+    tmp_dir: "/tmp/aegisops-blobs"  # driver=s3 的上传中转目录（P8.4）：先落盘算 sha256 再上传，
+                                  # 镜像根文件系统只读，该目录必须在可写卷挂载点之下；留空回落 os.TempDir()。
+    create_bucket: false      # 默认不在启动期建桶（P8.8）：生产桶由平台组预建并配好生命周期，
+                              # 运行账号只给对象读写权限。桶不存在时对象类 API 回 503、基础业务不受影响；
+                              # 确认凭据有建桶权限的测试环境才置 true。
+    presign_ttl: 15m          # 预签名下载链接有效期，≤24h
+    max_object_size: 32MiB    # 单对象上限，≤256MiB
+    session_data: false       # 会话正文外置；仅 driver=dir/s3 时建议开启
+    gc_grace_period: 168h     # GC 宽限期
+  auth:
+    allow_quickstart_http: false # 快速体验显式启用；生产保持 Secure Cookie
+    admin_username: admin    # 空库首启时创建的内置管理员用户名
+    token_ttl: 24h           # 平台登录会话有效期
+    session_store: memory    # 本期固定内存态；扩副本前需先支持持久化会话
+    # 企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径；留空 = 只用镜像系统信任链。
+    # 内部 IdP 多用集群自建 CA 签发证书，系统信任链不认，配置企业登录会直接报
+    # OIDC discovery failed: x509 certificate signed by unknown authority。这里在系统
+    # 信任链之上追加该根证书（只增不减，公网 IdP 照旧可信），刻意不提供「跳过证书
+    # 校验」开关：那等于接受任意来源签发的身份令牌。
+    # 集群内用法：install.env 给 OIDC_CA_FILE=<宿主机上的 CA 文件>，脚本把 PEM 注入
+    # 本 ConfigMap 的 oidc-ca.crt 数据键（本卷整目录挂到 /etc/aegisops，键名即文件名），
+    # 并把下面这项渲染成 /etc/aegisops/oidc-ca.crt。手动部署就把 PEM 直接贴进本文件
+    # 的 data 段，或另建一个 CA ConfigMap 挂进来，再填路径。
+    oidc_ca_file: ""
+    # PKCE 兼容开关，默认 false（授权请求带 code_challenge、令牌交换带 code_verifier）。
+    # 只给「discovery 里声称支持 PKCE、实际却不保存 code_challenge」的企业 IdP 兜底：这类 IdP
+    # 会让单点登录每次都在令牌交换那一步被拒。关掉 PKCE 会降低授权码被截获后的防线，
+    # 正常 IdP 保持 false。集群内用法：install.env 给 OIDC_DISABLE_PKCE=true，脚本把下面
+    # 这项渲染成 true。
+    oidc_disable_pkce: false
+    # id_token nonce 兼容开关，默认 false（严格校验：id_token 的 nonce 必须等于本次登录发出的一次性随机数）。
+    # 只给「授权请求里收到 nonce 却不持久化」的企业 IdP 兜底：这类 IdP（部分 Dex 分支，其自定义登录页还会
+    # 把 nonce 从 back 参数里丢掉）签发的 id_token 永远没有 nonce 声明，导致单点登录每次都报
+    # id token nonce does not match this login。放宽面只有「完全没有 nonce 声明」这一种，IdP 回了 nonce
+    # 却对不上仍然拒绝；放行时额外要求 iat 不早于本次登录事务开始，旧令牌重放不成立。正常 IdP 保持 false。
+    # 集群内用法：install.env 给 OIDC_ALLOW_MISSING_NONCE=true，脚本把下面这项渲染成 true。
+    oidc_allow_missing_nonce: false
+  exec:
+    shell_enabled: true      # 含管道/串联/重定向的 shell 命令通道（P6.3 / D-33）：默认开启，
+                             # 这类命令一律经真人审批且不被 --skip-permissions 免除。
+                             # 用 Dockerfile.distroless 无 shell 变体部署时置 false，
+                             # executor 会在执行前返回可指导文案而不是让模型反复重试。
+
+# 引擎侧落盘目录（静态键，非动态配置）：镜像根文件系统只读，一律指向可写卷。
+report:
+  directory: /reports
+  format: markdown
+agent:
+  session_dir: /data/sessions
+  audit_dir: /data/audit

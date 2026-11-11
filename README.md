@@ -7,6 +7,29 @@
 企业级 Kubernetes AI 巡检、诊断、对话与受控运维平台。平台统一提供用户身份、会话隔离、
 namespace 授权、Agent Runtime、Skill、审批、审计、配置与 Web 工作台。
 
+## 安装与快速体验
+
+已有 Kubernetes 和已配置的 kubectl 时，快速体验无需填写配置：
+
+```bash
+bash deploy/install.sh
+```
+
+脚本默认使用最新已发布版本、内嵌 Web、SQLite、NodePort 和随机管理员口令；有默认存储类自动建 PVC，无默认存储类使用临时卷（Pod 重建会丢失数据库及页面配置）。模型、集群和 OIDC 登录后在页面配置。初始口令通过安装摘要的 Secret 领取命令获取，不写入安装日志。
+
+远程一键入口如下；**需先运行版本发布流程并将 GHCR 镜像设为公开，本轮尚未验证公开发布，不应视为已在线可用**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/markguo123/AegisOps/main/deploy/install.sh | bash
+```
+
+生产可独立选择两种方式，推荐外部 MySQL 和 HTTPS：
+
+- 脚本：复制 `deploy/install.env.example` 为 `install.env`，修改变量后执行 `bash deploy/install.sh --env-file install.env`。
+- Helm：按 [Chart 安装说明](deploy/helm/aegisops/README.md) 编辑普通 `values.yaml` 后原生安装，无需项目脚本。
+
+快速体验的 HTTP 登录兼容显式启用，生产默认保留 Secure Cookie。安装不会创建 Kubernetes 集群，也不会自动导入当前 kubeconfig。
+
 ## 项目介绍
 
 AegisOps 让运维人员执行一次 `aopsctl scan`，就能快速知道集群哪里有问题、为什么、影响什么、应该怎么排查和怎么修：

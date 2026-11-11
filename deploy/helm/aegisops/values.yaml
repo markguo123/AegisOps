@@ -1,0 +1,44 @@
+# Production defaults. Set a published immutable image version before installation.
+mode: standard # standard (Web + Backend) or minimal (embedded SPA)
+image:
+  repository: ghcr.io/markguo123/aegisops
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+web:
+  repository: ghcr.io/markguo123/aegisops-web
+  tag: "" # defaults to the backend tag
+imagePullSecrets: []
+database:
+  driver: mysql # mysql or sqlite
+  existingSecret: "" # required for mysql; key: dsn (must include parseTime=true)
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: "" # cluster default
+  size: 5Gi
+credentials:
+  existingSecret: "" # keys: key (64 hex chars), password; otherwise generated once
+server:
+  publicURL: "" # HTTPS root URL when behind a TLS proxy
+  allowQuickstartHTTP: false # explicit experience-only HTTP opt-in
+  allowLoopbackHTTP: false
+blobs:
+  driver: db # db, dir, s3, off
+  existingSecret: "" # optional envFrom Secret with AEGISOPS_PLATFORM_BLOBS_* keys
+service:
+  type: ClusterIP
+  nodePort: null
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tlsSecret: ""
+writeAccess: false
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
