@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -48,9 +50,28 @@ func DefaultCORS() CORSConfig {
 	}
 }
 
-// WithMiddleware 挂载 request_id / 认证占位 / 权限门禁 / CORS 中间件。
+// WithMiddleware 挂载 request_id / 认证占位 / 权限门禁 / 异常兜底 / CORS 中间件。
 func WithMiddleware(next http.Handler, cors CORSConfig, enforcer *permission.Enforcer, resolve principalResolver) http.Handler {
-	return CORS(cors)(AuthPlaceholder(RequestID(permissionGate(enforcer, resolve, next))))
+	return CORS(cors)(AuthPlaceholder(RequestID(Recover(permissionGate(enforcer, resolve, next)))))
+}
+
+// Recover 兜住处理器 panic：记一条带 request_id 与堆栈的日志，并返回统一 500，
+// 避免连接被直接掐断、页面只看到网络错误而服务端没有任何线索。
+func Recover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				slog.Error("server: 请求处理 panic",
+					"request_id", RequestIDFrom(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", v,
+					"stack", string(debug.Stack()))
+				writeError(w, r, http.StatusInternalServerError, codeInternal, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RequestID 从 X-Request-ID 读取或生成请求号，写入上下文并回写响应头。

@@ -209,6 +209,33 @@ func TestDeploymentProductionBuildsWhenImageProvided(t *testing.T) {
 	}
 }
 
+// TestDeploymentCacheBuildDegradesOnDockerDriver 锁住 --cache-build 的驱动降级：
+// Docker 默认 docker 驱动不支持 type=local 缓存导出（真机报 Cache export is not supported
+// for the docker driver），安装器必须自动降级为内联缓存而不是让整个构建失败。
+func TestDeploymentCacheBuildDegradesOnDockerDriver(t *testing.T) {
+	values := filepath.Join(t.TempDir(), "production.yaml")
+	data := "database:\n  driver: mysql\n  existingSecret: mysql\nblobs:\n  driver: s3\n  existingSecret: s3\n"
+	if e := os.WriteFile(values, []byte(data), 0600); e != nil {
+		t.Fatal(e)
+	}
+	// 传输层的 docker 是桩：buildx inspect 无输出 => driver 为空 => 必须走 docker 驱动降级。
+	out, trace, e := dsRun(t, "deploy/install.sh", []string{"TEST_CONTEXT=prod-cluster", "TEST_HAS_RELEASE=true"},
+		"--profile=production", "--values="+filepath.ToSlash(values),
+		"--IMAGE=registry.example.com/aegisops", "--TAG=cache-check", "--PUSH=true", "--allow-dirty", "--cache-build", "--yes")
+	if e != nil {
+		t.Fatalf("%v: %s", e, out)
+	}
+	if strings.Contains(trace, "cache-to=type=local") {
+		t.Fatalf("docker 驱动不应拿到本地缓存导出参数: %s", trace)
+	}
+	if !strings.Contains(trace, "BUILDKIT_INLINE_CACHE=1") {
+		t.Fatalf("docker 驱动应降级为内联缓存: %s", trace)
+	}
+	if !strings.Contains(trace, "container push registry.example.com/aegisops:cache-check") {
+		t.Fatalf("降级后仍应推送镜像: %s", trace)
+	}
+}
+
 func TestDeploymentNamespaceAndSecrets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "install.env")
 	content := "PROFILE=production\nIMAGE=registry.invalid/aegisops\nTAG=release\nMYSQL_DSN='sentinel-secret@tcp(db:3306)/ops?parseTime=true'\nBLOBS_ENDPOINT=s3.invalid:9000\nBLOBS_ACCESS_KEY=fixture\nBLOBS_SECRET_KEY=sentinel-blob-secret\n"
@@ -230,6 +257,10 @@ func TestDeploymentNamespaceAndSecrets(t *testing.T) {
 	}
 	if !strings.Contains(trace, "image.tag=release") || strings.Contains(trace, "release-dirty") {
 		t.Fatal("configured tag changed")
+	}
+	// --no-build 也必须有前端仓库：否则会回落 Chart 默认的 ghcr.io，现场表现为 ErrImagePull。
+	if !strings.Contains(trace, "web.repository=registry.invalid/aegisops-web") {
+		t.Fatalf("--no-build 必须从 IMAGE 派生前端仓库: %s", trace)
 	}
 }
 

@@ -80,7 +80,14 @@ func writeSettingsError(w http.ResponseWriter, r *http.Request, err error) {
 		// 未装配模式一致，避免任何明文落库路径）。
 		writeError(w, r, http.StatusNotImplemented, codeInternal,
 			"敏感配置需要服务端先配置 AEGISOPS_ENC_KEY 后才能保存，请联系平台管理员")
+	case errors.Is(err, settings.ErrDecryptMismatch):
+		// 复用旧数据库但换了加密密钥时，旧密文解不开；浏览器只给可执行提示，细节进日志。
+		slog.Warn("server: 配置密文解密失败（当前密钥与库中密文不匹配）",
+			"request_id", RequestIDFrom(r.Context()), "error", err)
+		writeError(w, r, http.StatusConflict, codeConflict,
+			"现有加密配置无法用当前加密密钥解开：复用旧数据库时必须复用旧凭据 Secret（aegisops-enc 的 key），或清除旧加密配置后重新录入")
 	default:
+		slog.Warn("server: 配置操作失败", "request_id", RequestIDFrom(r.Context()), "error", err)
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "settings operation failed")
 	}
 }

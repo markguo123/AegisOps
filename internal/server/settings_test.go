@@ -375,6 +375,21 @@ func TestAuthEventsAreAudited(t *testing.T) {
 	}
 }
 
+// TestWriteSettingsErrorExplainsDecryptMismatch 锁住「复用旧库换了密钥」这一现场：
+// 必须给出可执行提示（旧 Secret / 加密密钥），而不是一句 settings operation failed。
+func TestWriteSettingsErrorExplainsDecryptMismatch(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/model", nil)
+	writeSettingsError(rr, req, settings.ErrDecryptMismatch)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("解密不匹配应返回 409, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "加密密钥") || !strings.Contains(body, "aegisops-enc") {
+		t.Fatalf("提示应说明加密密钥与旧 Secret: %s", body)
+	}
+}
+
 // mustReplay 把已读出的响应体重新包成 Response，复用信封校验。
 func mustReplay(t *testing.T, raw string) *http.Response {
 	t.Helper()

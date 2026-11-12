@@ -241,6 +241,13 @@ for pair in PERSIST_REPORTS:persistence.enabled ENABLE_WRITE:writeAccess ALLOW_Q
   key="${pair%%:*}"; if [[ -v "cfg[$key]" ]]; then set_bool "${pair#*:}" "${cfg[$key]}"; fi
 done
 case "${cfg[FORM]:-}" in allinone|minimal) set_value mode minimal;; separated|standard) set_value mode standard;; '') :;; *) die "FORM 不合法";; esac
+# 前端镜像仓库：显式 IMAGE_WEB 优先，否则默认 <IMAGE>-web；与是否构建无关。
+# 少了这段，--no-build 会跳过构建分支而回落 Chart 默认的 ghcr.io/...，直接 ErrImagePull。
+if [[ "${cfg[FORM]:-standard}" != allinone && "${cfg[FORM]:-standard}" != minimal ]]; then
+  if [[ -z "${cfg[IMAGE_WEB]:-}" && -n "${cfg[IMAGE]:-}" ]]; then
+    set_value web.repository "${cfg[IMAGE]}-web"
+  fi
+fi
 case "${cfg[EXPOSE]:-}" in nodeport) set_value service.type NodePort;; ingress|none) set_value service.type ClusterIP;; '') :;; *) die "EXPOSE 不合法";; esac
 if [[ -n "${cfg[INGRESS_HOST]:-}" ]]; then set_bool ingress.enabled true; fi
 if [[ -n "${cfg[IMAGE_PULL_SECRET]:-}" ]]; then set_value 'imagePullSecrets[0].name' "${cfg[IMAGE_PULL_SECRET]}"; fi
@@ -321,16 +328,32 @@ if [[ "${cfg[BUILD]:-false}" == true ]]; then
   [[ -z "$dirty" || $ALLOW_DIRTY -eq 1 ]] || die "源码内容有未提交改动；提交/还原或 --allow-dirty（TAG 不变）"
   ensure_distribution_ready
   built_images=()
-  # 构建加速（可选）：--cache-build / CACHE_BUILD=true 时用 BuildKit 把层缓存落到本地目录，
-  # 重跑时 go mod download / npm ci 等少变层直接命中，显著缩短重复构建时间；仅 docker 支持。
+  # 构建加速（可选）：--cache-build / CACHE_BUILD=true。BuildKit 的本地层缓存默认就在本机生效；
+  # 这里额外导出/导入缓存只在支持 type=local 的驱动上有意义。Docker 默认的 docker 驱动不支持
+  # 缓存导出（会报 Cache export is not supported for the docker driver），必须按驱动降级。
   cache_args=()
-  if [[ $BUILD_CACHE -eq 1 && "$BUILD_TOOL" == docker ]]; then
-    cache_dir="${BUILD_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/aegisops/buildkit}"
-    mkdir -p "$cache_dir" 2>/dev/null || die "无法创建构建缓存目录：$cache_dir"
-    cache_args=(--cache-from="type=local,src=$cache_dir" --cache-to="type=local,dest=$cache_dir,mode=max")
-    info "已开启 BuildKit 本地层缓存：$cache_dir"
-  elif [[ $BUILD_CACHE -eq 1 ]]; then
-    info "警告：--cache-build 需要 docker + BuildKit，$BUILD_TOOL 不支持，已忽略。"
+  if [[ $BUILD_CACHE -eq 1 ]]; then
+    if [[ "$BUILD_TOOL" != docker ]]; then
+      info "警告：--cache-build 仅支持 docker + BuildKit，$BUILD_TOOL 已忽略。"
+    else
+      driver="$(docker buildx inspect --format '{{.Driver}}' 2>/dev/null || true)"
+      case "$driver" in
+        docker-container|remote|cloud)
+          cache_dir="${BUILD_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/aegisops/buildkit}"
+          mkdir -p "$cache_dir" 2>/dev/null || die "无法创建构建缓存目录：$cache_dir"
+          cache_args=(--cache-from="type=local,src=$cache_dir" --cache-to="type=local,dest=$cache_dir,mode=max")
+          info "已开启 BuildKit 本地层缓存（driver=$driver）：$cache_dir"
+          ;;
+        docker|"")
+          # docker 驱动不支持本地缓存导出；内联缓存随镜像保留，本机 BuildKit 缓存仍然复用。
+          cache_args=(--build-arg "BUILDKIT_INLINE_CACHE=1")
+          info "docker 驱动不支持本地缓存导出，改用内联缓存（本机 BuildKit 层缓存仍生效）"
+          ;;
+        *)
+          info "提示：未识别的 BuildKit 驱动 ${driver}，已跳过 --cache-build。"
+          ;;
+      esac
+    fi
   fi
   export DOCKER_BUILDKIT=1
   "$BUILD_TOOL" build -f "$REPO_ROOT/Dockerfile" \
@@ -346,7 +369,6 @@ if [[ "${cfg[BUILD]:-false}" == true ]]; then
     web="${cfg[IMAGE_WEB]:-${cfg[IMAGE]}-web}"
     "$BUILD_TOOL" build -f "$SCRIPT_DIR/separated/web.Dockerfile" "${cache_args[@]+"${cache_args[@]}"}" --build-arg "VERSION=${cfg[TAG]}" --build-arg "COMMIT=$commit" -t "$web:${cfg[TAG]}" "$REPO_ROOT" || die "Web 镜像构建失败：$web:${cfg[TAG]}"
     built_images+=("$web:${cfg[TAG]}")
-    set_value web.repository "$web"
   fi
   for image in "${built_images[@]}"; do distribute_image "$image"; done
 fi

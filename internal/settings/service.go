@@ -25,6 +25,9 @@ var (
 	ErrInvalid = errors.New("settings: invalid setting")
 	// ErrCipherRequired 写入包含敏感键但未装配静态加密器（P3.9）。
 	ErrCipherRequired = errors.New("settings: encryption cipher is required for sensitive keys")
+	// ErrDecryptMismatch 表示库中已有密文无法用当前密钥解开：最常见的原因是复用了
+	// 旧数据库却没有复用旧的凭据 Secret（AEGISOPS_ENC_KEY 换了），旧加密配置全部不可读。
+	ErrDecryptMismatch = errors.New("settings: stored encrypted value cannot be decrypted with the current key")
 	// ErrModelNotConfigured 表示模型接入既无配置中心取值、也无环境变量覆盖，
 	// 生效值只剩内置默认端点与默认模型名（P6.1）。Chat 直接报错，不再静默连本地默认地址。
 	ErrModelNotConfigured = errors.New("settings: model is not configured")
@@ -200,7 +203,7 @@ func (s *Service) PatchGroup(ctx context.Context, group string, patch map[string
 			if current != nil && current.Value != "" {
 				plain, decErr := s.cipher.Decrypt(current.Value)
 				if decErr != nil {
-					return nil, fmt.Errorf("decrypt %s.%s: %w", group, item.key, decErr)
+					return nil, fmt.Errorf("%w: decrypt %s.%s: %v", ErrDecryptMismatch, group, item.key, decErr)
 				}
 				currentPlain = string(plain)
 				hasCurrent = true
