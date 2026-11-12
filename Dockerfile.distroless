@@ -26,8 +26,12 @@
 # 两档镜像只允许在运行阶段分叉，构建出的二进制与前端产物必须完全相同。
 FROM node:22-alpine AS webdist
 WORKDIR /web
+# 前端依赖源镜像：默认官方 npmjs registry（保持可复现与中立），国内/内网构建传
+#   --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+# 本段在两档镜像里逐字一致（tests/arch 断言），构建参数只加在一档上会让两档镜像分叉。
+ARG NPM_REGISTRY=https://registry.npmjs.org
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN npm ci --registry="${NPM_REGISTRY}"
 COPY web/ ./
 RUN npm run build
 # 产物归一到阶段根目录的 /dist：与 --build-context 覆盖时「目录根下 dist/」的

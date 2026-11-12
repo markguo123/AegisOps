@@ -9,14 +9,15 @@ ARGS=()
 usage() {
 cat <<'EOF'
 AegisOps 应用更新（原生 Helm Release）
-  bash deploy/upgrade.sh --values=production.yaml --yes
+  bash deploy/upgrade.sh --env-file=install.env --yes   # 常规：只改 install.env 里的 TAG
   bash deploy/upgrade.sh --rollback=<Helm revision> --namespace=aegisops
   bash deploy/upgrade.sh --status --namespace=aegisops
   --release=<name> --namespace=<ns> 默认 aegisops
   --src=<dir> --ref=<branch/tag/commit> --no-fetch  可选取码；不自动拼接镜像 TAG
   --tag=<tag>                 等效 install.sh --TAG；原样使用
   --no-build --no-push --allow-dirty --follow-env-tag（兼容空操作）
-  其余参数转交 install.sh；源码构建显式 --BUILD=true --PUSH=true。
+  其余参数转交 install.sh；--values 仅用于覆盖 install.env 未暴露的高级字段。
+  源码构建显式 --BUILD=true --PUSH=true。
 回滚只恢复应用资源，不能回退数据库；中间件须单独管理。升级前备份并确认 schema 兼容。
 EOF
 }

@@ -1,61 +1,124 @@
-# Production defaults. Set a published immutable image version before installation.
-mode: standard # standard (Web + Backend) or minimal (embedded SPA)
+# AegisOps 应用 Chart 的默认 values（生产默认值）。
+# 使用建议：
+#   1) 用 deploy/install.sh 安装时，不要改本文件；只改 install.env（脚本会把其值转成 --set，
+#      覆盖本文件及 values-<profile>.yaml 的预设）。
+#   2) 直接使用原生 `helm install/upgrade` 时，才在私有 values 文件中覆盖以下字段。
+# 安装前请先把 image.tag（或 image.digest）固定到已发布的不可变版本。
+
+# 部署形态：standard（Web 与 Backend 分离）/ minimal（内嵌 SPA 单镜像）
+mode: standard
+
 image:
+  # Backend 镜像仓库
   repository: ghcr.io/markguo123/aegisops
+  # Backend 镜像版本标签；生产必须固定，不要用 latest
   tag: ""
+  # Backend 镜像摘要（与 tag 二选一，固定内容时优先用 digest）
   digest: ""
+  # 镜像拉取策略：IfNotPresent / Always / Never
   pullPolicy: IfNotPresent
+
 web:
+  # Web（Nginx）镜像仓库
   repository: ghcr.io/markguo123/aegisops-web
-  tag: "" # defaults to the backend tag
+  # Web 镜像版本标签；留空表示沿用 Backend 的 tag
+  tag: ""
+  # Web 镜像摘要（与 tag 二选一）
   digest: ""
+
+# 私有仓库拉取凭据 Secret 列表，例如 [{name: registry-auth}]
 imagePullSecrets: []
+
 database:
-  driver: mysql # mysql or sqlite
+  # 数据库驱动：mysql（生产）/ sqlite（体验或单机）
+  driver: mysql
+  # SQLite 数据库文件路径（driver=sqlite 时使用）
   sqlitePath: /data/aegisops.db
-  existingSecret: "" # required for mysql; key: dsn (must include parseTime=true)
-  migrationSecret: "" # optional DDL-capable Secret (dsn); runtime Secret may use only DML
+  # 运行账号连接串 Secret 名；mysql 必填，键为 dsn（必须含 parseTime=true）
+  existingSecret: ""
+  # 可选：DDL 迁移专用 Secret 名（键为 dsn）；运行账号只有 DML 权限时填写
+  migrationSecret: ""
+
 migration:
-  mode: auto # auto: MySQL Job / SQLite init; external: schema check only
+  # 迁移模式：auto（自动跑 MySQL Job / SQLite 初始化）/ external（只做 schema 校验，由流水线迁移）
+  mode: auto
+  # 迁移任务超时时间（秒）
   timeoutSeconds: 900
+
 adoption:
-  scriptManaged: false # one-time manual migration only; existing credentials/data required
+  # 仅用于旧脚本实例的一次性人工接管；需要已有的凭据与 data 卷
+  scriptManaged: false
+
 persistence:
+  # 是否创建 PVC 持久化 /data 与 /reports（false 退化为 emptyDir，Pod 重建会丢数据）
   enabled: true
-  existingClaim: "" # bring-your-own claim for /data (aegisops-data); reports stays managed here
+  # 自带已有 /data 卷（aegisops-data）时填写 PVC 名
+  existingClaim: ""
+  # 自带已有 /reports 卷时填写 PVC 名
   existingReportsClaim: ""
-  storageClass: "" # cluster default
-  # Backward-compatible fallback for both volumes below (legacy single "size" key).
+  # 存储类；留空 = 省略 storageClassName，走集群默认存储类
+  storageClass: ""
+  # 旧版单一容量键，作为下面两个容量的兜底默认值
   size: 5Gi
-  dataSize: "" # empty = size; /data capacity (sessions/audit/sqlite/blobs)
-  reportsSize: "" # empty = size; /reports capacity
+  # /data 容量（会话/审计/SQLite/对象中转）；留空 = 使用 size
+  dataSize: ""
+  # /reports 容量；留空 = 使用 size
+  reportsSize: ""
+
 credentials:
-  existingSecret: "" # keys: key (64 hex chars), password; otherwise generated once
+  # 加密密钥与初始管理员口令 Secret 名；留空则由 Chart 首次生成并保留
+  # 键：key（64 位十六进制）、password
+  existingSecret: ""
+
 server:
-  publicURL: "" # HTTPS root URL when behind a TLS proxy
-  allowQuickstartHTTP: false # explicit experience-only HTTP opt-in
+  # 对外根地址（HTTPS 反向代理场景），如 https://aegisops.internal
+  publicURL: ""
+  # 体验模式显式允许 HTTP 登录；生产必须 false
+  allowQuickstartHTTP: false
+  # 允许回环地址的 HTTP（仅本地调试用）
   allowLoopbackHTTP: false
+
 blobs:
-  driver: s3 # production: s3; db/dir/off are explicit alternatives
-  existingSecret: "" # optional envFrom Secret with AEGISOPS_PLATFORM_BLOBS_* keys
+  # 对象存储驱动：s3（生产）；db/dir/off 为显式备选
+  driver: s3
+  # 可选：包含 AEGISOPS_PLATFORM_BLOBS_* 键的环境变量 Secret 名（envFrom）
+  existingSecret: ""
+
 service:
+  # Service 类型：ClusterIP（默认，配合 Ingress/代理）/ NodePort
   type: ClusterIP
+  # NodePort 端口；null 表示由集群自动分配
   nodePort: null
+
 ingress:
+  # 是否启用 Ingress
   enabled: false
+  # IngressClass 名称，如 nginx
   className: ""
+  # 对外域名，如 aegisops.internal
   host: ""
+  # 已有 TLS Secret 名
   tlsSecret: ""
+
+# 是否开启 Kubernetes 写操作（需配合人工审批）
 writeAccess: false
+
 auth:
+  # 初始管理员用户名
   adminUsername: admin
+  # OIDC 禁用 PKCE（按 IdP 能力决定，正常 IdP 保持 false）
   oidcDisablePKCE: false
+  # 允许缺失 nonce（兼容特定 IdP，正常 IdP 保持 false）
   oidcAllowMissingNonce: false
-  oidcCASecret: "" # optional Secret with ca.crt
+  # OIDC 自定义 CA 的 Secret 名（键 ca.crt）；留空表示使用系统 CA
+  oidcCASecret: ""
+
 resources:
+  # 容器资源请求
   requests:
     cpu: 200m
     memory: 256Mi
+  # 容器资源上限
   limits:
     cpu: "1"
     memory: 1Gi

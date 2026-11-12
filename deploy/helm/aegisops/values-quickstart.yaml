@@ -1,10 +1,19 @@
-# Experience only. Default production values remain MySQL + S3.
+# 体验预设（install.sh --profile=quickstart 默认套用）。
+# 仅用于快速体验，不要用于生产：SQLite + 本地文件 + NodePort HTTP 登录。
 mode: minimal
+
 database:
+  # 体验使用内嵌 SQLite
   driver: sqlite
+
 blobs:
+  # 体验使用本地目录保存附件
   driver: dir
+
 server:
+  # 体验模式显式允许 HTTP 登录（生产禁止）
   allowQuickstartHTTP: true
+
 service:
+  # 体验入口使用 NodePort
   type: NodePort

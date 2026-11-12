@@ -3,7 +3,9 @@
 这是应用部署的唯一模板来源。MySQL 与 S3 兼容对象存储由用户自行部署和维护，本 Chart 不包含中间件。
 
 - 快速体验：仓库根目录执行 `bash deploy/install.sh`，使用当前源码本地构建、自动准备 Helm 并按集群类型分发镜像；页面配置模型及集群。
-- 生产：准备 MySQL、对象桶、受限 Secret 文件，复制 `values-production.yaml` 为私有配置并填写固定镜像版本和入口。
+- 生产（脚本方式，推荐）：只改仓库根目录下的 `install.env`（模板见 `deploy/install.env.example`），执行 `bash deploy/install.sh --env-file install.env --yes`；**不需要改本目录的 values**。
+- 生产（原生 Helm）：复制 `values-production.yaml`（或 `values.yaml`）为私有配置，填写固定镜像版本、Secret 名与入口；字段中文注释已写在 `values.yaml`。
+- 高级配置（复用已有 PVC、接管旧实例、调整资源等）只在原生 Helm values 中填写，不写进 `install.env`。
 - 手动体验：`helm upgrade --install aegisops ./deploy/helm/aegisops -n aegisops --create-namespace -f deploy/helm/aegisops/values-quickstart.yaml --set image.tag=<构建或选定的镜像版本> --wait --wait-for-jobs --timeout 15m`（需自行构建并分发镜像）。
 - 模板预览：`helm template` 与脚本 `--dry-run` 使用同一 Chart，包含的 Secret 必须保护；重复生成随机凭据的预览不能直接用于升级。
 - 原生管理：`helm history`、`helm upgrade`、`helm rollback`。应用回滚不恢复数据库，迁移兼容性必须先确认。

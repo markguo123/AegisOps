@@ -1,10 +1,19 @@
-# Supply image.tag and pre-created Secret names in your private values file.
+# 生产预设（install.sh --profile=production 默认套用）。
+# 直接用 helm 安装时，通常不需要改本文件；在自己的私有 values 中覆盖 image.tag 与 Secret 名即可。
 mode: standard
+
 database:
+  # 生产使用外部 MySQL
   driver: mysql
+  # 引用已有的 MySQL 连接串 Secret（键 dsn）；名称不同时覆盖
   existingSecret: aegisops-mysql
+
 blobs:
+  # 生产使用 S3 兼容对象存储
   driver: s3
+  # 引用已有的对象存储配置 Secret（AEGISOPS_PLATFORM_BLOBS_* 键）；名称不同时覆盖
   existingSecret: aegisops-s3
+
 migration:
+  # 自动执行 MySQL 迁移 Job
   mode: auto

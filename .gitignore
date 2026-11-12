@@ -25,3 +25,5 @@ deploy/kubectl/*
 
 # Versioned deployment release artifacts
 dist-install/
+
+.dshcheck/

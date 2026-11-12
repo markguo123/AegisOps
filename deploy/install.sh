@@ -6,11 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
-PARAM_KEYS="PROFILE ALLOW_QUICKSTART_HTTP IMAGE TAG IMAGE_WEB BUILD PUSH NAMESPACE FORM STORE_DRIVER MYSQL_DSN SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE DATA_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST INGRESS_CLASS PUBLIC_URL ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD BLOBS_BACKEND BLOBS_ENDPOINT BLOBS_REGION BLOBS_USE_TLS BLOBS_PATH_STYLE BLOBS_BUCKET BLOBS_ACCESS_KEY BLOBS_SECRET_KEY BLOBS_CREATE_BUCKET BLOBS_PREFIX BLOBS_MAX_OBJECT_SIZE IMAGE_PULL_SECRET IMAGE_PULL_POLICY OIDC_CA_FILE OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE GOPROXY KUBECTL_VERSION KUBECTL_DOWNLOAD_BASE"
+PARAM_KEYS="PROFILE ALLOW_QUICKSTART_HTTP IMAGE TAG IMAGE_WEB BUILD PUSH NAMESPACE FORM STORE_DRIVER MYSQL_DSN MYSQL_SECRET MIGRATION_SECRET SQLITE_PATH STORAGE_CLASS REPORT_STORAGE_SIZE DATA_STORAGE_SIZE PERSIST_REPORTS EXPOSE NODE_PORT INGRESS_HOST INGRESS_CLASS INGRESS_TLS_SECRET PUBLIC_URL ENABLE_WRITE ADMIN_USERNAME ADMIN_PASSWORD BLOBS_BACKEND BLOBS_ENDPOINT BLOBS_REGION BLOBS_USE_TLS BLOBS_PATH_STYLE BLOBS_BUCKET BLOBS_ACCESS_KEY BLOBS_SECRET_KEY BLOBS_CREATE_BUCKET BLOBS_PREFIX BLOBS_MAX_OBJECT_SIZE BLOBS_SECRET IMAGE_PULL_SECRET IMAGE_PULL_POLICY OIDC_CA_FILE OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE GOPROXY NPM_REGISTRY KUBECTL_VERSION KUBECTL_DOWNLOAD_BASE CACHE_BUILD"
 declare -A cfg=() cli=() original_env=()
 for key in $PARAM_KEYS; do if [[ -v "$key" ]]; then original_env[$key]="${!key}"; fi; done
 ENV_FILE=""; VALUES=(); PROFILE=""; RELEASE=aegisops; NAMESPACE=""
-DRY_RUN=0; DIFF=0; YES=0; ALLOW_DIRTY=0
+DRY_RUN=0; DIFF=0; YES=0; ALLOW_DIRTY=0; BUILD_CACHE=0
 RENDER_DIR=""; WORK_DIR=""
 die() { printf '安装失败：%s\n' "$*" >&2; exit 1; }
 info() { printf '[安装] %s\n' "$*"; }
@@ -98,10 +98,13 @@ diagnose_failure() {
 usage() {
 cat <<'EOF'
 AegisOps 安装 / 更新（唯一模板源 deploy/helm）
+  配置只需一个文件：生产填写 install.env 后用 --env-file 交给本脚本；
+  原生 Helm 用户才直接改 deploy/helm/aegisops/values.yaml。
+  优先级：CLI > 环境变量 > install.env > 内置默认（脚本转成 --set，覆盖 values 预设）。
   默认：当前源码本地构建，快速体验（minimal + SQLite + 本地文件 + NodePort HTTP）
   --profile=quickstart|production   无配置文件默认 quickstart，否则 production
-  --values=<file>                  应用 Helm values，可重复；推荐生产入口
-  --env-file=<file>                兼容 install.env；不执行文件中的命令
+  --env-file=<file>                 install.env（推荐，生产唯一配置入口）；不执行文件中的命令
+  --values=<file>                  可选 Helm values 叠加，可重复；仅需覆盖脚本未暴露的字段时使用
   --release=<name> --namespace=<ns> 默认 aegisops
   --dry-run --render-dir=<dir>     只渲染到受限目录，不访问集群/不构建；产物可能含 Secret
   --diff                          Helm 服务端预演（不写集群；输出可能含 Secret）
@@ -109,8 +112,14 @@ AegisOps 安装 / 更新（唯一模板源 deploy/helm）
   --allow-dirty                   允许源码内容改动构建；不改写 TAG，chmod 不算内容改动
   --no-build                      不构建镜像：复用它处（CI）已构建并推送到 values 的镜像
   --PUSH=true                     远程/多节点集群：构建后推送镜像到 IMAGE 指定仓库（生产构建必填）
+  --cache-build                   构建加速：BuildKit 本地层缓存（docker）；go/npm 依赖层重跑命中
   --KEY=VALUE                     兼容非敏感 install.env 参数；敏感值仅从文件/环境读取
   -h, --help
+凭据：MYSQL_DSN/BLOBS_* 由脚本创建标准 Secret；自管 Secret 用 MYSQL_SECRET/BLOBS_SECRET
+  引用名字（与 MYSQL_DSN/BLOBS_ENDPOINT 二选一），MIGRATION_SECRET 可单独给 DDL 账号。
+构建源加速：GOPROXY=https://goproxy.cn,direct、NPM_REGISTRY=https://registry.npmmirror.com、
+  KUBECTL_DOWNLOAD_BASE=https://files.m.daocloud.io/dl.k8s.io/release 均可通过 install.env /
+  环境变量 / --KEY=VALUE 传入。
 生产镜像来源：同一脚本加 --IMAGE=<仓库>/aegisops --PUSH=true 现场构建并推送；已有 CI 镜像时用 --no-build。
 镜像分发：kind-* 自动 kind load，k3d-* 自动 k3d image import；其它集群必须推送到节点可达仓库。
 纯 Helm、升级、原生回滚、迁移、备份与旧部署迁移见 docs/03-运维与部署/01-部署与安装.md。
@@ -124,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     --profile=*) PROFILE="${1#*=}";; --release=*) RELEASE="${1#*=}";; --namespace=*) NAMESPACE="${1#*=}";;
     --dry-run) DRY_RUN=1;; --diff) DIFF=1;; --render-dir=*) RENDER_DIR="${1#*=}";;
     -y|--yes) YES=1;; --allow-dirty) ALLOW_DIRTY=1;;
+    --cache-build) BUILD_CACHE=1;;
     --no-build) cli[BUILD]=false;; --no-push) cli[PUSH]=false;;
     --*=*) key="${1%%=*}"; key="${key#--}"; val="${1#*=}"
       [[ " $PARAM_KEYS " == *" $key "* ]] || die "不支持参数 $key；请使用 values 文件"
@@ -158,9 +168,11 @@ PROFILE="${PROFILE:-${cfg[PROFILE]:-}}"
 NAMESPACE="${NAMESPACE:-${cfg[NAMESPACE]:-aegisops}}"
 [[ "$RELEASE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#RELEASE} -le 40 ]] || die "release 必须是最长40字符的小写 DNS 名"
 [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NAMESPACE} -le 63 ]] || die "namespace 不合法"
-for key in BUILD PUSH PERSIST_REPORTS ENABLE_WRITE ALLOW_QUICKSTART_HTTP OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE BLOBS_USE_TLS BLOBS_PATH_STYLE BLOBS_CREATE_BUCKET; do
+for key in BUILD PUSH PERSIST_REPORTS ENABLE_WRITE ALLOW_QUICKSTART_HTTP OIDC_DISABLE_PKCE OIDC_ALLOW_MISSING_NONCE BLOBS_USE_TLS BLOBS_PATH_STYLE BLOBS_CREATE_BUCKET CACHE_BUILD; do
   [[ ! -v "cfg[$key]" || "${cfg[$key]}" == true || "${cfg[$key]}" == false ]] || die "$key 必须为 true 或 false"
 done
+# CACHE_BUILD (install.env/环境变量) 与 --cache-build (CLI) 任一开启即生效。
+if [[ "${cfg[CACHE_BUILD]:-false}" == true ]]; then BUILD_CACHE=1; fi
 # 唯一模板源必须在当前检出中；不再下载任何发布安装包。
 [[ -d "$SCRIPT_DIR/helm/aegisops" ]] || die "未找到 deploy/helm/aegisops；请在完整源码检出的项目根目录执行"
 # 快速体验：默认从当前源码构建并分发，不依赖 GitHub Release/公开镜像。
@@ -214,7 +226,7 @@ if [[ "$PROFILE" == quickstart ]]; then
   fi
 fi
 # Public compatibility keys only; all rendering belongs to Helm.
-for pair in IMAGE:image.repository TAG:image.tag IMAGE_WEB:web.repository STORAGE_CLASS:persistence.storageClass REPORT_STORAGE_SIZE:persistence.reportsSize DATA_STORAGE_SIZE:persistence.dataSize INGRESS_HOST:ingress.host INGRESS_CLASS:ingress.className PUBLIC_URL:server.publicURL IMAGE_PULL_POLICY:image.pullPolicy BLOBS_BACKEND:blobs.driver STORE_DRIVER:database.driver SQLITE_PATH:database.sqlitePath ADMIN_USERNAME:auth.adminUsername; do
+for pair in IMAGE:image.repository TAG:image.tag IMAGE_WEB:web.repository STORAGE_CLASS:persistence.storageClass REPORT_STORAGE_SIZE:persistence.reportsSize DATA_STORAGE_SIZE:persistence.dataSize INGRESS_HOST:ingress.host INGRESS_CLASS:ingress.className INGRESS_TLS_SECRET:ingress.tlsSecret PUBLIC_URL:server.publicURL IMAGE_PULL_POLICY:image.pullPolicy BLOBS_BACKEND:blobs.driver STORE_DRIVER:database.driver MIGRATION_SECRET:database.migrationSecret SQLITE_PATH:database.sqlitePath ADMIN_USERNAME:auth.adminUsername; do
   key="${pair%%:*}"; path="${pair#*:}"
   if [[ -v "cfg[$key]" && -n "${cfg[$key]}" ]]; then
     [[ "$path" != unused ]] || die "$key 不再支持自定义路径/初始用户名；请使用标准路径与页面账号管理"
@@ -232,9 +244,14 @@ case "${cfg[FORM]:-}" in allinone|minimal) set_value mode minimal;; separated|st
 case "${cfg[EXPOSE]:-}" in nodeport) set_value service.type NodePort;; ingress|none) set_value service.type ClusterIP;; '') :;; *) die "EXPOSE 不合法";; esac
 if [[ -n "${cfg[INGRESS_HOST]:-}" ]]; then set_bool ingress.enabled true; fi
 if [[ -n "${cfg[IMAGE_PULL_SECRET]:-}" ]]; then set_value 'imagePullSecrets[0].name' "${cfg[IMAGE_PULL_SECRET]}"; fi
-# External credentials are created from protected files only, never passed as argv values.
+# External credentials: reference an existing Secret, or create it from a protected file.
 secrets=()
-if [[ -n "${cfg[MYSQL_DSN]:-}" ]]; then
+if [[ -n "${cfg[MYSQL_SECRET]:-}" && -n "${cfg[MYSQL_DSN]:-}" ]]; then
+  die "MYSQL_SECRET 与 MYSQL_DSN 只能二选一：前者引用已有 Secret，后者由脚本创建"
+fi
+if [[ -n "${cfg[MYSQL_SECRET]:-}" ]]; then
+  set_value database.existingSecret "${cfg[MYSQL_SECRET]}"
+elif [[ -n "${cfg[MYSQL_DSN]:-}" ]]; then
   printf '%s' "${cfg[MYSQL_DSN]}" > "$WORK_DIR/dsn"
   set_value database.existingSecret "$RELEASE-mysql"
   secrets+=(mysql)
@@ -247,7 +264,14 @@ for pair in BLOBS_BACKEND:DRIVER BLOBS_ENDPOINT:ENDPOINT BLOBS_REGION:REGION BLO
     printf 'AEGISOPS_PLATFORM_BLOBS_%s=%s\n' "${pair#*:}" "${cfg[$key]}" >> "$blob_file"
   fi
 done
-if [[ -n "${cfg[BLOBS_ENDPOINT]:-}" ]]; then set_value blobs.existingSecret "$RELEASE-s3"; secrets+=(s3); fi
+if [[ -n "${cfg[BLOBS_SECRET]:-}" && -n "${cfg[BLOBS_ENDPOINT]:-}" ]]; then
+  die "BLOBS_SECRET 与 BLOBS_ENDPOINT 只能二选一：前者引用已有 Secret，后者由脚本创建"
+fi
+if [[ -n "${cfg[BLOBS_SECRET]:-}" ]]; then
+  set_value blobs.existingSecret "${cfg[BLOBS_SECRET]}"
+elif [[ -n "${cfg[BLOBS_ENDPOINT]:-}" ]]; then
+  set_value blobs.existingSecret "$RELEASE-s3"; secrets+=(s3)
+fi
 if [[ -n "${cfg[OIDC_CA_FILE]:-}" ]]; then
   [[ -f "${cfg[OIDC_CA_FILE]}" ]] || die "OIDC CA 文件不存在"
   set_value auth.oidcCASecret "$RELEASE-oidc-ca"; secrets+=(oidc)
@@ -297,16 +321,30 @@ if [[ "${cfg[BUILD]:-false}" == true ]]; then
   [[ -z "$dirty" || $ALLOW_DIRTY -eq 1 ]] || die "源码内容有未提交改动；提交/还原或 --allow-dirty（TAG 不变）"
   ensure_distribution_ready
   built_images=()
+  # 构建加速（可选）：--cache-build / CACHE_BUILD=true 时用 BuildKit 把层缓存落到本地目录，
+  # 重跑时 go mod download / npm ci 等少变层直接命中，显著缩短重复构建时间；仅 docker 支持。
+  cache_args=()
+  if [[ $BUILD_CACHE -eq 1 && "$BUILD_TOOL" == docker ]]; then
+    cache_dir="${BUILD_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/aegisops/buildkit}"
+    mkdir -p "$cache_dir" 2>/dev/null || die "无法创建构建缓存目录：$cache_dir"
+    cache_args=(--cache-from="type=local,src=$cache_dir" --cache-to="type=local,dest=$cache_dir,mode=max")
+    info "已开启 BuildKit 本地层缓存：$cache_dir"
+  elif [[ $BUILD_CACHE -eq 1 ]]; then
+    info "警告：--cache-build 需要 docker + BuildKit，$BUILD_TOOL 不支持，已忽略。"
+  fi
+  export DOCKER_BUILDKIT=1
   "$BUILD_TOOL" build -f "$REPO_ROOT/Dockerfile" \
+    "${cache_args[@]+"${cache_args[@]}"}" \
     --build-arg "VERSION=${cfg[TAG]}" --build-arg "COMMIT=$commit" \
     --build-arg "GOPROXY=${cfg[GOPROXY]:-https://proxy.golang.org,direct}" \
+    --build-arg "NPM_REGISTRY=${cfg[NPM_REGISTRY]:-https://registry.npmjs.org}" \
     --build-arg "KUBECTL_VERSION=${cfg[KUBECTL_VERSION]-v1.29.15}" \
     --build-arg "KUBECTL_DOWNLOAD_BASE=${cfg[KUBECTL_DOWNLOAD_BASE]:-https://files.m.daocloud.io/dl.k8s.io/release}" \
     -t "${cfg[IMAGE]}:${cfg[TAG]}" "$REPO_ROOT" || die "镜像构建失败：${cfg[IMAGE]}:${cfg[TAG]}"
   built_images+=("${cfg[IMAGE]}:${cfg[TAG]}")
   if [[ "${cfg[FORM]:-standard}" != allinone && "${cfg[FORM]:-standard}" != minimal ]]; then
     web="${cfg[IMAGE_WEB]:-${cfg[IMAGE]}-web}"
-    "$BUILD_TOOL" build -f "$SCRIPT_DIR/separated/web.Dockerfile" --build-arg "VERSION=${cfg[TAG]}" --build-arg "COMMIT=$commit" -t "$web:${cfg[TAG]}" "$REPO_ROOT" || die "Web 镜像构建失败：$web:${cfg[TAG]}"
+    "$BUILD_TOOL" build -f "$SCRIPT_DIR/separated/web.Dockerfile" "${cache_args[@]+"${cache_args[@]}"}" --build-arg "VERSION=${cfg[TAG]}" --build-arg "COMMIT=$commit" -t "$web:${cfg[TAG]}" "$REPO_ROOT" || die "Web 镜像构建失败：$web:${cfg[TAG]}"
     built_images+=("$web:${cfg[TAG]}")
     set_value web.repository "$web"
   fi

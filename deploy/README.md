@@ -25,16 +25,15 @@ bash deploy/install.sh
 
 脚本不解析 GitHub Release，也不下载其它版本的安装包或镜像。源码内容有未提交改动时需显式 `--allow-dirty`；未指定 TAG 时由脚本按当前提交生成构建标签。
 
-生产安装：先按完整指南创建外部服务 Secret，填写生产 values。生产镜像由同一脚本从当前源码构建并推送到你的仓库（推荐），或由你的 CI 构建后用 `--no-build` 复用：
+生产安装只需一个配置文件 `install.env`：数据库与对象存储凭据可以写进它（脚本自动创建标准 Secret），也可以引用你已建好的 Secret（`MYSQL_SECRET`/`BLOBS_SECRET`）。生产镜像由同一脚本从当前源码构建并推送到你的仓库（推荐），或由 CI 构建后在 `install.env` 里设 `BUILD=false` 复用：
 
 ```bash
-bash deploy/install.sh --profile=production \
-  --values="$HOME/.aegisops/deploy/production.yaml" \
-  --IMAGE="<仓库地址>/aegisops" --TAG="<版本>" --PUSH=true --yes
-
-bash deploy/install.sh --profile=production \
-  --values="$HOME/.aegisops/deploy/production.yaml" --no-build --yes
+cp deploy/install.env.example install.env    # 放到源码目录之外，chmod 600
+vi install.env                               # 常规部署只改这一个文件
+bash deploy/install.sh --env-file install.env --yes
 ```
+
+高级/环境特有配置（复用已有 PVC、接管旧实例、调整资源等）不改 `install.env`，在 Helm values 中填写；直接使用原生 Helm 时才需要 `values.yaml`。
 
 预演使用 `--dry-run --render-dir=<受限目录>`。产物可能含生成的 Secret，不能公开、提交 Git 或直接当成另一套安装入口。正式安装仍由 Helm 管理。
 
