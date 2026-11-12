@@ -674,6 +674,15 @@
 > `read_on_demand` 逐 key 读取 Secret；attach/port-forward、stdin/tty、kubectl Secret
 > 和 `--raw` 仍禁止。
 
+> 2026-11-12 口径更新（方案 24《只读命令组合与 Secret 诊断权限优化》）：上述第 4 条中
+> “含 shell 语法的命令永远人工审批”修订为——命令权限按完整命令的语义判断
+> （`internal/cmdplan`）：可证明只读的单命令/组合（`|`、`&&`/`||`、`;`，每段为 kubectl
+> 只读查询或参数受控的 grep/head/tail/sort/uniq/wc/cut/tr/jq）自动执行，并由
+> `internal/executor` 以受控 argv 管道运行，不经 bash、不依赖 `platform.exec.shell_enabled`；
+> 未能证明只读的 shell 构造仍需真人审批且不被 `--skip-permissions` 免除。
+> `read_on_demand` 的读取审批新增 `agent.secret.read_approval`（`always` 缺省 /
+> `auto` 管理员显式授权），见该方案 §4。
+
 ## ADR-045 一键安装：配置三层分层、暴露层可插拔（默认 NodePort）与 LLM 辅助边界
 
 - **状态**：已接受（2026-10-29）；实现落 P6.4，安装辅助拆到 P6.14/P6.15（可选、不进关键路径）
@@ -791,6 +800,8 @@
 
 ## ADR-053 独立安装方式与零参数快速体验环境
 
+> 模板来源、生产存储与迁移职责由 ADR-054 覆盖；零参数体验目标保留。零参数交付方式已由 ADR-054 更新为**当前源码本地构建**，不再依赖 GitHub Release。
+
 - **状态**：Accepted（2026-11-11），主要代码已落地，本地验证通过；公开发布/真实集群与迁移准出待验。
 - **决策**：脚本和 Helm 独立安装，不互相依赖。现有 install.sh 零参数即最新发布版本；生产修改现有 install.env，Helm 使用普通 values.yaml。不新增 quickstart.sh、dev.env 或环境专用配置体系。
 - **默认**：快速体验环境为内嵌 SPA 单副本、SQLite/db、NodePort HTTP 显式兼容；首装有默认 StorageClass 自动 PVC，否则临时卷并提示 Pod 重建丢数据，重跑不自动切卷。生产推荐外部 MySQL、固定版本、持久卷和 HTTPS。模型/集群/OIDC 页面后配，不纳入安装自动接入。
@@ -798,6 +809,16 @@
 - **安全**：快速体验 HTTP 仅明确配置时降级 Cookie，保留 CSRF/Origin/认证授权；生产 Secure 默认不变。安装自动化不绕过 Agent 审批、Secret 或 Executor 边界。
 - **顺序**：按用户安排先 P11 再 P12，覆盖 ADR-051/052 对二者排序；P10.7 既有现场验收门禁保留。旧 P11 4.50d 与总 41.00d 只作历史基线，新范围实施前重估。
 - **依据与出口**：方案 21 v1.2、四期计划 v1.84。README 一键命令仅在公开制品与干净环境验证完成后提供；脚本/Chart/HTTP 兼容及发布流程已实现；未操作真实集群或发布外部制品。
+
+## ADR-054 应用 Helm 单一模板与部署边界收敛
+
+- **状态**：Accepted（2026-11-12）；本地实现与自动化检查随本轮交付，真实集群和外部制品验证单独记录。
+- **唯一模板**：应用资源只维护 `deploy/helm/aegisops`。install/upgrade 是 Helm 便利入口；历史 base/allinone/separated 平台清单冻结为迁移参考，不再打入安装包。状态、历史与回滚归原生 Helm，不再维护自定义回滚账本。
+- **快速体验**：保留一条指令、页面配置模型与集群。默认从当前源码本地构建镜像，不再依赖 GitHub Release 或公开发布镜像；kind/k3d 自动载入镜像，普通远程/多节点集群必须推送到节点可达仓库。缺少 Helm 时校验下载固定客户端。SQLite + dir + HTTP NodePort，有默认 StorageClass 用 PVC，否则明确临时存储；重跑不掩盖临时数据丢失风险，不把生产实例覆盖为体验模式。
+- **生产依赖**：推荐外部 MySQL + S3 兼容对象存储。用户自行提供或按供应商官方资料安装，AegisOps 不开发、打包或维护 MySQL/MinIO Chart，也不自动安装中间件。应用凭据只通过 Secret 提供；旧变量文件仅在 Secret 不存在时导入，不覆盖已有值。
+- **迁移**：MySQL 自动模式使用独立版本 Job，应用 init 等待 schema，server `--skip-migrations` 仅检查。SQLite 自动模式保留 init 初始化；流水线可用 external 模式。MySQL 迁移通过连接级 advisory lock 防止跨进程并发。迁移不是 MySQL 软件升级，也不保证数据库可随镜像回退；破坏性历史迁移必须单独说明并验证兼容。
+- **恢复**：普通应用恢复使用固定镜像版本或原生 Helm revision；数据库、对象存储、加密 key 必须独立备份。禁止静默接管旧脚本实例、切换数据库驱动/对象后端或重置加密密钥。
+- **验证**：真实 Helm 渲染、应用配置加载、Shell 全入口传输模拟、Go 测试/vet；CI 增加隔离 kind 快速体验登录/保存配置/重跑检查及官方 MySQL 镜像迁移测试。未运行的 CI 或真机检查不得标记为通过。
 
 ## 待决策事项（需在编码前确认）
 

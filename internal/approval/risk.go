@@ -5,6 +5,7 @@ package approval
 import (
 	"strings"
 
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 )
 
@@ -84,29 +85,63 @@ var valueFlags = map[string]bool{
 	"--kustomize": true, "-k": true, "-f": true, "--filename": true,
 }
 
+// CommandAnalysis 是命令的统一分析结果（方案 24 §3.1）。审批、平台策略、
+// 旧范围校验与执行器都复用它，不再各自用字符串切分生成互相矛盾的判断。
+// Plan 是完整的 shell AST 分析结论（调用目标 + 受控执行程序）。
+type CommandAnalysis struct {
+	Plan cmdplan.Analysis
+	// ReadOnly 表示整条命令可证明只读（自动执行，无须人工审批）。
+	ReadOnly bool
+	// Risk 是最高风险等级。
+	Risk model.RiskLevel
+	// NeedsShellApproval 表示命令含 shell 构造且未被证明只读，必须真人审批。
+	NeedsShellApproval bool
+}
+
+// AnalyzeCommand 统一分析一条命令，供 approval / tools / executor 复用。
+// 可证明只读的组合（含管道、&&/||/;）为只读；其余保持二期既有分类：
+// 含 shell 构造 → 必须人工审批；只读动词与 --dry-run 写动词仍是只读。
+func AnalyzeCommand(command string) CommandAnalysis {
+	plan := cmdplan.Analyze(command)
+	a := CommandAnalysis{Plan: plan, ReadOnly: plan.ProvablyReadOnly, Risk: model.RiskCritical}
+	if a.ReadOnly {
+		a.Risk = model.RiskSafe
+		return a
+	}
+	if HasShellSyntax(command) {
+		a.NeedsShellApproval = true
+		_, a.Risk = classifyCommand(command)
+		return a
+	}
+	readOnly, risk := classifyCommand(command)
+	a.ReadOnly = readOnly
+	a.Risk = risk
+	return a
+}
+
 // ClassifyCommand 解析 kubectl 命令并给出风险等级。
+// 可证明只读的命令组合（含受控管道）→ SAFE；
 // 只读 → SAFE；rollout history/status → SAFE；--dry-run 的已知写动词 → SAFE；
 // 删除关键资源 → CRITICAL；其余写动词按表；未知动词保守 CRITICAL。
-// 含 shell 语法的命令永不返回 SAFE（必须人工审批），并扫描其中所有 kubectl 调用，
-// 取最高风险，避免仅因第一条命令是 get 就把整个 pipeline 判定为只读。
+// 含 shell 语法但无法证明只读的命令永不返回 SAFE（必须人工审批），并扫描其中
+// 所有 kubectl 调用，取最高风险，避免仅因第一条命令是 get 就把整个 pipeline
+// 判定为只读。
 func ClassifyCommand(command string) model.RiskLevel {
-	readOnly, risk := classifyCommand(command)
-	if readOnly {
-		return model.RiskSafe
-	}
-	return risk
+	return AnalyzeCommand(command).Risk
 }
 
 // IsReadOnlyCommand 判断命令是否为只读（自动执行，无需审批）。
-// 只读动词、rollout history/status、带 --dry-run 的已知写动词均视为只读。
-// 含 shell 语法的命令（pipe/heredoc/redirect/&&/|| 等）永不归类为只读，
-// 必须走人工审批（AGENTS.md: shell commands are never classified as read-only auto-execute）。
+// 可证明只读的单命令/组合（含管道、&&/||、顺序执行）自动执行；
+// 其余保持二期行为：只读动词、rollout history/status、带 --dry-run 的已知写动词
+// 视为只读；无法证明只读的 shell 构造必须走人工审批。
 func IsReadOnlyCommand(command string) bool {
-	if HasShellSyntax(command) {
-		return false
-	}
-	readOnly, _ := classifyCommand(command)
-	return readOnly
+	return AnalyzeCommand(command).ReadOnly
+}
+
+// NeedsShellApproval 判断命令是否必须因为 shell 构造进入人工审批。
+// 可证明只读的组合不需要（执行器改走受控 argv 管道，不使用 bash）。
+func NeedsShellApproval(command string) bool {
+	return AnalyzeCommand(command).NeedsShellApproval
 }
 
 // riskOrder 用于计算 shell 命令中的最高风险等级。

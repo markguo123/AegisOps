@@ -653,6 +653,11 @@ func (a *Agent) approvalDecisionDetail(t tools.Tool, args json.RawMessage) appro
 	if mandatory, ok := t.(tools.MandatoryHumanApproval); ok {
 		in.RequireHuman = mandatory.RequiresHumanApproval(args)
 	}
+	// 敏感读取的显式配置授权（agent.secret.read_approval=auto）：仍然是敏感读取，
+	// 只是不需要逐次真人审批；它单独走 DecisionSensitiveAuto，不混进普通只读。
+	if sensitive, ok := t.(tools.SensitiveReadAware); ok && sensitive.SensitiveReadAuto(args) {
+		in.SensitiveAuto = true
+	}
 	guard := a.guardFor(t, args)
 	if guard != nil {
 		in.Denied = guard.Denied()
@@ -662,7 +667,11 @@ func (a *Agent) approvalDecisionDetail(t tools.Tool, args json.RawMessage) appro
 	}
 	d := approvalDetail{decision: a.ApprovalPolicy.Evaluate(in), guard: guard}
 	if d.decision != approval.DecisionRequireApproval {
-		d.matchReason = "policy_not_require"
+		if d.decision == approval.DecisionSensitiveAuto {
+			d.matchReason = "policy_sensitive_auto"
+		} else {
+			d.matchReason = "policy_not_require"
+		}
 		return d
 	}
 	if g := a.matchedGrant(t, args); g != nil {

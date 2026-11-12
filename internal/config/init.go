@@ -162,6 +162,8 @@ agent:
     max_manifest_bytes: 8192  # 单次 manifest 最大字节数（1KiB-1MiB）
   secret:
     access: read_on_demand    # off | create_only | read_on_demand（逐 key 审批读取；read_write 不支持）
+    read_approval: always     # always = 每次读取都要真人审批；auto = 管理员显式授权按范围免逐次审批
+                              # auto 表示允许外部模型接收按需读取的明文，不改变平台角色与 Kubernetes RBAC
 
 rules:
   enabled: []                 # 非空则只启用这些规则

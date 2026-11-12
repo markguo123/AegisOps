@@ -44,8 +44,8 @@ func NewWriteTools(runner WriteRunner) []Tool {
 // kubectlTool：唯一的写操作工具。
 //
 // 覆盖全部写操作（scale/patch/restart/label/delete/apply/edit…）和读操作（get/list/describe/logs/events）。
-// 读命令（get/describe/list/logs/events，且不含 shell 语法）自动执行；
-// 写命令及所有含 shell 语法的命令必须走人工审批。
+// 可证明只读的单命令/组合（含受控管道与 &&/||/;）自动执行；
+// 写命令及未证明只读的 shell 构造必须走人工审批。
 // 禁止：交互式命令（edit/attach/port-forward/proxy/run/cp/debug）、读取 Secret 资源、--raw 参数。
 type kubectlTool struct{ runner WriteRunner }
 
@@ -155,15 +155,16 @@ func kubectlResourceForKind(kind string) (group, resource string, ok bool) {
 	}
 }
 
-// SchemaMetadata 说明 kubectl 工具的读写/风险动态性：命令是否只读取决于具体命令，
-// 写命令及所有含 shell 构造的命令都必须走人工审批。
+// SchemaMetadata 说明 kubectl 工具的读写/风险动态性：命令是否只读取决于具体命令。
+// 可证明只读的单命令/组合（含管道 |、&&/||、; 与受控过滤器 grep/head/tail/sort/
+// uniq/wc/cut/tr/jq）自动执行；写命令及未证明只读的 shell 构造必须走人工审批。
 func (t *kubectlTool) SchemaMetadata() string {
-	return "[READ/WRITE][RISK: DEPENDS ON COMMAND][APPROVAL REQUIRED FOR WRITE OR SHELL]"
+	return "[READ/WRITE][RISK: DEPENDS ON COMMAND][APPROVAL REQUIRED FOR WRITE OR UNPROVEN SHELL]"
 }
 
 func (t *kubectlTool) Name() string { return "kubectl" }
 func (t *kubectlTool) Description() string {
-	return "执行 kubectl 命令。支持 shell 构造（pipe |、heredoc <<EOF、redirect >、&& / ||、command substitution $() 等）。\n只读命令（get/describe/list/logs/events，且不含 shell 语法）自动执行；写命令及所有含 shell 语法的命令必须走人工审批。\n非交互 exec 仅允许 `kubectl exec <pod> -n <ns> -- <command>`，且每次必须真人审批；-i/-t/--stdin/--tty 禁止。\n禁止：edit/attach/port-forward/proxy/run/cp/debug、读取 Secret 资源、--raw 参数。Secret 诊断只能使用 get_secret_value。\n流式命令（logs -f/get -w）以固定超时采样部分输出。输出自动脱敏并截断。\n写命令安全红线（务必遵守）：(1) delete/删除类操作永远是最后选择，PVC/PV/Deployment/StatefulSet/Service/Namespace 的删除必须先给出更小范围的 patch/annotate/rollout 替代方案并征得用户同意，特别是 PVC 绑定失败必须先 patch storageClassName，只有被 immutable 拒绝+用户明确同意的情况下才允许提出 delete pvc；(2) 任何 delete pvc / delete pv / delete namespace 这种 CRITICAL 级别的删除，必须在同一个回答里同时列出 patch 替代方案给用户选择，不能只提删除。"
+	return "执行 kubectl 命令。支持 shell 构造（pipe |、heredoc <<EOF、redirect >、&& / ||、command substitution $() 等）。\n只读命令自动执行：单条 get/describe/logs/events/top/explain 与可证明只读的组合（kubectl get po -A | grep mysql、kubectl get pods -n team-a | grep -E 'mysql|redis' | head -n 20、kubectl get pods -n team -o json | jq -r '.items[].metadata.name'、以及 &&/||/; 连接的多条只读查询）无需审批；组合内允许的过滤器只有 grep、head、tail、sort、uniq、wc、cut、tr、jq，且参数受限、只处理管道输入。\n写命令及未证明只读的 shell 构造必须走人工审批：awk、sed、xargs、解释器、curl/wget、重定向、命令替换、环境赋值、后台任务与未知参数都不会自动执行。\n非交互 exec 仅允许 `kubectl exec <pod> -n <ns> -- <command>`，且每次必须真人审批；-i/-t/--stdin/--tty 禁止。\n禁止：edit/attach/port-forward/proxy/run/cp/debug、读取 Secret 资源、--raw 参数。Secret 元数据用 get_secret_info，明文诊断只用 get_secret_value。\n流式命令（logs -f/get -w）以固定超时采样部分输出。输出自动脱敏并截断。\n写命令安全红线（务必遵守）：(1) delete/删除类操作永远是最后选择，PVC/PV/Deployment/StatefulSet/Service/Namespace 的删除必须先给出更小范围的 patch/annotate/rollout 替代方案并征得用户同意，特别是 PVC 绑定失败必须先 patch storageClassName，只有被 immutable 拒绝+用户明确同意的情况下才允许提出 delete pvc；(2) 任何 delete pvc / delete pv / delete namespace 这种 CRITICAL 级别的删除，必须在同一个回答里同时列出 patch 替代方案给用户选择，不能只提删除。"
 }
 func (t *kubectlTool) InputSchema() any {
 	return objSchema(map[string]any{
@@ -233,7 +234,11 @@ func (t *kubectlTool) RequiresHumanApproval(input json.RawMessage) bool {
 
 // extractKubectlSummary 从 executor.Result 中提取给 LLM 和前端的一行摘要文本。
 // 成功时：取 Stdout 前 200 字符（去除空行）；失败时：拼接 ExitCode + Stderr。
+// 过滤阶段无匹配（grep 退出码 1）单独给出清晰结论，不能被当成查询失败。
 func extractKubectlSummary(res executor.Result) string {
+	if res.NoMatch {
+		return "无匹配：过滤阶段没有命中任何行（查询本身成功，不是集群故障）"
+	}
 	if res.ExitCode != 0 {
 		if res.Stderr != "" {
 			return "exit=" + itoa(res.ExitCode) + " stderr: " + firstLine(res.Stderr)

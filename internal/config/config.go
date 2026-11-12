@@ -139,15 +139,29 @@ type CreateConfig struct {
 }
 
 // SecretConfig controls the Secret create channel and structured on-demand
-// diagnostic reads. Broad kubectl Secret dumps remain forbidden; on-demand
-// reads require a per-key human approval and never persist plaintext.
+// diagnostic reads. Broad kubectl Secret dumps remain forbidden; reads never
+// persist plaintext and every non-model exit stays redacted.
 type SecretConfig struct {
 	// Access is "off" (no Secret creation/read), "create_only" (create with
 	// values that never enter the LLM context), or "read_on_demand" (creation
 	// plus structured, per-key diagnostic reads after explicit approval).
 	// "read_write" is intentionally rejected because it is too broad.
 	Access string `mapstructure:"access"`
+	// ReadApproval controls the consent model of read_on_demand reads:
+	// "always" (default) requires a human approver for every call;
+	// "auto" is an explicit administrator authorization for in-scope on-demand
+	// reads within the existing user/task/cluster permissions, without a
+	// per-call prompt. It still requires secret.read, target binding, and all
+	// the redaction/model-only rules; it implies the external model provider
+	// may see the requested plaintext.
+	ReadApproval string `mapstructure:"read_approval"`
 }
+
+// Secret read approval modes (agent.secret.read_approval).
+const (
+	SecretReadApprovalAlways = "always"
+	SecretReadApprovalAuto   = "auto"
+)
 
 // WebUIConfig 控制二期 Web UI 监听地址。
 type WebUIConfig struct {
@@ -410,6 +424,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.create.max_objects_per_call", 3)
 	v.SetDefault("agent.create.max_manifest_bytes", 8*1024)
 	v.SetDefault("agent.secret.access", "read_on_demand")
+	v.SetDefault("agent.secret.read_approval", SecretReadApprovalAlways)
 
 	v.SetDefault("webui.addr", "127.0.0.1:8081")
 
@@ -626,6 +641,9 @@ func (c *Config) Validate() error {
 	if err := validateSecretAccess(c.Agent.Secret.Access); err != nil {
 		return err
 	}
+	if err := validateSecretReadApproval(c.Agent.Secret.Access, c.Agent.Secret.ReadApproval); err != nil {
+		return err
+	}
 	if c.WebUI.Addr == "" {
 		return fmt.Errorf("webui.addr must not be empty")
 	}
@@ -719,5 +737,22 @@ func validateSecretAccess(access string) error {
 		return fmt.Errorf("agent.secret.access=read_write is not supported: use read_on_demand for approval-gated per-key reads")
 	default:
 		return fmt.Errorf("agent.secret.access must be one of off, create_only, read_on_demand")
+	}
+}
+
+// validateSecretReadApproval 校验新增的读取审批模式（方案 24 §4.1）。
+// 缺省/旧配置保持 always；非法值启动失败；off/create_only 搭配 auto 是矛盾
+// 配置，必须在启动期报错，而不是静默保留一个不会生效的"授权"。
+func validateSecretReadApproval(access, readApproval string) error {
+	switch strings.ToLower(strings.TrimSpace(readApproval)) {
+	case "", SecretReadApprovalAlways:
+		return nil
+	case SecretReadApprovalAuto:
+		if !strings.EqualFold(strings.TrimSpace(access), "read_on_demand") {
+			return fmt.Errorf("agent.secret.read_approval=auto requires agent.secret.access=read_on_demand")
+		}
+		return nil
+	default:
+		return fmt.Errorf("agent.secret.read_approval must be one of always, auto")
 	}
 }

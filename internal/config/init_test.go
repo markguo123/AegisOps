@@ -66,6 +66,7 @@ var cliTemplateKeys = []string{
 	"agent.max_tool_calls",
 	"agent.require_approval",
 	"agent.secret.access",
+	"agent.secret.read_approval",
 	"agent.session_dir",
 	"agent.skip_permissions",
 	"agent.timeout",

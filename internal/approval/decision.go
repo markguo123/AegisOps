@@ -21,6 +21,11 @@ const (
 	DecisionAuto            Decision = "auto"
 	DecisionRequireApproval Decision = "require_approval"
 	DecisionDeny            Decision = "deny"
+	// DecisionSensitiveAuto 是「管理员显式授权」的敏感读取自动放行
+	// （agent.secret.read_approval=auto）。它与普通写操作的免审不同：
+	// 调用方必须仍然标记该调用为敏感读取，并保留 secret.read 权限、
+	// 目标绑定、ModelOnly 通道与全部非模型出口脱敏。
+	DecisionSensitiveAuto Decision = "auto_sensitive"
 )
 
 // Input is the minimal per-call context the policy needs. Command/risk
@@ -33,6 +38,11 @@ type Input struct {
 	// RequireHuman marks sensitive operations that can never be skipped by
 	// automation flags (for example non-interactive exec or Secret reads).
 	RequireHuman bool
+	// SensitiveAuto marks an explicitly configured sensitive-read consent
+	// (agent.secret.read_approval=auto). 它是配置层的显式授权，不是普通写操作
+	// 免审：调用方仍须完成 secret.read / 目标绑定校验，且该授权不能由
+	// --skip-permissions、require_approval=false 或普通授权缓存替代。
+	SensitiveAuto bool
 	// Denied 是 Code Guard 的硬拒绝结论（kind 黑名单、未 dry run、命名空间缺失等）。
 	// 它优先级最高：跳过 SkipPermissions 与 RequireApproval=false，因为这两条
 	// 自动化通道只免除「人工确认」，不能免除代码级门禁。
@@ -41,9 +51,14 @@ type Input struct {
 
 // Evaluate normalizes the v1 behavior into a strict ApprovalPolicy.
 //
-// Shell is always gated before skip_permissions / require_approval=false,
-// matching AGENTS.md: shell constructs require a real human approver and
-// are never covered by non-interactive automation.
+// RequireHuman (sensitive reads in always mode, non-interactive exec) and
+// Shell (未证明只读的 shell 构造) are gated before skip_permissions /
+// require_approval=false, matching AGENTS.md: they require a real human
+// approver and are never covered by non-interactive automation.
+//
+// SensitiveAuto 是 read_approval=auto 的显式配置授权：只改变是否需要逐次
+// 弹窗，调用方仍必须完成 secret.read、目标绑定与出口脱敏，因此返回独立的
+// DecisionSensitiveAuto 而不是普通 AUTO。
 func (p Policy) Evaluate(in Input) Decision {
 	if p.Mode == "" {
 		p.Mode = ModeStrict
@@ -51,8 +66,16 @@ func (p Policy) Evaluate(in Input) Decision {
 	if in.Denied {
 		return DecisionDeny
 	}
-	if in.Shell || in.RequireHuman {
+	if in.RequireHuman {
 		return DecisionRequireApproval
+	}
+	if in.Shell {
+		return DecisionRequireApproval
+	}
+	// 敏感读取的显式配置授权：先于普通只读判断，得到独立审计结论，
+	// 避免把敏感读取混进「普通只读自动执行」。
+	if in.SensitiveAuto {
+		return DecisionSensitiveAuto
 	}
 	if in.ReadOnly {
 		return DecisionAuto

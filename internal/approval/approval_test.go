@@ -6,25 +6,52 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/model"
 )
 
-func TestIsReadOnlyCommandShellNeverReadOnly(t *testing.T) {
-	// 含 shell 语法的命令永不归类为只读（即使动词是 get）。
-	shellReadOnlyCmds := []string{
+// TestIsReadOnlyCommandShellConstructs 对应方案 24 §3.2：可证明只读的命令组合
+// （管道、&&/||、顺序执行）自动执行；其余 shell 构造永不归类为只读。
+func TestIsReadOnlyCommandShellConstructs(t *testing.T) {
+	readOnlyCombos := []string{
 		"kubectl get pods | grep crash",
+		"kubectl get po -A | grep mysql",
+		"kubectl get pods -n team-a | grep -E 'mysql|redis' | head -n 20",
+		"kubectl get pods -n team-a -o json | jq -r '.items[].metadata.name'",
 		"kubectl get pods && kubectl get nodes",
-		"kubectl get pods > out.txt",
 		"kubectl get pods; kubectl get nodes",
+		"kubectl get pods -n a || kubectl get pods -n b",
+	}
+	for _, cmd := range readOnlyCombos {
+		if !IsReadOnlyCommand(cmd) {
+			t.Errorf("可证明只读的组合应自动执行: %q", cmd)
+		}
+		if got := ClassifyCommand(cmd); got != model.RiskSafe {
+			t.Errorf("可证明只读的组合风险应为 SAFE: %q got %s", cmd, got)
+		}
+		if NeedsShellApproval(cmd) {
+			t.Errorf("可证明只读的组合不应要求 shell 审批: %q", cmd)
+		}
+	}
+	// 无法证明只读的 shell 构造永不自动执行。
+	unproven := []string{
+		"kubectl get pods > out.txt",
 		"kubectl get pods $FOO",
 		"cat <<'EOF' | kubectl apply -f -",
 		"kubectl get pods 2>/dev/null || true",
+		"kubectl get pods | awk '{print $1}'",
+		"kubectl get pods -n a | grep x | sed -n '1p'",
 	}
-	for _, cmd := range shellReadOnlyCmds {
+	for _, cmd := range unproven {
 		if IsReadOnlyCommand(cmd) {
-			t.Errorf("含 shell 语法的命令不应为只读: %q", cmd)
+			t.Errorf("无法证明只读的 shell 构造不应为只读: %q", cmd)
+		}
+		if !NeedsShellApproval(cmd) {
+			t.Errorf("无法证明只读的 shell 构造必须要求人工审批: %q", cmd)
 		}
 	}
-	// 引号内的管道符号不应误判为 shell（虽然实际 kubectl 不会有引号内管道，但逻辑需正确）。
+	// 引号内的管道符号不是新增 shell 命令。
 	if !IsReadOnlyCommand(`kubectl get pods -n "default"`) {
 		t.Fatal("引号内不含 shell 语法，应为只读")
+	}
+	if !IsReadOnlyCommand("kubectl get pods -n team-a | grep -E 'mysql|redis'") {
+		t.Fatal("引号内的管道符号不应让只读组合升级为审批")
 	}
 }
 
@@ -175,7 +202,8 @@ func TestClassifyShellPipelineUsesMaxRisk(t *testing.T) {
 		{"kubectl get pods && kubectl delete service web", model.RiskCritical},
 		{"kubectl get pods --dry-run=client | kubectl delete pod x --dry-run=client", model.RiskMedium},
 		{"echo PT94bmNsIH0= | base64 -d | sh", model.RiskCritical},
-		{"kubectl get pods | grep crash", model.RiskMedium},
+		// 只读 kubectl + 未放行的过滤器：整体仍是 shell 命令，风险不低于 MEDIUM。
+		{"kubectl get pods | awk '{print $1}'", model.RiskMedium},
 	}
 	for _, c := range cases {
 		if got := ClassifyCommand(c.cmd); got != c.want {

@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/manifestx"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -67,6 +70,17 @@ func (s AccessScope) target(ns string, cluster bool, act string) error {
 var resourceName = regexp.MustCompile("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 func (s AccessScope) commandPolicy(cmd string) error {
+	analysis := approval.AnalyzeCommand(cmd)
+	if analysis.Plan.ProvablyReadOnly {
+		// 可证明只读的组合：每条 kubectl 调用分别校验目标与所需 read/logs 权限。
+		// 不因出现管道符号要求 ActionShell，也不放宽资源与 namespace 约束。
+		for _, call := range analysis.Plan.Calls {
+			if err := s.readCallPolicy(call); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	pc, err := executor.ParseCommandDetail(cmd)
 	if err != nil {
 		return errUnproven
@@ -78,6 +92,57 @@ func (s AccessScope) commandPolicy(cmd string) error {
 		return s.shellPolicy(cmd)
 	}
 	return s.argvPolicy(pc.Argv)
+}
+
+// readCallPolicy 是把 argvPolicy 的只读分支抽到 cmdplan.Call 上的等价实现：
+// 资源映射、集群级/命名空间级判定、Secret 拒绝与名称绑定必须与 argvPolicy 一致。
+func (s AccessScope) readCallPolicy(call cmdplan.Call) error {
+	act := authz.ActionRead
+	if call.Action == cmdplan.ActionLogs {
+		act = authz.ActionLogs
+	}
+	ns := call.Namespace
+	if call.AllNamespaces {
+		ns = "*"
+	}
+	kind := strings.ToLower(call.Kind)
+	if kind == "" {
+		return errUnproven
+	}
+	if strings.Contains(kind, ",") {
+		if call.Name != "" {
+			return errUnproven
+		}
+		for _, item := range strings.Split(kind, ",") {
+			single := call
+			single.Kind = item
+			if err := s.readCallPolicy(single); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	g, res, ok := kubectlResourceForKind(kind)
+	if kind == "node" || kind == "nodes" {
+		g, res, ok = "", "nodes", true
+	}
+	if !ok {
+		return errUnproven
+	}
+	cluster, ok := authz.ProfileResource(g, res, act)
+	if !ok || res == "secrets" {
+		return errUnproven
+	}
+	if cluster && call.Verb == "describe" {
+		return errUnproven
+	}
+	if cluster && ns != "" || !cluster && ns == "" {
+		return fmt.Errorf("%w: explicit target required", errUnproven)
+	}
+	return s.Policy.Check(authz.Target{
+		ClusterID: s.Policy.ClusterID, Namespace: ns, ClusterScoped: cluster,
+		Actions: []string{act}, Resource: g + "/" + res, Name: call.Name,
+	})
 }
 func (s AccessScope) argvPolicy(a []string) error {
 	if len(a) < 3 {

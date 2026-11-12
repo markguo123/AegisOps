@@ -15,6 +15,7 @@ import (
 
 type secretReadStubTool struct {
 	plain string
+	auto  bool
 }
 
 type captureTracer struct {
@@ -55,7 +56,10 @@ func (s *secretReadStubTool) IsReadOnly(json.RawMessage) bool { return false }
 func (s *secretReadStubTool) Risk(json.RawMessage) model.RiskLevel {
 	return model.RiskHigh
 }
-func (s *secretReadStubTool) RequiresHumanApproval(json.RawMessage) bool { return true }
+func (s *secretReadStubTool) RequiresHumanApproval(json.RawMessage) bool { return !s.auto }
+
+// SensitiveReadAuto 模拟 agent.secret.read_approval=auto 的显式敏感读取授权。
+func (s *secretReadStubTool) SensitiveReadAuto(json.RawMessage) bool { return s.auto }
 
 func TestSecretReadOnlyReachesCurrentModelAndIsRedactedEverywhereElse(t *testing.T) {
 	const plain = "db-password-42"
@@ -305,4 +309,89 @@ func containsMessage(msgs []llm.Message, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestSecretReadApprovalAutoSkipsApproverKeepsModelOnly 覆盖方案 24 §7.2 的
+// read_on_demand + auto：有权限且配置授权时不弹审批，明文仍只进入当前一次
+// 模型请求，其余出口全部脱敏。
+func TestSecretReadApprovalAutoSkipsApproverKeepsModelOnly(t *testing.T) {
+	const plain = "auto-consent-secret-31"
+	fl := &fakeLLM{responses: []*llm.ChatResponse{
+		toolCallResp(call("c1", "get_secret_value", `{"namespace":"prod","name":"db","keys":["password"],"reason":"verify login failure"}`)),
+		{Content: "当前口令是 " + plain + "，建议更新。"},
+	}}
+	reg := tools.NewRegistry()
+	if err := reg.Register(&secretReadStubTool{plain: plain, auto: true}); err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{ID: "secret-auto"}
+	rec := &auditRecorder{}
+	approver := &stubApprover{choices: []string{ChoiceNo}}
+	a := New(Options{
+		LLM: fl, Tools: reg, Session: sess, Approver: approver, Recorder: rec,
+		MaxIterations: 5, MaxToolCalls: 10,
+		ApprovalPolicy: &approval.Policy{Mode: approval.ModeStrict, RequireApproval: true},
+	})
+	answer, _, err := a.Chat(context.Background(), "检查数据库 Secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approver.calls != 0 {
+		t.Fatalf("read_approval=auto 不应逐次弹审批，approver calls=%d", approver.calls)
+	}
+	if len(fl.captured) < 2 || !containsMessage(fl.captured[1], plain) {
+		t.Fatal("当前轮模型请求应收到配置授权后的 Secret 原值")
+	}
+	if strings.Contains(answer, plain) {
+		t.Fatalf("最终回答泄露 Secret: %q", answer)
+	}
+	for _, m := range sess.Messages {
+		if strings.Contains(m.Content, plain) {
+			t.Fatalf("会话消息泄露 Secret: %+v", m)
+		}
+	}
+	if rec.leaks(plain) {
+		t.Fatal("审计泄露 Secret")
+	}
+	for {
+		select {
+		case msg := <-a.Output:
+			raw, _ := json.Marshal(msg)
+			if strings.Contains(string(raw), plain) {
+				t.Fatalf("Agent 输出事件泄露 Secret: %s", raw)
+			}
+		default:
+			return
+		}
+	}
+}
+
+// TestSecretReadAlwaysStillNeedsHuman 锁 always（默认）模式：
+// 即使开 SkipPermissions，也必须有真人在场；被拒绝时明文不得进入模型。
+func TestSecretReadAlwaysStillNeedsHuman(t *testing.T) {
+	const plain = "always-mode-secret-12"
+	fl := &fakeLLM{responses: []*llm.ChatResponse{
+		toolCallResp(call("c1", "get_secret_value", `{"namespace":"prod","name":"db","keys":["password"],"reason":"diagnose"}`)),
+		{Content: "无法读取，请人工确认"},
+	}}
+	reg := tools.NewRegistry()
+	if err := reg.Register(&secretReadStubTool{plain: plain, auto: false}); err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{ID: "secret-always"}
+	approver := &stubApprover{choices: []string{ChoiceNo}}
+	a := New(Options{
+		LLM: fl, Tools: reg, Session: sess, Approver: approver,
+		MaxIterations: 5, MaxToolCalls: 10,
+		ApprovalPolicy: &approval.Policy{Mode: approval.ModeStrict, RequireApproval: true, SkipPermissions: true},
+	})
+	if _, _, err := a.Chat(context.Background(), "检查 Secret"); err != nil {
+		t.Fatal(err)
+	}
+	if approver.calls != 1 {
+		t.Fatalf("always 模式必须逐次审批，approver calls=%d", approver.calls)
+	}
+	if containsMessage(fl.captured[len(fl.captured)-1], plain) {
+		t.Fatal("被拒绝的读取不得把明文送进模型")
+	}
 }

@@ -36,6 +36,30 @@ P2.11 三期 Chat 行为回归、P2.12 前端测试与构建门禁、P2.13 会�
   前端偏好会重置。
 - Go module 路径 `github.com/k8s-ai/k8s-ai` 作为内部技术标识保留，不随对外品牌变更。
 
+### Changed（2026-11-12，只读命令组合与 Secret 读取审批）
+
+- 新增 `internal/cmdplan`：基于 mvdan shell AST 统一分析命令结构，识别是否需要 shell
+  解释器、是否可证明只读、每条 kubectl 调用的 argv 与目标（cluster/namespace/资源/动作），
+  以及可执行的受控 argv 程序。审批、平台策略、旧 scope 校验与执行器共用同一结论。
+- 可证明只读的单命令/组合（`|`、`&&`/`||`、`;`，每段为 kubectl 只读查询或参数受控的
+  grep/head/tail/sort/uniq/wc/cut/tr/jq）自动执行；第一批过滤器只处理 stdin，拒绝文件
+  参数、写文件、模块导入与额外输入（jq 使用白名单表达式子集）。`kubectl get po -A | grep mysql`
+  这样的组合不再要求人工审批。
+- 只读组合由 `internal/executor` 以受控 argv 管道执行，不把已校验文本重新交给 bash：
+  `platform.exec.shell_enabled=false` 时仍可用；段间仅内存管道，保留退出码语义，
+  失败查询不被后置过滤掩盖，grep 无匹配返回 `NoMatch` 而不是集群故障。
+- 执行器只读路径改用最小环境白名单（PATH/语言/证书/代理/任务绑定 kubeconfig 与云厂商
+  凭据前缀），不继承数据库密码、模型密钥与其他集群凭据；整条组合共用任务超时与输出上限。
+- 新增 `agent.secret.read_approval`（`always` 缺省 / `auto`）：`always` 保持每次真人审批；
+  `auto` 是管理员显式授权，在现有权限范围内免逐次审批，但仍需 secret.read、目标绑定与
+  RBAC 校验，并产生独立的敏感读取决策（`AUTO_SENSITIVE`）与审计，`--skip-permissions`
+  不能替代。`off/create_only + auto` 在启动校验时报错。
+- 新增只读工具 `get_secret_info`：按 namespace 列出 Secret 名称/类型/immutable/键名，
+  使用普通 read 权限、不弹敏感读取审批，且与 `access` 模式无关；输出字段白名单，
+  永不返回 data/stringData/annotations/last-applied。
+- 配置生成器、配置中心目录、Helm 基线注释、系统提示词与 AGENTS.md 同步更新；
+  架构决策记录与安全设计按方案 24 修订相关条款。
+
 ### Changed（2026-11-06，Agent 非交互 exec 与 Secret 按需诊断）
 
 - 非交互 `kubectl exec <pod> -- <command>` 开放，但每次必须真人审批，`skip_permissions`

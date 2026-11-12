@@ -29,6 +29,10 @@ type SecretValuesReader interface {
 
 type secretValueTool struct {
 	reader SecretValuesReader
+	// auto 对应 agent.secret.read_approval=auto：管理员显式授权后，
+	// 读取不再逐次弹审批，但仍然是敏感读取（secret.read 权限、目标绑定、
+	// ModelOnly 通道与全部非模型出口脱敏不变）。
+	auto bool
 }
 
 type secretValueArgs struct {
@@ -47,12 +51,19 @@ type modelSecretValue struct {
 func (t *secretValueTool) Name() string { return "get_secret_value" }
 
 func (t *secretValueTool) Description() string {
+	approval := "每次调用都会请求用户审批"
+	if t.auto {
+		approval = "当前配置已由管理员授权按范围免逐次审批（agent.secret.read_approval=auto）"
+	}
 	return "按 key 读取一个 Kubernetes Secret 的内容，仅用于已经确认与 Secret 配置有关的故障诊断。" +
-		"必须填写具体原因，每次调用都会请求用户审批；返回值只进入当前一轮模型上下文，" +
+		"必须填写具体原因；" + approval + "。返回值只进入当前一轮模型上下文，" +
 		"不会写入会话、审计、SSE 或最终回答。禁止一次读取整个 Secret，单次最多 5 个 key。"
 }
 
 func (t *secretValueTool) SchemaMetadata() string {
+	if t.auto {
+		return "[SENSITIVE READ][RISK: HIGH][APPROVAL: CONFIG AUTHORIZED (read_approval=auto)]"
+	}
 	return "[SENSITIVE READ][RISK: HIGH][APPROVAL REQUIRED: YES]"
 }
 
@@ -73,7 +84,13 @@ func (t *secretValueTool) IsReadOnly(json.RawMessage) bool { return false }
 func (t *secretValueTool) Risk(json.RawMessage) model.RiskLevel {
 	return model.RiskHigh
 }
-func (t *secretValueTool) RequiresHumanApproval(json.RawMessage) bool { return true }
+// RequiresHumanApproval：always（默认）模式下每次读取都必须真人审批，
+// --skip-permissions / require_approval=false / 普通授权缓存都不能替代。
+// auto 模式下由 SensitiveReadAuto 给出显式的敏感读取授权决策。
+func (t *secretValueTool) RequiresHumanApproval(json.RawMessage) bool { return !t.auto }
+
+// SensitiveReadAuto 报告管理员是否已显式授权免逐次审批（read_approval=auto）。
+func (t *secretValueTool) SensitiveReadAuto(json.RawMessage) bool { return t.auto }
 
 func (t *secretValueTool) PreviewApproval(input json.RawMessage) tools.ApprovalPlan {
 	args, err := parseSecretValueArgs(input)

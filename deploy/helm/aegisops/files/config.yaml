@@ -73,3 +73,5 @@ report:
 agent:
   session_dir: /data/sessions
   audit_dir: /data/audit
+  secret:
+    read_approval: always   # always=逐次真人审批；auto=管理员显式授权（仍需 secret.read、目标绑定与出口脱敏）

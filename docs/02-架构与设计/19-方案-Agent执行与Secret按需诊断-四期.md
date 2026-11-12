@@ -35,10 +35,13 @@
 |---|---:|---:|
 | `off` | 否 | 否 |
 | `create_only` | 是 | 否 |
-| `read_on_demand` | 是 | 是，逐 key + 逐次审批 |
+| `read_on_demand` | 是 | 是，逐 key；审批由 `agent.secret.read_approval` 决定（缺省逐次审批） |
 
-`read_write` 名称过宽，配置校验继续拒绝。默认值为 `read_on_demand`，
-但工具每次调用仍必须经过审批卡。
+`read_write` 名称过宽，配置校验继续拒绝。默认值为 `read_on_demand`。
+读取审批新增 `agent.secret.read_approval`（方案 24 §4）：`always`（缺省）每次都要
+真人审批；`auto` 是管理员显式授权，在现有用户/任务/集群权限范围内免逐次弹窗，但仍
+必须完成 secret.read、目标绑定与 RBAC 校验，并保留独立的敏感读取决策与审计。
+`--skip-permissions` / `require_approval=false` 不能替代该配置。
 
 ## 4. Secret 诊断流程
 
@@ -93,8 +96,9 @@ ServiceAccount。应用层仍保证巡检只剥取元数据，内容值只能经
 部署方必须在启用 `read_on_demand` 前确认模型服务的数据处理与留存政策、环境数据
 出网要求，以及是否应改用本地模型或私有模型网关。
 
-平台通过“不落盘、不回显、当前轮有效、逐次审批”控制本地副本与界面暴露，不能承诺
-模型提供方从未看到该值。
+平台通过“不落盘、不回显、当前轮有效”控制本地副本与界面暴露，不能承诺
+模型提供方从未看到该值。`read_approval=auto` 只改变是否有逐次审批卡，不改变这条
+数据处理边界。
 
 ## 8. 验证
 

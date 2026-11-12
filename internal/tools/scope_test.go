@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,18 @@ func TestAccessScopeAllowsAuthorizedNamespace(t *testing.T) {
 	if err := scope.Check("kubectl", json.RawMessage(`{"command":"kubectl -n mysql-dev get pods"}`)); err != nil {
 		t.Fatalf("authorized kubectl with global namespace flag denied: %v", err)
 	}
+	// 可证明只读的组合在同一授权范围内自动执行（方案 24 §3.2）。
+	for _, cmd := range []string{
+		"kubectl get pods -n mysql-dev | grep mysql",
+		"kubectl get pods -n mysql-dev | grep -E 'mysql|redis' | head -n 20",
+		"kubectl get pods -n mysql-dev -o json | jq -r '.items[].metadata.name'",
+		"kubectl get pods -n mysql-dev && kubectl get deploy -n mysql-dev",
+		"kubectl rollout status deployment/api -n mysql-dev",
+	} {
+		if err := scope.Check("kubectl", json.RawMessage(`{"command":`+strconv.Quote(cmd)+`}`)); err != nil {
+			t.Fatalf("read-only combination %q denied: %v", cmd, err)
+		}
+	}
 }
 
 func TestAccessScopeDeniesClusterAndForeignResources(t *testing.T) {
@@ -30,14 +43,17 @@ func TestAccessScopeDeniesClusterAndForeignResources(t *testing.T) {
 		args string
 		want string
 	}{
-		{"nodes", "get_nodes", `{}`, "集群级资源读取"},
+		{"nodes", "get_nodes", `{}`, "集群级资源读取权限"},
 		{"foreign namespace", "get_pods", `{"namespace":"default"}`, `namespace "default"`},
 		{"all namespaces", "get_pods", `{}`, "显式 namespace"},
 		{"foreign Secret", "get_secret_value", `{"namespace":"default","name":"db","keys":["password"],"reason":"test"}`, `namespace "default"`},
 		{"full scan", "scan_cluster", `{}`, "集群体检"},
 		{"resource kind", "get_resources", `{"kind":"nodes"}`, "集群级资源读取"},
-		{"kubectl nodes", "kubectl", `{"command":"kubectl get nodes"}`, "集群级资源读取"},
-		{"kubectl shell", "kubectl", `{"command":"kubectl get pods -n mysql-dev | head"}`, "shell 构造"},
+		{"kubectl nodes", "kubectl", `{"command":"kubectl get nodes"}`, "集群级资源读取权限"},
+		{"kubectl shell", "kubectl", `{"command":"kubectl get pods -n mysql-dev | awk '{print $1}'"}`, "shell 构造"},
+		{"kubectl combo foreign namespace", "kubectl", `{"command":"kubectl get pods -n default | grep db"}`, `namespace "default"`},
+		{"kubectl combo all namespaces", "kubectl", `{"command":"kubectl get pods -A | grep db"}`, "全命名空间查询权限"},
+		{"kubectl combo cluster kind", "kubectl", `{"command":"kubectl get nodes | grep worker"}`, "集群级资源读取权限"},
 		{"manifest foreign namespace", "create_resource", `{"manifest":"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: default\n"}`, `namespace "default"`},
 	}
 	for _, tc := range cases {

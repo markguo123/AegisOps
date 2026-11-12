@@ -158,6 +158,12 @@ func applyExecutorPresentation(p *ToolPresentation, result executor.Result) {
 		p.Ok = true
 		return
 	}
+	// 过滤阶段无匹配（grep 退出码 1）不是集群故障，也不该让模型反复重试。
+	if result.NoMatch {
+		p.Status = ToolStatusOK
+		p.Ok = true
+		return
+	}
 	if result.ExitCode != 0 {
 		p.Status = ToolStatusError
 		p.Ok = false

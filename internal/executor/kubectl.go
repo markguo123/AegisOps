@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/security"
 )
 
@@ -33,18 +34,29 @@ const shellDisabledHint = "shell 通道已由平台配置关闭（platform.exec.
 	"或把 platform.exec.shell_enabled 置为 true 后重启服务。"
 
 // RunKubectl 执行 kubectl 命令：
-// deny_ops → 安全红线（secret/--raw）→ 解析（argv 或 shell）→ 动词白名单 →
-// exec.Command → 输出截断 + 脱敏。
-// isShell=true（命令含管道/heredoc/重定向等 shell 元字符）时走 bash -c；
-// 否则走 argv 直调二进制（无 shell）。
+// deny_ops → 安全红线（secret/--raw）→ 可证明只读组合走受控 argv 管道 →
+// 解析（argv 或 shell）→ 动词白名单 → exec.Command → 输出截断 + 脱敏。
+// 可证明只读的单命令/组合（含管道、&&/||、;）不走 bash，由 runReadOnlyProgram
+// 逐段直调固定二进制；因此不依赖 bash，也不受 platform.exec.shell_enabled 阻挡。
+// 其余命令仍按二期行为：isShell=true（含无法证明只读的 shell 构造）时走 bash -c，
+// 且只在人工审批通过且本实例 shell 通道开启时才会执行。
 // 流式命令（logs -f / get -w）套固定超时，超时后捕获部分输出，不视为错误。
 func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error) {
 	if approval.IsDenied(r.denyOps, command) {
 		return Result{Command: command}, fmt.Errorf("command denied by deny_ops policy")
 	}
 	// LLM 数据安全红线：Secret 数据永不进入 LLM 上下文（AGENTS.md）。
+	// 拒绝文案必须可指导：指向结构化元数据工具与按需明文通道，而不是让模型换个写法重试。
 	if approval.IsForbiddenCommand(command) {
-		return Result{Command: command}, fmt.Errorf("command forbidden: 禁止通过 Agent 读取 Secret 资源或使用 --raw（敏感数据不进入 LLM 上下文）")
+		return Result{Command: command}, fmt.Errorf("command forbidden: kubectl 不能直接读取 Secret 资源或使用 --raw。" +
+			"Secret 元数据（名称/类型/键名）请用 get_secret_info（普通读取权限）；" +
+			"确需查看明文时用 get_secret_value（按 key、审批或配置授权、仅当前轮模型可见）。" +
+			"敏感数据不进入 LLM 上下文")
+	}
+	// 可证明只读的受控路径（方案 24 §3.2）：执行前重新分析实际命令，
+	// 批准后命令不可替换，且整条组合共用任务超时与输出上限。
+	if a := cmdplan.Analyze(command); a.ProvablyReadOnly && len(a.Program.Commands) > 0 {
+		return r.runReadOnlyProgram(ctx, command, a.Program)
 	}
 	pc, err := ParseCommandDetail(command)
 	if err != nil {

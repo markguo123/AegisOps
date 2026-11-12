@@ -9,6 +9,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/manifestx"
 )
@@ -54,6 +55,7 @@ var (
 		"get_pvc":            true,
 		"get_configmap":      true,
 		"get_configmaps":     true,
+		"get_secret_info":    true,
 		"get_logs":           true,
 		"get_previous_logs":  true,
 		"get_secret_value":   true,
@@ -227,6 +229,20 @@ func (s AccessScope) checkKubectl(command string) error {
 	if command == "" {
 		return s.deny("可校验资源作用域的 kubectl 命令")
 	}
+	if s.Policy != nil {
+		return s.commandPolicy(command)
+	}
+	analysis := approval.AnalyzeCommand(command)
+	if analysis.Plan.ProvablyReadOnly {
+		// 可证明只读的组合：逐条 kubectl 调用校验 namespace 与集群级资源约束，
+		// 不因管道符号整体拒绝（方案 24 §3.2）。
+		for _, call := range analysis.Plan.Calls {
+			if err := s.checkReadCall(call); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if approval.HasShellSyntax(command) {
 		return s.deny("不含 shell 构造且可校验范围的 kubectl 命令")
 	}
@@ -278,6 +294,23 @@ func (s AccessScope) checkKubectl(command string) error {
 		return s.deny("显式 namespace 查询范围；当前不允许跨 namespace 查询")
 	}
 	return s.checkNamespace(ns)
+}
+
+// checkReadCall 是旧范围路径（AccessScope.Policy 未装配时）对可证明只读组合的
+// 逐调用校验：仍只允许显式 namespace、禁止集群级资源与跨 namespace 查询。
+// 这里不改变既有授权边界，只是把"含管道就整体拒绝"换成"每条查询分别检查"。
+func (s AccessScope) checkReadCall(call cmdplan.Call) error {
+	kind := strings.ToLower(call.Kind)
+	if clusterKinds[kind] {
+		return s.deny("集群级资源读取权限")
+	}
+	if call.AllNamespaces {
+		return s.deny("全命名空间查询权限")
+	}
+	if call.Namespace == "" {
+		return s.deny("显式 namespace 查询范围；当前不允许跨 namespace 查询")
+	}
+	return s.checkNamespace(call.Namespace)
 }
 
 // checkKubectlWrite 对非 shell 写命令做平台侧范围门禁。

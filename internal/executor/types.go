@@ -21,7 +21,10 @@ type Result struct {
 	ExitCode      int            `json:"exitCode"`
 	Truncated     bool           `json:"truncated,omitempty"`
 	StreamTimeout bool           `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
-	Verification  map[string]any `json:"verification,omitempty"`  // 写操作执行后的状态核对
+	// NoMatch 表示只读组合里的过滤阶段没有匹配（如 grep 退出码 1 且无输出）：
+	// 这是"没有匹配结果"，不是集群故障，不能被当成查询失败。
+	NoMatch      bool           `json:"noMatch,omitempty"`
+	Verification map[string]any `json:"verification,omitempty"` // 写操作执行后的状态核对
 }
 
 // Options 是执行器装配参数。

@@ -1,9 +1,17 @@
 # Agent 总体架构（二期/三期已落地）
 
+> **2026-11-12 修订（方案 24《只读命令组合与 Secret 诊断权限优化》）**：本文多处
+> "shell 构造永不自动执行"的表述已修订为——命令权限按完整命令的语义判断
+> （`internal/cmdplan`）：可证明只读的单命令/组合（`|`、`&&`/`||`、`;`，每段为 kubectl
+> 只读查询或参数受控的 grep/head/tail/sort/uniq/wc/cut/tr/jq）自动执行，并由
+> `internal/executor` 以受控 argv 管道运行、不经 bash；未证明只读的 shell 构造仍必须
+> 人工审批且不被 `--skip-permissions` 免除。Secret 新增 `agent.secret.read_approval`
+> （`always` 缺省 / `auto` 管理员显式授权）与元数据工具 `get_secret_info`。
+
 > **2026-11-10 架构与计划更新**：只优化现有 Go Runtime，借鉴 HolmesGPT；Tools/Skill 扩展，专家与独立 Runtime 延后。部署按 [方案 21](21-方案-Agent服务拆分与多Agent部署收敛-四期.md)，多集群按 [方案 22](22-方案-多集群集中管理与执行闭环-四期.md)；写仍仅在 Executor，既有业务边界保持。
 
-- 版本：v3.2.0
-- 日期：2026-11-06（补非交互 exec、Secret 按需诊断与精确脱敏）
+- 版本：v3.3.0
+- 日期：2026-11-06（补非交互 exec、Secret 按需诊断与精确脱敏）/ 2026-11-12（只读命令组合与 Secret 读取审批）
 - 状态：二期 Agent / 三期创建闭环已封版；四期 P9 诊断接入口径已同步
 
 > 范围说明：本文档定义 Agent 的稳定职责边界——Agent、Tools、Scanner/Rule、
