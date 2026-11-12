@@ -1,299 +1,47 @@
-# 当前安装入口（P11）
+# 部署入口
 
-快速体验：`bash deploy/install.sh`，零参数走内置默认，无需新配置文件。
-生产脚本：编辑现有 `install.env`（PROFILE=production）后 `bash deploy/install.sh --env-file install.env`。
-原生 Helm：[独立安装说明](helm/aegisops/README.md)。脚本和 Helm 不互相依赖。
+完整操作指南：[部署与安装](../docs/03-运维与部署/01-部署与安装.md)。先读场景选择，再按首次安装、升级、回滚和恢复章节操作。
 
-快速体验默认 SQLite+db、minimal、自动 NodePort，显式启用 HTTP 登录；有默认 StorageClass 用 PVC，无默认类用临时卷并提示 Pod 重建丢数据。重复安装沿用存储选择；已有临时卷实例需先备份并确认处置，不自动重建。模型、集群、OIDC 都在页面后配。生产推荐外部 MySQL（DSN 含 parseTime=true）、固定镜像版本、PVC 和 HTTPS。
+**生产推荐 MySQL + S3 兼容对象存储。** 用户或基础设施团队先准备这两项服务，再将连接和应用访问凭据通过 Secret 提供给 AegisOps。项目只交付和维护应用 Chart，不自研、安装或维护 MySQL/MinIO Chart。
 
-镜像由版本流水线构建，安装默认不构建推送。远程入口自动下载匹配版本的校验安装包，不要求 Git/Go/Node/Docker/Helm。发布资产由 `bash deploy/package.sh` 生成，`.github/workflows/deployment-release.yaml` 配对发布两镜像/Chart/安装包；GHCR 镜像公开可见需发布方配置，本轮未执行发布或真实集群安装。
-
-以下保留旧路径和运维细节供迁移对照；其“默认构建/MySQL/自动读取 install.env”等旧默认以以上入口、脚本帮助和变量模板为准。`upgrade.sh` 仍保留原 Git 构建发布流程供既有环境兼容；生产发布包升级推荐直接用新版本 install.sh 和同一变量文件。安装方式切换不自动接管资源。
-
----
-
-# AegisOps 部署清单（四期 P6.2 / P6.5）
-
-> **2026-11-10 架构与计划更新**：目标已收口为默认 Web+Backend、可选内嵌 SPA，Agent 留在后端，单 Chart 与 HTTPS；多集群完成后由 P11 迁移。见 [方案 21](../docs/02-架构与设计/21-方案-Agent服务拆分与多Agent部署收敛-四期.md)。下文仍是当前可执行安装方式，不提前使用目标 Chart 或 role 参数。
-
-## 身份权限重构验收入口
-
-当前登录网关使用 Secure Cookie。集群验收须提供浏览器可访问的 HTTPS 同源地址；仅有 HTTP NodePort 时无法完成登录/OIDC 验证。`deploy/install.sh` 现接受 `PUBLIC_URL=https://<域名>` 并写入 ConfigMap 的 `platform.server.public_url`；OIDC 回调固定为 `<PUBLIC_URL>/api/v1/auth/oidc/callback`。Ingress 清单仍需按现场证书 Secret 增加 `spec.tls`，并确保浏览器访问的域名和 `PUBLIC_URL` 一致。不要在服务端配置 `allow_loopback_http: true` 来放开集群 HTTP。
-
-在已有 `k8s-ai-test` 环境验收时，设置 `NAMESPACE=k8s-ai-test`、`INGRESS_HOST`、`PUBLIC_URL`、镜像和数据库参数，先执行 `deploy/install.sh --env-file install.env --dry-run` 检查渲染的 namespace、`public_url`、镜像和 Secret 引用，再 `--diff`。确认 MySQL 备份与旧 operator/legacy Grant 预检结果后正式安装。迁移 Job 必须成功，再检查 Deployment `/readyz`。旧库迁移若被旧授权数据阻断，先按设计方案显式处置这些授权，不要强行跳过。
-
-登录后在“用户与权限”配置企业 OIDC，IdP 登记上述精确回调；在平台先登记真实集群凭据并授予测试用户所需集群/namespace Grant，再依次验证首次登录无授权、只读体检、跨 namespace 拒绝、写操作审批、撤权后会话/报告不可读和审计。企业 IdP 用自建或自签 CA 时，还要给安装参数 `OIDC_CA_FILE` 提供它的根 CA，否则服务端到 IdP 的 OIDC discovery 会因镜像系统信任链不认而失败（追加信任的口径与处置步骤见部署手册 §4.18，平台不提供跳过证书校验）。Kubernetes ServiceAccount 的实际 RBAC 仍是最终执行边界。
-
-本机也能用真实 kubeconfig 验证多数链路：以 SQLite 启动最新代码，设置 `platform.server.allow_loopback_http: true`、`public_url: ""`，仅在 `http://127.0.0.1:8080` 打开页面。此模式可测本地账号、Grant、真实集群读写/审批和报告；企业 OIDC 回调需要固定 HTTPS 地址，不能用这个 HTTP 调试入口验证。
-
-同一套后端清单支持两种部署形态，差别只在「前端由谁提供」。两种形态的 YAML **分目录存放**，
-`base/` 是两者共用的部分，`allinone/` 与 `separated/` 互斥、**只能选一个目录 apply**。
-
-| 形态 | 前端由谁托管 | 需要构建的镜像 | 清单目录 | 入口 |
-| --- | --- | --- | --- | --- |
-| A 前后端一体化（默认） | 后端进程 `go:embed` 内嵌 SPA | `aegisops` | `base/` + `allinone/` | 默认 NodePort；启用 Ingress 时为 `allinone/ingress.yaml` 单 path `/` |
-| B 前后端分离 | 独立 Nginx 镜像 | `aegisops` + `aegisops-web` | `base/` + `separated/` | 默认 NodePort（前端 Service）；启用 Ingress 时为 `separated/ingress.yaml` 按路径分流 |
-
-**对外入口默认 NodePort**：现场常常没有可用域名，Ingress 用自定义域名要逐台改客户端 hosts，所以
-`install.sh` 默认 `EXPOSE=nodeport`（`NODE_PORT` 留空由集群分配并在末行回显各节点 URL），给了
-`INGRESS_HOST` 才启用 Ingress，两者可并存。正式清单的 Service 固定 `ClusterIP`，暴露层由脚本渲染，
-**切换暴露方式不需要改任何代码**（token 走 `Authorization` 头、SPA 用同源相对路径）。
-
-> **一键安装参数表的唯一权威源是 [部署手册 §4.10](../docs/03-运维与部署/01-部署与安装.md)**；
-> 本文件只讲清单结构、占位值与排障，不复制参数表，避免两处漂移。
-
-形态 B 的后端仍是同一个镜像，只多一条 `AEGISOPS_PLATFORM_SERVER_STATIC_ENABLED=false`
-关掉内嵌静态托管。两份 `deployment.yaml` 除这条 env 之外必须逐字段一致，由
-`tests/arch/deploy_manifest_test.go` 挡住漂移。
-
-## 目录布局
-
-```
-deploy/
-  base/          两种形态共用的前置清单
-  allinone/      形态 A：内嵌 SPA（后端 Deployment + Ingress）
-  separated/     形态 B：前后端分离（后端 Deployment + 前端 Deployment/Service + 分流 Ingress + 前端镜像构建文件）
-  scan/          可选：一期每日巡检 CronJob（独立 ConfigMap）
-  example/       参考与补丁示例，不是清单，不能 apply
-  rbac-write.example.yaml  可选：开放写权限的 ClusterRole（跨形态）
-  install.sh     一键安装/重装的九阶段调谐器（唯一的发布执行者）
-  install.env.example      全部安装参数的全注释模板（纯占位值）
-  upgrade.sh     发布/升级驱动器：取码 + TAG 绑定 commit + 发布后验收 + 记账 + 一键回滚（发布仍委托 install.sh）
-```
-
-| 文件 | 产物 | 必需性 |
-| --- | --- | --- |
-| `base/namespace.yaml` | Namespace `aegisops`（PSS warn/audit: restricted） | 必需 |
-| `base/serviceaccount.yaml` | SA `aegisops` | 必需 |
-| `base/clusterrole.yaml` | ClusterRole `aegisops-readonly`（只读动词面） | 必需 |
-| `base/clusterrolebinding.yaml` | 把只读角色绑到本命名空间的 SA | 必需 |
-| `base/configmap.yaml` | `aegisops-config`：`platform:` 静态段 + 落盘目录 | 必需 |
-| `base/secret.example.yaml` | `aegisops-store` / `aegisops-enc` / `aegisops-admin` / `aegisops-llm` | 必需（复制后填值，勿直接 apply） |
-| `base/db-migrate-job.yaml` | Job `aegisops-db-migrate`（`aopsctl db migrate`） | 必需（首次与每次升级） |
-| `base/service.yaml` | Service `aegisops-server`:8080 | 必需（两形态共用） |
-| `base/pvc.yaml` | PVC `aegisops-data`（默认 5Gi RWO，承载报告与导出） | 默认创建（`STORAGE_CLASS` 留空走集群默认存储类；SQLite 兜底时必须） |
-| `allinone/deployment.yaml` | Deployment `aegisops-server`（内嵌 SPA） | 形态 A |
-| `allinone/ingress.yaml` | Ingress `aegisops`（单入口，含 SSE 关缓冲） | 形态 A |
-| `separated/deployment.yaml` | Deployment `aegisops-server`（纯 API） | 形态 B |
-| `separated/web-deployment.yaml` | Deployment `aegisops-web`（Nginx + dist） | 形态 B |
-| `separated/web-service.yaml` | Service `aegisops-web`:80 | 形态 B |
-| `separated/ingress.yaml` | Ingress `aegisops-api` + `aegisops-web`（同域分流） | 形态 B |
-| `separated/web.Dockerfile` / `separated/nginx.conf` | 前端镜像构建（与仓库根 `Dockerfile` 互不依赖） | 形态 B |
-| `scan/configmap.yaml` + `scan/cronjob.yaml` | 一期每日巡检通道（`aegisops-scan-config`） | 可选 |
-| `example/secret-mysql.example.yaml` | MySQL DSN 示例 + DBA 前置 SQL | 参考 |
-| `example/env-overrides.example.yaml` | 部署期种子态/密钥态环境变量示例 | 参考（patch） |
-| `example/deployment-reports-pvc.yaml` | `/reports` 换 PVC 的 patch | 可选（patch） |
-| `example/networkpolicy.yaml` | 容器出站白名单样例（占位地址，换成现场地址再 apply） | 可选 |
-
-> 不要整目录递归 apply：`deploy/example/` 下是 `kubectl patch --patch-file` 用的补丁，
-> 刻意不写 `apiVersion`/`kind`，`kubectl apply -R -f deploy/` 会在它这里报错；
-> `allinone/` 与 `separated/` 的同名 Deployment 也只能二选一。按下面顺序逐文件 apply。
-
-## 前置
-
-> 走 `deploy/install.sh` 一键安装时本节全部由脚本代劳；这里保留手工 apply 的完整口径，两套语义等价。
-
-1. 构建并推送镜像（构建与推仓由部署方执行，清单里不写私有仓库地址）。后端有两档镜像，
-   构建阶段完全相同，只差运行阶段（P6.3 / D-33）：默认档内置 bash/jq/kubectl，容器内排障
-   能力与本地 CLI 对齐；无 shell 变体给安全基线禁止容器内解释器的现场，配 `ConfigMap` 里
-   `platform.exec.shell_enabled: false`。
-
-   ```bash
-   # 后端默认档（形态 A 已内嵌前端产物；形态 B 复用同一镜像）
-   docker build --build-arg VERSION=4.0.0 --build-arg COMMIT=<sha> -t <registry>/aegisops:4.0.0 .
-   # 后端无 shell 变体（配 platform.exec.shell_enabled=false 使用）
-   docker build -f Dockerfile.distroless --build-arg VERSION=4.0.0 --build-arg COMMIT=<sha> \
-     -t <registry>/aegisops:4.0.0-noshell .
-   # 仅形态 B 追加前端镜像
-   docker build -f deploy/separated/web.Dockerfile --build-arg VERSION=4.0.0 -t <registry>/aegisops-web:4.0.0 .
-   ```
-
-   默认档的 `kubectl` 有两条投递路径，**离线投递优先**（细节见 `deploy/kubectl/README.md`）：
-
-   1. **离线投递（气隙/内网交付主路径，构建全程零外网）**：把 `kubectl` 放进 `deploy/kubectl/`
-      （同名再放一份内容为裸 hash 的 `kubectl.sha256` 就会一并校验），不需要任何 build-arg。
-   2. **mirror 下载**：`deploy/kubectl/` 为空时按 `KUBECTL_VERSION`/`KUBECTL_DOWNLOAD_BASE`
-      下载并 `sha256sum -c` 校验。base 的目录结构须与 `dl.k8s.io/release` 一致，国内无出口到
-      `dl.k8s.io` 时可用 `https://files.m.daocloud.io/dl.k8s.io/release`。
-
-   `KUBECTL_VERSION` 按现场集群次版本调（官方支持 ±1 次版本偏差）；置空且不投递则不内置 kubectl，
-   只读链路不受影响。Go 依赖代理同理：`--build-arg GOPROXY=https://goproxy.cn,direct`。
-   无 shell 变体的基座在 `gcr.io`，内网需先同步到内网 registry 再构建。
-
-   构建后自查（P6.3 §8.3）：
-
-   ```bash
-   docker run --rm --entrypoint /bin/bash <registry>/aegisops:4.0.0 -lc \
-     'id -u; command -v bash jq kubectl; kubectl version --client'   # 期望 65532 + 三个路径
-   ```
-
-2. 数据库由 DBA 预建（产品不执行 `CREATE DATABASE`）：库名建议 `aegisops`、字符集 `utf8mb4`，
-   账号需要 `SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/INDEX/REFERENCES`。DSN 必须带 `parseTime=true`。
-3. 生成凭据加密密钥（64 位 hex）：`openssl rand -hex 32`。轮换会使已加密的库内存量凭据不可解，
-   参见 `base/secret.example.yaml` 的轮换须知。
-
-## 一键安装（推荐）
-
-手工 apply 与脚本等价，日常交付优先用 `deploy/install.sh`：它把镜像构建推送、Secret 幂等、PVC、迁移 Job、
-暴露层和验收摘要串成九阶段，失败会停在当阶段并给出根因与下一条可复制命令，全程 tee 到 `install-<ts>.log`。
-
-```bash
-cp deploy/install.env.example install.env    # 全参数全注释模板，值全是占位符
-chmod 600 install.env                        # 里面有 DSN，按密钥管理
-
-deploy/install.sh --env-file install.env --dry-run   # 只渲染清单 + 占位符残留断言，不碰集群
-deploy/install.sh --env-file install.env --diff      # 走 kubectl diff 先看差异
-deploy/install.sh --env-file install.env             # 真装：构建 → 推送 → 九阶段发布
-deploy/install.sh --env-file install.env             # 重跑验幂等：不重置密钥、不覆盖已有口令
-```
-
-- 参数优先级 `CLI flag > 环境变量 > install.env > 内置默认`；CLI 写法必须带等号（`--IMAGE=<addr>`）。
-- `AEGISOPS_ENC_KEY` 复用优先、缺失才生成并在 `ENC_KEY_BACKUP_DIR` 留 600 备份；轮换只走 `--rotate`，
-  且**当前版本不做自动重加密**，轮换后必须在配置中心重录模型 api_key、MCP env 与集群凭据。
-- `ENABLE_MINIO=true` 当前被明确拒绝：自带 MinIO 清单随开发计划 P8.8 交付，先用现场已有 S3 兼容桶
-  （`BLOBS_BACKEND=s3` 指向它）。
-- `BUILD=true` 但探测不到容器运行时时自动降级为只发布；离线场景用 `--load-tar=<tar>` 导入。
-- 参数口径的权威源是 `docs/03-运维与部署/01-部署与安装.md` §4.10，本文件只引用不复制。
-
-## 升级与回滚（推荐）
-
-升级没有第二套流程：**换镜像 TAG 重跑一遍 `install.sh`**。`deploy/upgrade.sh` 只是它外面的一层驱动器，
-补上四件 `install.sh` 刻意不管的事——取码、TAG 与 commit 绑定、发布后验收、发布记录与回滚。
-参数文件与发布记录放在源码目录之外（默认 `~/.aegisops/deploy`），所以一台测试机只需常驻一份代码目录：
-
-```bash
-mkdir -p ~/.aegisops/deploy && cp deploy/install.env.example ~/.aegisops/deploy/install.env
-chmod 600 ~/.aegisops/deploy/install.env
-
-deploy/upgrade.sh --dry-run                # 先看将要用的 TAG 与渲染产物
-deploy/upgrade.sh --ref=DEV-v4.0.0         # 拉代码 → 构建推送 → 发布 → 验收 → 记账
-deploy/upgrade.sh --status                 # 现在跑的是哪个 TAG / commit
-deploy/upgrade.sh --rollback               # 回到上一个已验收版本（隐含 --no-build）
-```
-
-镜像 TAG 默认由 git 派生（`<install.env 的 TAG>-<短 sha>`，脏树再加 `-dirty`），同一个 TAG 不会对应两个 commit；
-正式发版用 `--follow-env-tag` 沿用固定发布号。回滚靠重发上一个已验收 TAG，不用 `rollout undo`。
-完整口径见 `docs/03-运维与部署/01-部署与安装.md` §4.11。
-
-## 形态 A：前后端一体化
-
-```bash
-kubectl apply -f deploy/base/namespace.yaml
-kubectl apply -f deploy/base/serviceaccount.yaml
-kubectl apply -f deploy/base/clusterrole.yaml
-kubectl apply -f deploy/base/clusterrolebinding.yaml
-# 复制 base/secret.example.yaml，填好四个 Secret 的占位值后 apply（store 与 enc 必填）
-kubectl apply -f <你的>/secrets.yaml
-kubectl apply -f deploy/base/configmap.yaml
-
-# 结构升级：Job spec 不可变，重跑前先删旧 Job
-kubectl -n aegisops delete job aegisops-db-migrate --ignore-not-found
-kubectl -n aegisops apply -f deploy/base/db-migrate-job.yaml
-kubectl -n aegisops wait --for=condition=complete job/aegisops-db-migrate --timeout=300s
-
-kubectl -n aegisops apply -f deploy/allinone/deployment.yaml
-kubectl -n aegisops apply -f deploy/base/service.yaml
-kubectl -n aegisops rollout status deploy/aegisops-server --timeout=180s
-
-# 替换 host 与 ingressClassName 后
-kubectl apply -f deploy/allinone/ingress.yaml
-```
-
-首启用 `platform.auth.admin_username` + `AEGISOPS_ADMIN_PASSWORD` 登录，初始化完成后可以把
-`aegisops-admin` Secret 与对应环境变量摘掉。
-
-## 形态 B：前后端分离
-
-`base/` 前置与迁移 Job 完全同形态 A，只是工作负载换成 `separated/`：
-
-```bash
-# （前置同形态 A：namespace / rbac / secrets / configmap / 迁移 Job 已 Succeeded）
-kubectl -n aegisops apply -f deploy/separated/deployment.yaml   # 后端纯 API（已关内嵌 SPA）
-kubectl -n aegisops apply -f deploy/base/service.yaml
-kubectl -n aegisops apply -f deploy/separated/web-deployment.yaml
-kubectl -n aegisops apply -f deploy/separated/web-service.yaml
-kubectl -n aegisops rollout status deploy/aegisops-server --timeout=180s
-kubectl -n aegisops rollout status deploy/aegisops-web  --timeout=180s
-
-# 替换 host 与 ingressClassName 后（替代 allinone/ingress.yaml，不要两个都留）
-kubectl apply -f deploy/separated/ingress.yaml
-```
-
-前端只用相对路径 `/api/v1`，所以形态 B 必须同域按路径分流（`separated/nginx.conf` 里另留了一段
-API 反代兜底，仅在不走 Ingress、直接暴露 Nginx 时才用得上）。
-
-从形态 A 切到形态 B：`kubectl -n aegisops apply -f deploy/separated/deployment.yaml` 就地改同名
-Deployment 即可，不需要先删；反向切换同理。
-
-## 可选件
-
-- 数据与报告持久化（**双独立 PVC，随 `PERSIST_REPORTS` 总开关同生同灭**）：`deploy/base/pvc.yaml` 同时创建
-  `aegisops-data`（/data：会话/审计 + SQLite 兜底 + `blobs=dir` 时的对象副本）与 `aegisops-reports`
-  （/reports：报告留档）两块独立 RWO PVC；`storageClassName` 留注释=集群默认存储类，要指定就改成现场存储类名。
-  `install.sh` 的 `PERSIST_REPORTS=true` 为默认（`--PERSIST_REPORTS=false` 关闭）并同时控制两块——关闭时两卷
-  一起退化为 emptyDir（离线预演/quickstart 场景，Pod 重建即清）；data/reports 容量分别由
-  `DATA_STORAGE_SIZE`（留空跟随 `REPORT_STORAGE_SIZE`）/`REPORT_STORAGE_SIZE` 控制，PV 容量不可变，改参需重建 PVC。
-  `deploy/example/deployment-reports-pvc.yaml` 保留为手工迁移参考补丁（清单已是双 PVC 后一般不再需要）。
-- 部署期种子配置（模型地址/模型名/默认命名空间）：`deploy/example/env-overrides.example.yaml`。
-  密钥态变量（DSN、`AEGISOPS_LLM_API_KEY`）恒优先，种子态只在配置库该键为空时生效一次。
-- 开放写操作：`kubectl apply -f deploy/rbac-write.example.yaml`，并在配置中心按命名空间授权；
-  镜像内置 kubectl，执行仍只经 `internal/executor`，非交互 `pods/exec` 每次真人审批。
-- Secret 按需诊断：配置中心设置 `agent.secret.access=read_on_demand`；只允许
-  `get_secret_value` 逐 key 审批读取，明文仅当前轮模型可见，审计/会话/SSE/最终回答脱敏。
-- 每日巡检：`kubectl apply -f deploy/scan/configmap.yaml -f deploy/scan/cronjob.yaml`（先把
-  `scan/configmap.yaml` 里的 `REPLACE_WITH_LLM_HOST` / `REPLACE_WITH_MODEL_NAME` 换成现场值，
-  或改 `llm.enabled: false`）。
-
-## 换命名空间
-
-清单里 namespaced 对象都显式写了 `metadata.namespace: aegisops`，`kubectl -n` 不会覆盖它。
-换命名空间要把 `namespace: aegisops` 整串替换（`ClusterRoleBinding` 的 `subjects[].namespace`
-同形式，一起改）：
-
-```bash
-# Linux / macOS
-find deploy -name '*.yaml' -exec sed -i 's/^namespace: aegisops$/namespace: my-ns/' {} +
-```
-
-```powershell
-# Windows PowerShell
-Get-ChildItem deploy -Recurse -Filter *.yaml | ForEach-Object {
-  $p = $_.FullName
-  [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace '(?m)^namespace: aegisops$', 'namespace: my-ns'))
-}
-```
-
-## apply 前必须替换的占位值
-
-| 位置 | 占位值 |
+| 路径 | 用途 |
 | --- | --- |
-| `base/secret.example.yaml`、`example/secret-mysql.example.yaml` | `REPLACE_ME` |
-| `allinone/ingress.yaml`、`separated/ingress.yaml` | `aegisops.example.com`、`ingressClassName: nginx` |
-| `base/pvc.yaml` | `# storageClassName` 默认注释掉=用集群默认存储类；取消注释必须填真实存储类名（填 `REPLACE_` 占位会让 PVC 一直 Pending） |
-| `scan/configmap.yaml` | `REPLACE_WITH_LLM_HOST`、`REPLACE_WITH_MODEL_NAME` |
-| 两份 `deployment.yaml`、`base/db-migrate-job.yaml`、`separated/web-deployment.yaml` | `image:` 换成现场仓库地址与 TAG |
+| `helm/aegisops/` | 应用模板唯一来源，Backend/Web、配置、RBAC、PVC、迁移任务 |
+| `helm/aegisops/values-quickstart.yaml` | SQLite + 本地文件的体验预设，HTTP NodePort |
+| `helm/aegisops/values-production.yaml` | 外部 MySQL + S3 的生产预设，需配置实际镜像与服务 |
+| `install.sh` | 当前源码本地构建、镜像分发、参数与环境检查、调用应用 Helm，不安装中间件 |
+| `upgrade.sh` | 升级便利入口，状态、历史和回滚使用原生 Helm |
+| `package.sh` | 生成离线审查/交付用的应用 Chart 与脚本包，不是快速体验入口 |
+| `scan/` | 可选独立定时巡检通道，不是平台安装入口 |
+| `example/` | 独立配置示意；不能递归 apply 整个 deploy 目录 |
 
-## 部署后自检
+快速体验只需 Kubernetes 集群、已配置的 kubectl 和 Docker/Podman。在 Linux 检出的项目目录执行：
 
 ```bash
-kubectl -n aegisops get deploy,svc,ingress,job
-kubectl -n aegisops logs deploy/aegisops-server | head -50
-kubectl -n aegisops exec deploy/aegisops-server -- aopsctl version   # 默认档内置 bash/jq/kubectl（P6.3）
-kubectl -n aegisops exec deploy/aegisops-server -- kubectl version --client   # 镜像内 kubectl 就位
-curl -s https://<host>/version
+bash deploy/install.sh
 ```
 
-Chat 页发一条消息，确认回答是逐 token 出现而不是一次性吐出（一次性吐出说明中间层还在缓冲）。
+不用先安装 Helm、填写 TAG、准备 values 或 chmod。安装器在缺少 Helm 时自动下载并校验固定客户端，使用**当前检出源码**构建镜像；kind/k3d 集群自动载入镜像，普通远程/多节点集群须推送到节点可达仓库（`--IMAGE=<仓库>/aegisops --PUSH=true`）。默认 SQLite + 本地文件、minimal HTTP NodePort；有默认 StorageClass 就持久化，没有则警告并使用临时存储。临时数据会在 Pod 重建时丢失。
 
-## 常见故障
+脚本不解析 GitHub Release，也不下载其它版本的安装包或镜像。源码内容有未提交改动时需显式 `--allow-dirty`；未指定 TAG 时由脚本按当前提交生成构建标签。
 
-| 现象 | 原因与处理 |
-| --- | --- |
-| `/readyz` 503、Pod 一直 not ready | 迁移未到位或 Store 不通：先跑迁移 Job，再核对 `aegisops-store` 的 DSN（`parseTime=true`、库已建、网络可达） |
-| 启动即退出并提示 DSN | 没建 `aegisops-store` Secret，或 `driver: mysql` 却没注入 DSN |
-| 集群端点列表 501 / 敏感配置保存失败 | `AEGISOPS_ENC_KEY` 未注入或长度不对（需 32 字节：64 位 hex 或 base64） |
-| 页面 404 但 API 正常 | 形态 A 用了未内嵌 dist 的镜像；或形态 B 忘了用 `separated/deployment.yaml` / 没部署 web |
-| 形态 B 页面能开但接口 404 | `separated/ingress.yaml` 只 apply 了 web 那半，或 `/api/v1` 分流规则被覆盖 |
-| SSE 攒到最后一次性输出 | Ingress 缓冲没关：核对 `proxy-buffering: "off"` 与读超时 |
-| PVC 一直 Pending | `storageClassName` 还是占位值，或存储类不支持 RWO 供给 |
-| 事件里有 restricted warning | 预期内的 warn（未 enforce）；确认无告警后可自行把 `pod-security.kubernetes.io/enforce` 升上来 |
+生产安装：先按完整指南创建外部服务 Secret，填写生产 values。生产镜像由同一脚本从当前源码构建并推送到你的仓库（推荐），或由你的 CI 构建后用 `--no-build` 复用：
+
+```bash
+bash deploy/install.sh --profile=production \
+  --values="$HOME/.aegisops/deploy/production.yaml" \
+  --IMAGE="<仓库地址>/aegisops" --TAG="<版本>" --PUSH=true --yes
+
+bash deploy/install.sh --profile=production \
+  --values="$HOME/.aegisops/deploy/production.yaml" --no-build --yes
+```
+
+预演使用 `--dry-run --render-dir=<受限目录>`。产物可能含生成的 Secret，不能公开、提交 Git 或直接当成另一套安装入口。正式安装仍由 Helm 管理。
+
+Backend 当前为单副本，不代表高可用。快速体验默认本地构建；生产默认复用已有镜像，需要源码构建时显式 `--BUILD=true --PUSH=true`。用户指定的 TAG 原样使用；未指定时快速体验按当前提交生成标签。脚本可用 Bash 调用，无需先 chmod。
+
+没有现成依赖时，参考[MySQL Operator 官方安装文档](https://dev.mysql.com/doc/mysql-operator/en/mysql-operator-installation.html)及所选 S3 服务供应商文档。MinIO 社区仓库已归档，不承诺旧社区 Chart 或镜像的生产维护；当前供应商产品信息见完整指南第 5 节。
+
+附件和文件产物走对象存储；启用 S3 不等于整份会话正文已经外置。`blobs=db` 保留兼容和轻量体验用途，不作为生产默认推荐。
+
+旧脚本实例禁止自动 Helm 接管；已有 `db/dir` 对象数据禁止仅修改 driver 就切到 S3。迁移、备份、恢复与版本兼容要求见完整指南第 8、9 节。

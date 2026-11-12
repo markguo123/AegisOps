@@ -34,7 +34,11 @@ spec:
       securityContext: {runAsNonRoot: true, runAsUser: 101, runAsGroup: 101, fsGroup: 101, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: web
-          image: {{ .Values.web.repository }}:{{ default .Values.image.tag .Values.web.tag | required "web.tag or image.tag is required in standard mode" }}
+          {{- if .Values.web.digest }}
+          image: {{ .Values.web.repository }}@{{ .Values.web.digest }}
+          {{- else }}
+          image: {{ .Values.web.repository }}:{{ default .Values.image.tag .Values.web.tag | required "web.tag, web.digest or image.tag is required in standard mode" }}
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports: [{name: http, containerPort: 8080}]
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

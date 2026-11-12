@@ -1,0 +1,10 @@
+# Experience only. Default production values remain MySQL + S3.
+mode: minimal
+database:
+  driver: sqlite
+blobs:
+  driver: dir
+server:
+  allowQuickstartHTTP: true
+service:
+  type: NodePort

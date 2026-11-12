@@ -6,8 +6,8 @@
 #   2) aegisops-reports  —— /reports 报告留档目录（latest.md / latest.json / 日报）。
 #                            由 PERSIST_REPORTS 决定是否挂载。
 #
-# 两个 Claim 区分挂载，避免单 RWO PVC 被同一 Pod 的多个卷项同时引用导致 kubelet
-# 第二次 NodePublish 挂起（Pod 卡 ContainerCreating）。
+# 两个 Claim 分开管理数据与报告的容量和生命周期。
+# RWO 限制单节点读写；挂载超时需结合现场 Events 与存储驱动日志定位。
 # 容量与访问模式按现场存储能力调整（install.sh 用 REPORT_STORAGE_SIZE 渲染 reports 容量，
 # DATA_STORAGE_SIZE 渲染 data 容量，默认各自 5Gi）；单副本 RWO 足够，扩副本前改 RWX。
 apiVersion: v1

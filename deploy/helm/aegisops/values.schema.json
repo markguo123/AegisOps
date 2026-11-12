@@ -73,6 +73,22 @@
           "type": "boolean"
         }
       }
+    },
+    "migration": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "auto",
+            "external"
+          ]
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
     }
   }
 }

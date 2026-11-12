@@ -27,9 +27,14 @@ spec:
         - name: migrate
           image: {{ include "aegisops.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if and (eq .Values.database.driver "sqlite") (eq .Values.migration.mode "auto") }}
           args: [db, migrate, --config, /etc/aegisops/config.yaml]
-          {{- if eq .Values.database.driver "mysql" }}
+          {{- else }}
+          args: [db, check, --wait, "{{ .Values.migration.timeoutSeconds }}s", --config, /etc/aegisops/config.yaml]
+          {{- end }}
           env:
+            - {name: AEGISOPS_PLATFORM_BLOBS_DRIVER, value: "off"}
+          {{- if eq .Values.database.driver "mysql" }}
             - name: AEGISOPS_PLATFORM_STORE_DSN
               valueFrom:
                 secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: dsn}
@@ -45,7 +50,7 @@ spec:
         - name: aegisops
           image: {{ include "aegisops.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: [server, --config, /etc/aegisops/config.yaml, --addr, ":8080"]
+          args: [server, --skip-migrations, --config, /etc/aegisops/config.yaml, --addr, ":8080"]
           ports: [{name: http, containerPort: 8080}]
           env:
             - name: AEGISOPS_ENC_KEY
@@ -78,6 +83,9 @@ spec:
             - {name: reports, mountPath: /reports}
             - {name: tmp, mountPath: /tmp}
             - {name: home, mountPath: /home/aegisops}
+            {{- if .Values.auth.oidcCASecret }}
+            - {name: oidc-ca, mountPath: /etc/aegisops/oidc, readOnly: true}
+            {{- end }}
       volumes:
         - name: config
           configMap: {name: {{ $name }}-config}
@@ -91,7 +99,7 @@ spec:
         - name: reports
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ printf "%s-reports" $name }}
+            claimName: {{ default (printf "%s-reports" $name) .Values.persistence.existingReportsClaim }}
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -99,6 +107,10 @@ spec:
           emptyDir: {}
         - name: home
           emptyDir: {}
+        {{- if .Values.auth.oidcCASecret }}
+        - name: oidc-ca
+          secret: {secretName: {{ .Values.auth.oidcCASecret }}}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

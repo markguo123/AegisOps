@@ -1,8 +1,8 @@
 {{- /*
 Dual independent PVCs (P6.2 / P6.5 / D-31): /data on aegisops-data, /reports on
-aegisops-reports. They must stay separate PVs: a single RWO claim referenced by two
-volume entries of the same Pod makes kubelet hang on the second NodePublish
-(Pod stuck in ContainerCreating). Both volumes gate on persistence.enabled; the
+aegisops-reports, separating capacity and lifecycle management.
+RWO restricts read-write access to one node, not one mount path.
+Both volumes gate on persistence.enabled; the
 legacy single "size" value is the fallback for either capacity.
 */ -}}
 {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
@@ -23,7 +23,7 @@ spec:
     requests:
       storage: {{ default .Values.persistence.size .Values.persistence.dataSize }}
 {{- end }}
-{{- if .Values.persistence.enabled }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingReportsClaim) }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -1,5 +1,6 @@
 AegisOps installed. Models and clusters are configured in the Web UI after login.
-Backend is single-replica. Database migrations run in the Pod init container.
+Backend is single-replica. MySQL auto migrations use a separate Job; Pod startup only checks schema.
+SQLite auto initialization stays in the init container. migration.mode=external disables automatic migrations.
 Credential Secret: {{ include "aegisops.credentials" . }} (password and encryption key; back it up).
 Retrieve initial password locally:
   kubectl -n {{ .Release.Namespace }} get secret {{ include "aegisops.credentials" . }} -o jsonpath='{.data.password}' | base64 --decode

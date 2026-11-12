@@ -1,14 +1,19 @@
 {{- if not (has .Values.mode (list "standard" "minimal")) }}{{ fail "mode must be standard or minimal" }}{{ end -}}
+{{- if not (has .Values.migration.mode (list "auto" "external")) }}{{ fail "migration.mode must be auto or external" }}{{ end -}}
+{{- if and (eq .Values.database.driver "sqlite") (or (not (hasPrefix "/data/" .Values.database.sqlitePath)) (contains ".." .Values.database.sqlitePath)) }}{{ fail "SQLite path must stay under /data" }}{{ end -}}
 {{- if not (has .Values.database.driver (list "mysql" "sqlite")) }}{{ fail "database.driver must be mysql or sqlite" }}{{ end -}}
 {{- if and (eq .Values.database.driver "mysql") (empty .Values.database.existingSecret) }}{{ fail "mysql requires database.existingSecret (key: dsn, parseTime=true)" }}{{ end -}}
 {{- if and (eq .Values.database.driver "sqlite") (not .Values.persistence.enabled) (not .Values.server.allowQuickstartHTTP) }}{{ fail "production SQLite requires persistence; ephemeral mode requires explicit experience opt-in" }}{{ end -}}
-{{- if and (eq .Values.blobs.driver "dir") (not .Values.persistence.enabled) }}{{ fail "dir content requires persistence" }}{{ end -}}
+{{- if and (eq .Values.blobs.driver "dir") (not .Values.persistence.enabled) (not .Values.server.allowQuickstartHTTP) }}{{ fail "dir content requires persistence outside explicit quickstart mode" }}{{ end -}}
 {{- if and (eq .Values.blobs.driver "s3") (empty .Values.blobs.existingSecret) }}{{ fail "s3 requires blobs.existingSecret containing its runtime configuration" }}{{ end -}}
 {{- if and .Values.ingress.enabled (empty .Values.ingress.host) }}{{ fail "ingress.host is required" }}{{ end -}}
 {{- if and .Values.ingress.enabled (empty .Values.server.publicURL) }}{{ fail "ingress requires server.publicURL" }}{{ end -}}
 {{- if and .Values.server.publicURL (not (hasPrefix "https://" .Values.server.publicURL)) }}{{ fail "server.publicURL must use HTTPS" }}{{ end -}}
 {{- $legacy := lookup "v1" "ConfigMap" .Release.Namespace "aegisops-installation" -}}
-{{- if and $legacy (eq .Release.Name "aegisops") (eq (get $legacy.data "manager") "script") }}{{ fail "instance is script-managed; back up and migrate explicitly before Helm adoption" }}{{ end -}}
+{{- if and $legacy (eq .Release.Name "aegisops") (eq (get $legacy.data "manager") "script") -}}
+{{- if not .Values.adoption.scriptManaged }}{{ fail "instance is script-managed; back up and migrate explicitly before Helm adoption" }}{{ end -}}
+{{- if or (empty .Values.credentials.existingSecret) (empty .Values.persistence.existingClaim) }}{{ fail "script adoption requires preserved credentials.existingSecret and persistence.existingClaim" }}{{ end -}}
+{{- end -}}
 
 {{- $own := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-installation" (include "aegisops.name" .)) -}}
 {{- if $own -}}

@@ -29,6 +29,7 @@ import (
 // 内嵌前端产物。一期 1.2 的最小服务集合保持不变。
 func newServerCmd(deps Dependencies) *cobra.Command {
 	var addr, dbPath string
+	var skipMigrations bool
 	cmd := &cobra.Command{
 		Use:   "server",
 		Short: "Start the platform HTTP server (API + embedded web UI)",
@@ -47,15 +48,13 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			if cmd.Flags().Changed("db") && !cfg.Platform.Store.IsMySQL() {
 				cfg.Platform.Store.SQLitePath = dbPath
 			}
-			st, target, err := openPlatformStore(cfg)
+			st, target, err := openPlatformStoreContext(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = st.Close() }()
-			// 迁移主路径是 aopsctl db migrate（升级 Job/initContainer，P6.5）；这里是
-			// 幂等兜底，让单机 sqlite 部署一条命令即可启动。
-			if err := st.Migrate(cmd.Context()); err != nil {
-				return fmt.Errorf("migrate store: %w", err)
+			if err := prepareServerStore(cmd.Context(), st, skipMigrations); err != nil {
+				return err
 			}
 			authSvc := auth.New(st.Users(), st.Roles())
 			if err := authSvc.BootstrapWithName(cmd.Context(), cfg.Platform.Auth.AdminUsername, os.Getenv("AEGISOPS_ADMIN_PASSWORD")); err != nil {
@@ -215,7 +214,23 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address override (default from config platform.server.addr, e.g. :8080)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path override (sqlite driver only; first start reads AEGISOPS_ADMIN_PASSWORD)")
+	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "Check database readiness without applying migrations (run aopsctl db migrate before starting)")
 	return cmd
+}
+
+// prepareServerStore keeps automatic initialization for direct local starts while
+// allowing deployment jobs to own migrations and server Pods to only check them.
+func prepareServerStore(ctx context.Context, st store.Store, skipMigrations bool) error {
+	if skipMigrations {
+		if err := store.IsReady(ctx, st); err != nil {
+			return fmt.Errorf("database is not ready with --skip-migrations (run aopsctl db migrate first): %w", err)
+		}
+		return nil
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate store: %w", err)
+	}
+	return nil
 }
 
 // newRootHandler 组装顶层路由（P6.11 / D-26）：

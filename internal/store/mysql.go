@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -15,6 +16,11 @@ import (
 //
 //	user:pass@tcp(127.0.0.1:3306)/aegisops?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
 func OpenMySQL(dsn string, opts ...Option) (Store, error) {
+	return OpenMySQLContext(context.Background(), dsn, opts...)
+}
+
+// OpenMySQLContext bounds connection establishment by the caller's deadline.
+func OpenMySQLContext(ctx context.Context, dsn string, opts ...Option) (Store, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
@@ -23,7 +29,7 @@ func OpenMySQL(dsn string, opts ...Option) (Store, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
 	s := newDBStore(db, mysqlDialect{}, opts...)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}

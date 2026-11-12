@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/session"
 )
@@ -822,13 +823,31 @@ func backfillAuditEventType(ctx context.Context, tx *sql.Tx) error {
 
 // Migrate 把数据库升级到当前 schemaVersion（幂等），两驱动共用。
 func (s *dbStore) Migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open migration connection: %w", err)
+	}
+	defer conn.Close()
+	// MySQL DDL may implicitly commit. A connection-scoped advisory lock still
+	// serializes runners across processes; sql.Tx alone does not provide this.
+	if _, mysql := s.dialect.(mysqlDialect); mysql {
+		var acquired int
+		if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(CONCAT('aegisops-schema:', LEFT(SHA2(DATABASE(),256),40)),30)`).Scan(&acquired); err != nil || acquired != 1 {
+			return fmt.Errorf("acquire migration lock (result %d): %v", acquired, err)
+		}
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(releaseCtx, `SELECT RELEASE_LOCK(CONCAT('aegisops-schema:', LEFT(SHA2(DATABASE(),256),40)))`)
+		}()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name    TEXT NOT NULL,
 		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

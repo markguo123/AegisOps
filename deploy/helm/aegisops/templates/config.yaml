@@ -5,7 +5,14 @@
 {{- $_ := set $config.platform.server "allow_loopback_http" .Values.server.allowLoopbackHTTP -}}
 {{- $_ := set $config.platform.auth "allow_quickstart_http" .Values.server.allowQuickstartHTTP -}}
 {{- $_ := set $config.platform.store "driver" .Values.database.driver -}}
+{{- $_ := set $config.platform.store "sqlite_path" .Values.database.sqlitePath -}}
+{{- $_ := set $config.platform.auth "admin_username" .Values.auth.adminUsername -}}
 {{- $_ := set $config.platform.blobs "driver" .Values.blobs.driver -}}
+{{- $_ := set $config.platform.auth "oidc_disable_pkce" .Values.auth.oidcDisablePKCE -}}
+{{- $_ := set $config.platform.auth "oidc_allow_missing_nonce" .Values.auth.oidcAllowMissingNonce -}}
+{{- if .Values.auth.oidcCASecret -}}
+{{- $_ := set $config.platform.auth "oidc_ca_file" "/etc/aegisops/oidc/ca.crt" -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

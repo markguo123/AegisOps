@@ -1,0 +1,10 @@
+# Supply image.tag and pre-created Secret names in your private values file.
+mode: standard
+database:
+  driver: mysql
+  existingSecret: aegisops-mysql
+blobs:
+  driver: s3
+  existingSecret: aegisops-s3
+migration:
+  mode: auto

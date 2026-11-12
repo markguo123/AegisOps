@@ -78,8 +78,7 @@ spec:
               readOnly: true
             # 可写区：/data 会话与审计落盘、/reports 报告导出。业务数据的权威存储是
             # MySQL，二进制对象落在对象存储后端。/data 挂在 PVC aegisops-data 上、/reports
-            # 挂在 PVC aegisops-reports 上：两块各自独立的 RWO PVC（不能共用同一 Claim，
-            # 否则 kubelet 对同一卷第二次 NodePublish 会挂起，Pod 卡 ContainerCreating）。
+            # 挂在 PVC aegisops-reports 上：独立管理容量与生命周期，RWO 限制单节点读写。
             # 两块卷同随 PERSIST_REPORTS 总开关创建/关闭（install.sh 渲染 base/pvc.yaml）：
             #   true  → 两块都挂 PVC（生产默认）
             #   false → 两个 PVC 都不建，/data 与 /reports 一起退化 emptyDir（预览/快速起）

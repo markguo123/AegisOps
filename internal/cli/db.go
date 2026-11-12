@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
 // newDBCmd 聚合持久化运维子命令（P6.5）。与顶层 aopsctl migrate 分工明确：
@@ -17,18 +20,68 @@ func newDBCmd(deps Dependencies) *cobra.Command {
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(newDBMigrateCmd(deps))
+	cmd.AddCommand(newDBCheckCmd(deps))
 	return cmd
 }
 
-// newDBMigrateCmd 把 schema 升到当前版本（幂等、只动 schema）。
+// newDBCheckCmd waits for schema readiness without running migrations.
+func newDBCheckCmd(deps Dependencies) *cobra.Command {
+	var wait time.Duration
+	cmd := &cobra.Command{Use: "check", Short: "Check database schema readiness without applying migrations", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if wait < 0 {
+				return fmt.Errorf("--wait must not be negative")
+			}
+			if err := cmd.Context().Err(); err != nil {
+				return fmt.Errorf("database schema check canceled: %w", err)
+			}
+			cfg, err := deps.LoadConfig(loadOptionsFromFlags(cmd, false))
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			ctx := cmd.Context()
+			if wait > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, wait)
+				defer cancel()
+			}
+			for {
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("database schema check canceled: %w", err)
+				}
+				st, _, openErr := openPlatformStoreContext(ctx, cfg)
+				checkErr := openErr
+				if checkErr == nil {
+					checkErr = store.IsReady(ctx, st)
+					_ = st.Close()
+				}
+				if checkErr == nil {
+					fmt.Fprintln(cmd.OutOrStdout(), "database schema ready")
+					return nil
+				}
+				if wait == 0 {
+					return fmt.Errorf("database schema not ready (run aopsctl db migrate): %w", checkErr)
+				}
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("database schema not ready (run aopsctl db migrate): %w (last check: %v)", ctx.Err(), checkErr)
+				case <-time.After(time.Second):
+				}
+			}
+		}}
+	cmd.Flags().DurationVar(&wait, "wait", 0, "maximum time to wait for connectivity and schema readiness")
+	return cmd
+}
+
+// newDBMigrateCmd 应用尚未执行的 schema 与配套数据升级，不导入旧平台数据。
 func newDBMigrateCmd(deps Dependencies) *cobra.Command {
 	var dbPath string
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Apply the platform database schema (idempotent, schema only)",
+		Short: "Apply pending database schema and associated data migrations",
 		Long: "Upgrade the configured store (platform.store.driver) to the current schema version.\n" +
 			"\n" +
-			"Scope: schema only. It does not import Phase-3 data (use the top-level\n" +
+			"Scope: versioned schema and associated data upgrades. Does not import legacy data (use\n" +
 			"'aopsctl migrate') and it never creates the database itself; the schema and\n" +
 			"its character set must already exist. Re-running is a no-op, so this command\n" +
 			"is meant to be used as a pre-upgrade Job or initContainer.",
@@ -42,7 +95,7 @@ func newDBMigrateCmd(deps Dependencies) *cobra.Command {
 			if cmd.Flags().Changed("db") && !cfg.Platform.Store.IsMySQL() {
 				cfg.Platform.Store.SQLitePath = dbPath
 			}
-			st, target, err := openPlatformStore(cfg)
+			st, target, err := openPlatformStoreContext(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
