@@ -41,6 +41,20 @@ func NewCipherFromEnv() (*Cipher, error) {
 	return NewCipher(key)
 }
 
+// NewCipherFromKeyString 用环境变量/命令行传入的密钥串构造密码机（P6.12）。
+// raw 接受 64 位 hex 或 base64 编码的 32 字节随机密钥，与 NewCipherFromEnv
+// 走同一个解码器，供离线运维工具（aopsmig）与 Server 保持同一加解密口径。
+func NewCipherFromKeyString(raw string) (*Cipher, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, ErrCipherKeyRequired
+	}
+	key, err := decodeCipherKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	return NewCipher(key)
+}
+
 // NewCipher 用给定 32 字节密钥构造 AES-256-GCM 密码机。
 func NewCipher(key []byte) (*Cipher, error) {
 	if len(key) != 32 {
