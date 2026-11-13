@@ -3,15 +3,55 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/security"
 )
+
+// ErrTargetIsolation 是目标绑定模式下拒绝执行的稳定原因。
+//
+// 多集群平台模式下，人工审批不能替代目标隔离：任意 shell 命令都能通过
+// 环境赋值、--kubeconfig/--context/--server、读取其它配置文件或调用其它程序
+// 改变实际目标。无法证明目标边界的命令必须在构造子进程之前拒绝（P12.2 /
+// 方案 22 §8.1），而不是只设置一个 KUBECONFIG 就当作隔离。
+var ErrTargetIsolation = errors.New("目标绑定模式拒绝该命令")
+
+// targetOverrideFlags 是能改变 kubectl 实际连接目标的参数。目标绑定模式下
+// 即使命令本身是 kubectl argv 也必须拒绝：审批只解决"要不要执行"，不解决
+// "执行到哪个集群"。
+var targetOverrideFlags = map[string]bool{
+	"--kubeconfig": true, "--context": true, "--cluster": true,
+	"--server": true, "--token": true, "--user": true, "--username": true,
+	"--password": true, "--client-certificate": true, "--client-key": true,
+	"--certificate-authority": true, "--insecure-skip-tls-verify": true,
+	"--as": true, "--as-group": true, "--as-uid": true,
+	"--tls-server-name": true,
+}
+
+// validateBoundTargetArgv 拒绝目标覆盖参数。`--` 之后是 exec 的远端命令，
+// 不是 kubectl 参数，扫描到分隔符即停止。
+func validateBoundTargetArgv(argv []string) error {
+	for _, token := range argv {
+		if token == "--" {
+			break
+		}
+		if !strings.HasPrefix(token, "-") || token == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(token, "=")
+		if targetOverrideFlags[name] {
+			return fmt.Errorf("%w：kubectl 参数 %s 会改写实际连接目标；平台会话只能操作服务端绑定的集群", ErrTargetIsolation, name)
+		}
+	}
+	return nil
+}
 
 // defaultStreamTimeout 是流式命令（logs -f / get -w）的默认采样时长。
 // 借鉴 kubectl-ai streaming.go：到时后捕获部分输出并标记 StreamTimeout，不阻塞 Agent Loop。
@@ -53,14 +93,48 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 			"确需查看明文时用 get_secret_value（按 key、审批或配置授权、仅当前轮模型可见）。" +
 			"敏感数据不进入 LLM 上下文")
 	}
+	// 目标前置校验（P12.2）：每次执行前重验用户授权、集群存在性与凭据版本。
+	// 撤权或凭据轮换后，旧命令与旧批准在真正起进程前失效，不再依赖看护周期。
+	if r.targetCheck != nil {
+		if err := r.targetCheck(ctx); err != nil {
+			return Result{Command: command}, fmt.Errorf("%w：%v", ErrTargetIsolation, err)
+		}
+	}
 	// 可证明只读的受控路径（方案 24 §3.2）：执行前重新分析实际命令，
 	// 批准后命令不可替换，且整条组合共用任务超时与输出上限。
-	if a := cmdplan.Analyze(command); a.ProvablyReadOnly && len(a.Program.Commands) > 0 {
-		return r.runReadOnlyProgram(ctx, command, a.Program)
+	// 该路径逐段直调固定 argv、不经过 shell，是目标绑定模式下唯一放行的
+	// shell 形状命令。
+	analysis := cmdplan.Analyze(command)
+	if analysis.ProvablyReadOnly && len(analysis.Program.Commands) > 0 {
+		if r.targetBound && r.kubeconfig == "" {
+			return Result{Command: command}, fmt.Errorf("%w：未装配绑定目标的临时凭据", ErrTargetIsolation)
+		}
+		return r.runReadOnlyProgram(ctx, command, analysis.Program)
+	}
+	// 目标绑定模式：无法证明目标边界的 shell 命令一律拒绝，人工审批不放行。
+	// 覆盖重定向、命令替换、变量、awk/sed/xargs、任意解释器、环境赋值等全部
+	// 非受控构造；--context/--kubeconfig/--server 等目标覆盖参数在 argv 路径另判。
+	if r.targetBound && analysis.NeedsShell {
+		return Result{Command: command}, fmt.Errorf(
+			"%w：该命令含无法证明目标边界的 shell 构造（%s）。请改用单条 kubectl 只读命令、"+
+				"可证明只读组合（管道到 grep/head/tail/jq 等）或结构化工具；"+
+				"平台多集群会话不会因人工审批而放开此限制", ErrTargetIsolation, analysis.Reason)
 	}
 	pc, err := ParseCommandDetail(command)
 	if err != nil {
 		return Result{Command: command}, err
+	}
+	if r.targetBound {
+		if pc.IsShell {
+			return Result{Command: command}, fmt.Errorf(
+				"%w：该命令需要 shell 解释器，目标无法被证明绑定到当前集群", ErrTargetIsolation)
+		}
+		if r.kubeconfig == "" {
+			return Result{Command: command}, fmt.Errorf("%w：未装配绑定目标的临时凭据", ErrTargetIsolation)
+		}
+		if err := validateBoundTargetArgv(pc.Argv); err != nil {
+			return Result{Command: command}, err
+		}
 	}
 	// shell 策略闸门（P6.3 / D-33）：必须在构造 exec.Cmd 之前拦下。
 	// 无 shell 镜像变体里 bash 不存在，放行只会让模型收到 "bash: executable file
@@ -109,9 +183,15 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 	stderr := newCappedBuffer(r.maxBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
-	if r.kubeconfig != "" {
-		cmd.Env = append(cmd.Env, "KUBECONFIG="+r.kubeconfig)
+	if r.targetBound {
+		// 目标绑定：不继承进程环境，只注入绑定的 KUBECONFIG（childEnv 已剔除
+		// 进程里其它 KUBECONFIG 与凭据）。
+		cmd.Env = r.childEnv()
+	} else {
+		cmd.Env = os.Environ()
+		if r.kubeconfig != "" {
+			cmd.Env = append(cmd.Env, "KUBECONFIG="+r.kubeconfig)
+		}
 	}
 	runErr := cmd.Run()
 	// 流式超时：捕获已收到的部分输出，标记 StreamTimeout，不视为错误。

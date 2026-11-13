@@ -49,16 +49,23 @@ var childEnvDenylist = map[string]bool{
 
 // childEnv 构造受控子进程环境。kubeconfig 为空时沿用进程的 KUBECONFIG
 // （部署方注入的任务绑定凭据），非空时以显式任务绑定值为准。
+//
+// 目标绑定模式（P12.2）下环境只来自白名单：进程里可能存在的 KUBECONFIG 与
+// 其它集群凭据不会被继承，最终只出现一条指向绑定临时文件的 KUBECONFIG。
+// 环境隔离只是纵深防御，目标证明仍由 RunKubectl 的参数/命令形状闸门负责。
 func (r *Runner) childEnv() []string {
 	env := make([]string, 0, 32)
 	for _, key := range childEnvAllowlist {
+		if key == "KUBECONFIG" {
+			continue
+		}
 		if value, ok := os.LookupEnv(key); ok {
 			env = append(env, key+"="+value)
 		}
 	}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if childEnvDenylist[key] {
+		if childEnvDenylist[key] || key == "KUBECONFIG" {
 			continue
 		}
 		for _, prefix := range childEnvPrefixAllowlist {
@@ -70,8 +77,10 @@ func (r *Runner) childEnv() []string {
 	}
 	if r.kubeconfig != "" {
 		env = append(env, "KUBECONFIG="+r.kubeconfig)
-	} else if value, ok := os.LookupEnv("KUBECONFIG"); ok && value != "" {
-		env = append(env, "KUBECONFIG="+value)
+	} else if !r.targetBound {
+		if value, ok := os.LookupEnv("KUBECONFIG"); ok && value != "" {
+			env = append(env, "KUBECONFIG="+value)
+		}
 	}
 	return env
 }

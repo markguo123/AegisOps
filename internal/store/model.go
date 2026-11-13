@@ -145,14 +145,24 @@ type Memory struct {
 
 // Cluster 是受管集群（P3.1/D-02：单集群 UI，数据模型预留 cluster_id）。
 type Cluster struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Context   string    `json:"context,omitempty"`
-	Server    string    `json:"server,omitempty"`
-	Version   string    `json:"version,omitempty"`
-	Status    string    `json:"status,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Context string `json:"context,omitempty"`
+	Server  string `json:"server,omitempty"`
+	Version string `json:"version,omitempty"`
+	Status  string `json:"status,omitempty"`
+	// Identity 是集群的稳定身份依据（当前为 kube-system namespace UID，P12.3）。
+	// 旧数据与 RBAC 不允许读取该对象时为空；空身份不能用于原位凭据替换，
+	// 只能重新接入并人工核对。它不参与授权，仅用于证明候选凭据仍指向同一集群；
+	// 完整 UID 不随 API 返回，工作台只暴露“是否已记录”。
+	Identity string `json:"-"`
+	// CheckedAt 是最近一次连测的时间；从未连测时为空。
+	CheckedAt *time.Time `json:"checkedAt,omitempty"`
+	// CheckSummary 是最近一次连测的结论摘要（失败时区分网络/TLS/认证/授权）。
+	// 不保存原始错误，避免把集群地址细节或凭据相关文本带入页面与审计。
+	CheckSummary string    `json:"checkSummary,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // Credential 是与集群分离的凭据记录（P3.1）。Kubeconfig 为加密存储后的值，

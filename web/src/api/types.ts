@@ -124,6 +124,10 @@ export interface Cluster {
   server?: string
   version?: string
   status?: string
+  /** 最近一次连测时间；null/缺省表示从未连测。 */
+  checkedAt?: string | null
+  /** 最近一次连测的结论摘要（失败时区分网络/TLS/认证/授权）。 */
+  checkSummary?: string
   createdAt: string
   updatedAt: string
 }
@@ -137,6 +141,55 @@ export interface ClusterInfo {
   health?: string
 }
 
+/** 当前用户在某集群的有效授权规则（工作台展示，不替代执行期核权）。 */
+export interface ClusterAccessRule {
+  scopeType: 'namespace' | 'cluster'
+  namespaces: string[] | null
+  resourceProfile?: string
+  actions: string[]
+  grantId?: string
+}
+
+/** GET /api/v1/clusters/workspace 的单条目标。 */
+export interface ClusterWorkspaceItem {
+  cluster: Cluster
+  checkState: 'ok' | 'failed' | 'unchecked' | 'stale'
+  identityRecorded: boolean
+  access: ClusterAccessRule[]
+  canManage: boolean
+  canChat: boolean
+  canScan: boolean
+  canViewReports: boolean
+}
+
+export interface ClusterWorkspaceStats {
+  total: number
+  connected: number
+  failed: number
+  unchecked: number
+}
+
+export interface ClusterWorkspace {
+  dataSource: string
+  generatedAt: string
+  summary: ClusterWorkspaceStats
+  items: ClusterWorkspaceItem[]
+}
+
+/** POST /api/v1/clusters/contexts 的响应：可选 context 与文件里的当前值。 */
+export interface ClusterContexts {
+  current?: string
+  contexts: string[]
+}
+
+/** PATCH /api/v1/clusters/{id}：原位替换同一逻辑集群的凭据。 */
+export interface ClusterUpdateRequest {
+  name?: string
+  context?: string
+  kubeconfig: string
+  confirmServerChange?: boolean
+}
+
 /** GET /api/v1/clusters/current 的 data（后端 cluster.StatusView）。 */
 export interface ClusterStatusView {
   cluster: Cluster
@@ -146,11 +199,14 @@ export interface ClusterStatusView {
 /** POST /api/v1/clusters 请求体：kubeconfig 仅作一次性提交，不回显。 */
 export interface ClusterCreateRequest {
   name?: string
+  /** 显式选择的 context；空则沿用 kubeconfig 的 current-context。 */
+  context?: string
   kubeconfig: string
 }
 
 /** POST /api/v1/clusters/test 请求体。 */
 export interface ClusterTestRequest {
+  context?: string
   kubeconfig: string
 }
 

@@ -56,9 +56,16 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/scans/{id}/cancel", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "POST", Path: "/api/v1/clusters", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "POST", Path: "/api/v1/clusters/test", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "POST", Path: "/api/v1/clusters/contexts", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "PATCH", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "POST", Path: "/api/v1/clusters/{id}/check", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters", Access: permission.AccessPermission, Permission: permission.ClusterRead},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters/current", Access: permission.AccessPermission, Permission: permission.ClusterRead},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterRead},
+		// 工作台只返回当前用户可用的目标（后端逐条按 EffectiveAccess 过滤），
+		// 因此这里只要求登录，不要求 cluster.read：只读操作员也需要选择自己的目标。
+		// 必须登记在 `/clusters/{id}` 之后：策略按后登记优先，否则会被参数路由覆盖。
+		permission.Rule{Method: "GET", Path: "/api/v1/clusters/workspace", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "DELETE", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "GET", Path: "/api/v1/settings/{group}", Access: permission.AccessPermission, Permission: permission.SettingsRead},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/{group}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},

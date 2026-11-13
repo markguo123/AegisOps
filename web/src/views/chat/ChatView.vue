@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatDotRound, RefreshRight } from '@element-plus/icons-vue'
 
@@ -85,9 +86,28 @@ function extractSkillMentions(
   return { cleaned: parts.join('').replace(/\s+/g, ' ').trim(), names }
 }
 
+const route = useRoute()
+const router = useRouter()
+
 const activeSession = computed(
   () => sessions.value.find((session) => session.id === activeId.value) ?? null,
 )
+
+/** 会话列表/审批卡展示集群名：ID 是稳定绑定，名称只是可读标签。 */
+const clusterLabels = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const cluster of clusters.value) {
+    map[cluster.id] = cluster.name || cluster.id
+  }
+  return map
+})
+
+/** 当前会话绑定的集群（不是新会话目标选择器）。目标失效时明确标注，不回落。 */
+const activeClusterName = computed(() => {
+  const id = activeSession.value?.clusterId
+  if (!id) return ''
+  return clusterLabels.value[id] || `目标不可用（${id}）`
+})
 
 const showScopeWelcome = computed(() => {
   if (!activeSession.value || activeSession.value.messageCount > 0) {
@@ -331,9 +351,41 @@ function handleReject(id?:string): void {
   })
 }
 
-onMounted(() => {
-  void loadSessions()
-  void loadScope()
+/**
+ * P12.4 集群工作台入口：`/app/chat?cluster=<id>&new=1` 表示“为这个目标新建
+ * 一个会话”。这里只设置新会话目标并调用新建，不改写任何已有会话的绑定；
+ * 目标不可用时给出明确提示，不回落其它集群。
+ */
+async function applyClusterEntry(): Promise<void> {
+  if (!route) {
+    return
+  }
+  const id = route.query.cluster
+  if (typeof id !== 'string' || !id) {
+    return
+  }
+  const createNew = route.query.new === '1'
+  if (createNew) {
+    const query = { ...route.query }
+    delete query.new
+    delete query.cluster
+    await router.replace({ query })
+  }
+  const available = clusters.value.find((cluster) => cluster.id === id)
+  if (!available) {
+    ElMessage.warning('该集群未接入或你无权访问；未创建会话（不会自动改用其它集群）')
+    return
+  }
+  target.value = id
+  if (createNew) {
+    await handleCreate()
+  }
+}
+
+onMounted(async () => {
+  await loadSessions()
+  await loadScope()
+  await applyClusterEntry()
 })
 
 // 会话切换：先由 connect 内部 clear() 中止旧连接，再订阅新会话。
@@ -388,6 +440,7 @@ watch(
       :class="{ 'drawer-open': mobileDrawerOpen }"
       :sessions="sessions"
       :active-id="activeId"
+      :cluster-names="clusterLabels"
       :loading="loading"
       :collapsed="conversationsCollapsed"
       @create="handleCreate"
@@ -416,7 +469,17 @@ watch(
           aria-label="打开会话列表"
           @click="mobileDrawerOpen = true"
         />
-        <el-select v-model="target" aria-label="新会话的集群" placeholder="选择新会话的集群" style="max-width:220px"><el-option v-for="c in clusters" :key="c.id" :label="c.name" :value="c.id"/></el-select>
+        <div class="target-picker">
+          <span class="target-label">新会话目标</span>
+          <el-select
+            v-model="target"
+            aria-label="新会话的集群"
+            placeholder="选择新会话的集群"
+            style="max-width:200px"
+          >
+            <el-option v-for="c in clusters" :key="c.id" :label="c.name" :value="c.id"/>
+          </el-select>
+        </div>
         <div class="chat-heading">
           <h2>{{ activeSession?.name || '未选择会话' }}</h2>
           <span v-if="activeSession" class="chat-id" :title="activeSession.id">
@@ -424,6 +487,9 @@ watch(
           </span>
         </div>
         <div v-if="activeSession" class="chat-meta">
+          <span class="cluster-badge" :title="activeSession.clusterId || ''">
+            目标集群：{{ activeClusterName || '未绑定' }}
+          </span>
           <TokenUsageBadge :token="sessionToken" />
           <span class="state-pill" :class="`tone-${sessionStateTone(activeSession.state)}`">
             {{ activeSession.state }}
@@ -464,6 +530,7 @@ watch(
               :history="stream.history.value"
               :events="stream.events.value"
               :can-decide="canDecide"
+              :cluster-name="activeClusterName"
               empty-title="该会话暂无消息"
               empty-hint="在下方输入框描述你的运维问题；Agent 会先思考、再调用工具核实现场"
               @approve="handleApprove"
@@ -574,6 +641,34 @@ watch(
 .chat-count {
   font-size: 12px;
   color: var(--app-muted);
+}
+
+.target-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.target-label {
+  font-size: 11.5px;
+  color: var(--app-muted);
+  white-space: nowrap;
+}
+
+/* 当前会话绑定目标：与“新会话目标”选择器视觉分离，避免误以为切换器会迁移会话。 */
+.cluster-badge {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 9px;
+  border: 1px solid var(--app-accent-border);
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent-2);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .chat-body {

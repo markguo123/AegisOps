@@ -36,6 +36,16 @@ func (b *scanToolBase) Risk(json.RawMessage) model.RiskLevel {
 	return model.RiskSafe
 }
 
+// summarize 给诊断子调用结果补上绑定 ClusterID（P12.2）：会话已固定目标，
+// 证据与报告必须能追溯到真实集群，而不是只靠一次运行的内存上下文。
+func (b *scanToolBase) summarize(result *model.ScanResult) map[string]any {
+	data := summarizeScanResult(result)
+	if id := b.baseOpts.Attribution.ClusterID; id != "" {
+		data["clusterId"] = id
+	}
+	return data
+}
+
 // scanClusterTool：全集群/命名空间体检（规则级，快；LLM 诊断由 Agent 后续分析）。
 type scanClusterTool struct{ scanToolBase }
 
@@ -60,7 +70,7 @@ func (t *scanClusterTool) Execute(ctx context.Context, input json.RawMessage) (T
 	if err != nil {
 		return ResultError("scan_cluster: " + err.Error()), nil
 	}
-	return ToolResult{Data: summarizeScanResult(result)}, nil
+	return ToolResult{Data: t.summarize(result)}, nil
 }
 
 // scanPodTool：单 Pod 体检（规则级）。
@@ -90,7 +100,7 @@ func (t *scanPodTool) Execute(ctx context.Context, input json.RawMessage) (ToolR
 	if err != nil {
 		return ResultError("scan_pod: " + err.Error()), nil
 	}
-	return ToolResult{Data: summarizeScanResult(result)}, nil
+	return ToolResult{Data: t.summarize(result)}, nil
 }
 
 // diagnosePodTool：单 Pod 深度证据采集（规则级；LLM 分析由 Agent 负责，
@@ -121,7 +131,7 @@ func (t *diagnosePodTool) Execute(ctx context.Context, input json.RawMessage) (T
 	if err != nil {
 		return ResultError("diagnose_pod: " + err.Error()), nil
 	}
-	return ToolResult{Data: summarizeScanResult(result)}, nil
+	return ToolResult{Data: t.summarize(result)}, nil
 }
 
 // diagnoseNodeTool：Node 深度证据采集（按 Node 过滤一期结果；LLM 分析由 Agent 负责）。
@@ -153,7 +163,7 @@ func (t *diagnoseNodeTool) Execute(ctx context.Context, input json.RawMessage) (
 	filtered := filterFindings(result, func(r model.ResourceRef) bool {
 		return (r.Kind == "Node" || r.Kind == "node") && r.Name == args["name"]
 	})
-	return ToolResult{Data: summarizeScanResult(filtered)}, nil
+	return ToolResult{Data: t.summarize(filtered)}, nil
 }
 
 // diagnoseWorkloadTool：Workload 深度证据采集（Deployment/StatefulSet/DaemonSet
@@ -199,7 +209,7 @@ func (t *diagnoseWorkloadTool) Execute(ctx context.Context, input json.RawMessag
 	filtered := filterFindings(result, func(r model.ResourceRef) bool {
 		return r.Kind == wantKind && r.Name == args["name"]
 	})
-	return ToolResult{Data: summarizeScanResult(filtered)}, nil
+	return ToolResult{Data: t.summarize(filtered)}, nil
 }
 
 // filterFindings 只保留 Resource 或 Related 命中匹配器的 Finding（及其诊断）。

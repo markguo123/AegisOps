@@ -195,6 +195,11 @@ type ClusterStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// ClusterCheckUpdater records a probe only if its credential is still current.
+type ClusterCheckUpdater interface {
+	UpdateClusterCheck(ctx context.Context, c *Cluster, credentialID, credentialSecret string) error
+}
+
 // CredentialStore 管理与集群分离的凭据（P3.1，加密存储）。
 type CredentialStore interface {
 	Create(ctx context.Context, c *Credential) error
@@ -202,6 +207,13 @@ type CredentialStore interface {
 	GetByCluster(ctx context.Context, clusterID string) (*Credential, error)
 	Update(ctx context.Context, c *Credential) error
 	Delete(ctx context.Context, id string) error
+}
+
+// ClusterCredentialRotator 原子替换一个集群的凭据与元数据（P12.3）。
+// 凭据更新必须先校验候选凭据、再在同一事务内替换密文与集群元数据：
+// 任一步失败都保留旧值，避免出现「元数据已改、凭据还是旧的」的半更新状态。
+type ClusterCredentialRotator interface {
+	RotateClusterCredential(ctx context.Context, c *Cluster, cred *Credential) error
 }
 
 // AuthzGrantStore 管理 namespace 授权委派（P3.11）。以 namespace 为唯一
@@ -226,21 +238,22 @@ type ApiTokenStore interface {
 
 // compile-time interface checks
 var (
-	_ UserStore       = (*userStore)(nil)
-	_ RoleStore       = (*roleStore)(nil)
-	_ SessionStore    = (*sessionStore)(nil)
-	_ TurnStore       = (*turnStore)(nil)
-	_ StepStore       = (*stepStore)(nil)
-	_ AuditStore      = (*auditStore)(nil)
-	_ SettingsStore   = (*settingsStore)(nil)
-	_ SkillStore      = (*skillStore)(nil)
-	_ ApprovalStore   = (*approvalStore)(nil)
-	_ MemoryStore     = (*memoryStore)(nil)
-	_ RetentionStore  = (*retentionStore)(nil)
-	_ ClusterStore    = (*clusterStore)(nil)
-	_ CredentialStore = (*credentialStore)(nil)
-	_ AuthzGrantStore = (*authzGrantStore)(nil)
-	_ ApiTokenStore   = (*apiTokenStore)(nil)
-	_ Store           = (*dbStore)(nil)
-	_ ReportStore     = (*reportStore)(nil)
+	_ UserStore                = (*userStore)(nil)
+	_ RoleStore                = (*roleStore)(nil)
+	_ SessionStore             = (*sessionStore)(nil)
+	_ TurnStore                = (*turnStore)(nil)
+	_ StepStore                = (*stepStore)(nil)
+	_ AuditStore               = (*auditStore)(nil)
+	_ SettingsStore            = (*settingsStore)(nil)
+	_ SkillStore               = (*skillStore)(nil)
+	_ ApprovalStore            = (*approvalStore)(nil)
+	_ MemoryStore              = (*memoryStore)(nil)
+	_ RetentionStore           = (*retentionStore)(nil)
+	_ ClusterStore             = (*clusterStore)(nil)
+	_ CredentialStore          = (*credentialStore)(nil)
+	_ ClusterCredentialRotator = (*credentialStore)(nil)
+	_ AuthzGrantStore          = (*authzGrantStore)(nil)
+	_ ApiTokenStore            = (*apiTokenStore)(nil)
+	_ Store                    = (*dbStore)(nil)
+	_ ReportStore              = (*reportStore)(nil)
 )

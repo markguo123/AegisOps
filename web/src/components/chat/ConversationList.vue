@@ -24,7 +24,16 @@ const props = defineProps<{
   activeId: string | null
   loading: boolean
   collapsed?: boolean
+  /** 会话绑定集群的 ID→名称映射；只用于展示，归属与授权仍由后端判定。 */
+  clusterNames?: Record<string, string>
 }>()
+
+function clusterLabel(session: SessionSummary): string {
+  if (!session.clusterId) {
+    return ''
+  }
+  return props.clusterNames?.[session.clusterId] || session.clusterId
+}
 
 const emit = defineEmits<{
   (e: 'create'): void
@@ -196,6 +205,9 @@ function onMenuCommand(session: SessionSummary, command: string): void {
                   </span>
                 </div>
                 <p class="session-meta">
+                  <span v-if="clusterLabel(session)" class="session-cluster" :title="session.clusterId">
+                    {{ clusterLabel(session) }} ·
+                  </span>
                   {{ session.messageCount }} 条 · {{ formatRelativeTime(session.lastModified) }}
                 </p>
               </template>
@@ -437,7 +449,11 @@ function onMenuCommand(session: SessionSummary, command: string): void {
   letter-spacing: 0;
 }
 
-/* 第二行：消息数 · 时间（单行省略，不再换行成竖条） */
+.session-cluster {
+  color: var(--app-accent-2);
+}
+
+/* 第二行：集群 · 消息数 · 时间（单行省略，不再换行成竖条） */
 .session-meta {
   margin: 0;
   /* 右侧预留悬浮操作的宽度：hover 时文字不跳动 */

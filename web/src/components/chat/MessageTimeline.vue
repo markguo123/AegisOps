@@ -27,9 +27,12 @@ const props = withDefaults(
     /** P7.6 空态文案：由外层按「是否已选会话」给出，避免已选会话却提示"选择会话"。 */
     emptyTitle?: string
     emptyHint?: string
+    /** P12.4 当前会话绑定的集群名称：审批卡展示“集群 + 资源目标”。 */
+    clusterName?: string
   }>(),
   {
     canDecide: true,
+    clusterName: '',
     emptyTitle: '选择或新建一个会话',
     emptyHint: '提问后助手会先思考、再调用工具核实现场，最后给出可复核的报告',
   },
@@ -727,6 +730,7 @@ defineExpose({ turns })
         <TurnBlock
           :turn="turn"
           :can-decide="canDecide"
+          :cluster-name="clusterName"
           @approve="(v,id)=>emit('approve',v,id)"
           @reject="emit('reject',$event)"
         />

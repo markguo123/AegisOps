@@ -21,9 +21,12 @@ const clusterUnavailableMessage = "cluster service is not configured: set AEGISO
 type clusterService interface {
 	Create(ctx context.Context, req cluster.CreateRequest) (*store.Cluster, error)
 	Test(ctx context.Context, req cluster.TestRequest) (*cluster.Info, error)
+	Contexts(ctx context.Context, req cluster.ContextsRequest) (*cluster.ContextsView, error)
+	Update(ctx context.Context, id string, req cluster.UpdateRequest) (*cluster.StatusView, error)
 	List(ctx context.Context) ([]*store.Cluster, error)
 	Get(ctx context.Context, id string) (*store.Cluster, error)
 	Current(ctx context.Context) (*cluster.StatusView, error)
+	Refresh(ctx context.Context, id string) (*cluster.StatusView, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -63,6 +66,46 @@ func (s *Server) handleTestCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, r, http.StatusOK, info)
+}
+
+// handleClusterContexts POST /api/v1/clusters/contexts：只解析 kubeconfig
+// 列出可选 context，供接入/更新流程显式选择目标；不连测、不落库。
+func (s *Server) handleClusterContexts(w http.ResponseWriter, r *http.Request) {
+	if s.clusterSvc == nil {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, clusterUnavailableMessage)
+		return
+	}
+	var req cluster.ContextsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxKubeconfigBody)).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid body: "+err.Error())
+		return
+	}
+	view, err := s.clusterSvc.Contexts(r.Context(), req)
+	if err != nil {
+		writeClusterError(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, view)
+}
+
+// handleUpdateCluster PATCH /api/v1/clusters/{id}：管理员原位替换凭据。
+// 服务层保证候选先连测、身份一致、失败保留旧值；响应不含任何凭据内容。
+func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
+	if s.clusterSvc == nil {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, clusterUnavailableMessage)
+		return
+	}
+	var req cluster.UpdateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxKubeconfigBody)).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid body: "+err.Error())
+		return
+	}
+	view, err := s.clusterSvc.Update(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeClusterError(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, view)
 }
 
 // handleListClusters GET /api/v1/clusters：受管集群元数据（不含凭据）。
@@ -108,6 +151,21 @@ func (s *Server) handleCurrentCluster(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, view)
 }
 
+// handleCheckCluster POST /api/v1/clusters/{id}/check：管理员对指定目标连测，
+// 刷新检查时间、状态与分类原因。连接成功不代表具备全部业务权限。
+func (s *Server) handleCheckCluster(w http.ResponseWriter, r *http.Request) {
+	if s.clusterSvc == nil {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, clusterUnavailableMessage)
+		return
+	}
+	view, err := s.clusterSvc.Refresh(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeClusterError(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, view)
+}
+
 // handleDeleteCluster DELETE /api/v1/clusters/{id}。
 func (s *Server) handleDeleteCluster(w http.ResponseWriter, r *http.Request) {
 	if s.clusterSvc == nil {
@@ -126,6 +184,11 @@ func writeClusterError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, cluster.ErrInvalid):
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, err.Error())
+	case errors.Is(err, cluster.ErrIdentityUnverified), errors.Is(err, cluster.ErrIdentityMismatch),
+		errors.Is(err, cluster.ErrServerChanged):
+		// 凭据/目标一致性属于业务冲突，不是服务端故障：客户端必须看到可指导的
+		// 原因并保留旧值。
+		writeError(w, r, http.StatusConflict, codeConflict, err.Error())
 	case errors.Is(err, cluster.ErrNotFound):
 		writeError(w, r, http.StatusNotFound, codeNotFound, err.Error())
 	case errors.Is(err, cluster.ErrExists):

@@ -55,9 +55,12 @@ const props = withDefaults(
      * 默认 true：未接入权限上下文的场景（如三期回放）保持原有可操作行为。
      */
     canDecide?: boolean
+    /** P12.4 会话绑定集群的展示名；为空时回退显示后端返回的 ClusterID。 */
+    clusterLabel?: string
   }>(),
   {
     canDecide: true,
+    clusterLabel: '',
   },
 )
 
@@ -133,6 +136,13 @@ const targetText = computed(() => {
   if (!target) return resourceText.value
   const parts = [target.kind, target.namespace, target.name].filter(Boolean)
   return parts.join(' · ')
+})
+
+/** 审批目标必须同时显示集群；名称优先，未知名称时回退稳定 ClusterID。 */
+const clusterText = computed(() => {
+  const id = props.approval.target?.cluster
+  if (!id) return ''
+  return props.clusterLabel || id
 })
 
 function optionLabel(option: { label: string; value: string }): string {
@@ -214,8 +224,8 @@ function reject(): void {
     <div v-if="targetText" class="approval-target">
       <span class="approval-section-label">目标资源</span>
       <strong>{{ targetText }}</strong>
-      <span v-if="approval.target?.cluster" class="approval-target-cluster">
-        {{ approval.target.cluster }}
+      <span v-if="clusterText" class="approval-target-cluster">
+        集群：{{ clusterText }}
       </span>
     </div>
 

@@ -3,6 +3,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,13 +32,21 @@ type Config struct {
 // KubernetesConfig controls cluster access (FR-003).
 type KubernetesConfig struct {
 	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
-	Kubeconfig   string                    `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
-	Context      string                    `mapstructure:"context"`
-	Namespace    string                    `mapstructure:"namespace"`
-	KubectlPath  string                    `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
-	Timeout      time.Duration             `mapstructure:"timeout"`
-	QPS          float32                   `mapstructure:"qps"`
-	Burst        int                       `mapstructure:"burst"`
+	// TargetBound 是运行期标记（P12.2），不来自配置文件：平台会话把目标
+	// kubeconfig 临时文件写进 Kubeconfig 后置为 true，执行器据此拒绝无法证明
+	// 目标边界的 shell 与目标覆盖参数。
+	TargetBound bool `json:"-" mapstructure:"-"`
+	// TargetCheck 是运行期的目标前置校验（P12.2）：每次 kubectl 子进程执行前
+	// 重新核验用户授权、集群存在性与凭据版本。凭据轮换或撤权后旧命令与旧批准
+	// 立即失效，而不是等下一个 15s 看护周期。
+	TargetCheck func(context.Context) error `json:"-" mapstructure:"-"`
+	Kubeconfig  string                      `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
+	Context     string                      `mapstructure:"context"`
+	Namespace   string                      `mapstructure:"namespace"`
+	KubectlPath string                      `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
+	Timeout     time.Duration               `mapstructure:"timeout"`
+	QPS         float32                     `mapstructure:"qps"`
+	Burst       int                         `mapstructure:"burst"`
 }
 
 // LLMConfig controls the OpenAI-compatible endpoint (FR-015).

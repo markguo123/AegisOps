@@ -21,9 +21,12 @@ const props = withDefaults(
     turn: TurnUiData
     /** P2.9 当前用户是否有权审批（本人自确认）。 */
     canDecide?: boolean
+    /** P12.4 当前会话绑定的集群名称。 */
+    clusterName?: string
   }>(),
   {
     canDecide: true,
+    clusterName: '',
   },
 )
 
@@ -266,6 +269,7 @@ function locateStep(step: AgentStep): void {
             class="turn-item"
             :approval="item.data"
             :can-decide="canDecide"
+            :cluster-label="clusterName"
             @approve="(v,id)=>emit('approve',v,id)"
             @reject="emit('reject',$event)"
           />

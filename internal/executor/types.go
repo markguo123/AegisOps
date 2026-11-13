@@ -5,6 +5,7 @@
 package executor
 
 import (
+	"context"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -15,12 +16,12 @@ import (
 
 // Result 是一次命令执行的结果。
 type Result struct {
-	Command       string         `json:"command"`
-	Stdout        string         `json:"stdout,omitempty"`
-	Stderr        string         `json:"stderr,omitempty"`
-	ExitCode      int            `json:"exitCode"`
-	Truncated     bool           `json:"truncated,omitempty"`
-	StreamTimeout bool           `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
+	Command       string `json:"command"`
+	Stdout        string `json:"stdout,omitempty"`
+	Stderr        string `json:"stderr,omitempty"`
+	ExitCode      int    `json:"exitCode"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	StreamTimeout bool   `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
 	// NoMatch 表示只读组合里的过滤阶段没有匹配（如 grep 退出码 1 且无输出）：
 	// 这是"没有匹配结果"，不是集群故障，不能被当成查询失败。
 	NoMatch      bool           `json:"noMatch,omitempty"`
@@ -34,6 +35,15 @@ type Options struct {
 	// Kubeconfig 传给 kubectl 子进程的 KUBECONFIG 环境变量；
 	// 空 = 使用进程默认 kubeconfig 加载规则（与 client-go 保持一致）。
 	Kubeconfig string
+	// TargetBound 表示本实例只服务一个由平台服务端绑定并已写入 Kubeconfig 的
+	// 集群目标（多集群 P12.2）。开启后执行器不只依赖 KUBECONFIG：它拒绝任何
+	// 无法证明目标边界的 shell 命令，拒绝 --context/--kubeconfig/--server 等
+	// 目标覆盖参数，并用最小化环境只注入绑定的 KUBECONFIG。
+	// 未开启时保持三期行为（CLI 直用/测试）。
+	TargetBound bool
+	// TargetCheck 在每次 kubectl 子进程执行前重验目标（用户授权、集群存在性、
+	// 凭据版本）。目标绑定模式下由平台注入；为空表示不做运行期重验。
+	TargetCheck func(context.Context) error
 	// MaxBytes 单次命令输出上限（默认 64KB）。
 	MaxBytes int
 	// DenyOps 硬拦截子串（agent.deny_ops）。

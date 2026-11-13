@@ -22,6 +22,8 @@ const shellBinary = "bash"
 type Runner struct {
 	bin           string
 	kubeconfig    string
+	targetBound   bool
+	targetCheck   func(context.Context) error
 	maxBytes      int
 	denyOps       []string
 	shellEnabled  bool
@@ -47,6 +49,8 @@ func NewRunner(opts Options) *Runner {
 	r := &Runner{
 		bin:           opts.KubectlBin,
 		kubeconfig:    opts.Kubeconfig,
+		targetBound:   opts.TargetBound,
+		targetCheck:   opts.TargetCheck,
 		maxBytes:      opts.MaxBytes,
 		denyOps:       opts.DenyOps,
 		shellEnabled:  opts.ShellEnabled,

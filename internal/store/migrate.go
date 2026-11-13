@@ -13,7 +13,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 11
+const schemaVersion = 12
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -67,6 +67,27 @@ var migrations = []migration{
 	{version: 9, name: "user security versions and scoped resource grants", up: migrateV9},
 	{version: 10, name: "external user identities", up: migrateV10},
 	{version: 11, name: "two platform roles and report coverage", up: migrateV11},
+	{version: 12, name: "cluster identity and last check metadata", up: migrateV12},
+}
+
+// migrateV12 给 clusters 补集群身份依据与最近连测元数据（P12.3/P12.4）。
+// identity 只记录可验证的稳定身份（kube-system namespace UID），旧集群留空；
+// 空身份不允许原位凭据替换，必须重新接入并人工核对，避免把另一集群静默
+// 继承为原 ClusterID。
+func migrateV12(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, item := range []struct {
+		table string
+		col   column
+	}{
+		{"clusters", column{name: "identity", kind: colText, def: "''"}},
+		{"clusters", column{name: "checked_at", kind: colTimeOrNull}},
+		{"clusters", column{name: "check_summary", kind: colText, def: "''"}},
+	} {
+		if _, err := tx.ExecContext(ctx, d.addColumn(item.table, item.col)); err != nil && !d.isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateV11(ctx context.Context, tx *sql.Tx, d dialect) error {
@@ -248,6 +269,9 @@ var schemaV1 = []tableSpec{
 			{name: "server", kind: colText, def: "''"},
 			{name: "version", kind: colText, def: "''"},
 			{name: "status", kind: colText, def: "'unknown'"},
+			{name: "identity", kind: colText, def: "''"},
+			{name: "checked_at", kind: colTimeOrNull},
+			{name: "check_summary", kind: colText, def: "''"},
 			{name: "created_at", kind: colTime},
 			{name: "updated_at", kind: colTime},
 		},

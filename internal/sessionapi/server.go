@@ -739,7 +739,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	var kubePath string
 	var check func(*http.Request) error
+	var targetCheck func(context.Context) error
 	if bound != nil {
+		targetCheck = func(ctx context.Context) error {
+			_, e := bound.Access(ctx)
+			return e
+		}
 		refresh := func(ctx context.Context) (*tools.AccessScope, error) {
 			a, e := bound.Access(ctx)
 			if e != nil {
@@ -778,7 +783,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if bound != nil {
 		approvalContext = fmt.Sprintf("%x", sha256.Sum256([]byte(bound.CredentialVersion+":"+bearerToken(r))))
 	}
-	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, KubeconfigPath: kubePath, RequestCheck: check,
+	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, KubeconfigPath: kubePath, RequestCheck: check, TargetCheck: targetCheck,
 		SessionID:       id,
 		Query:           body.Query,
 		UserID:          principal.User.ID,

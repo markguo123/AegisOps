@@ -47,6 +47,24 @@ func cannedScanResult() *model.ScanResult {
 	}
 }
 
+// TestDiagnosisToolsCarryBoundClusterID 锁定 P12.2：诊断子调用的工具结果必须
+// 带上服务端绑定的 ClusterID，证据/报告不能只靠一次运行的内存上下文追溯目标。
+func TestDiagnosisToolsCarryBoundClusterID(t *testing.T) {
+	r := &fakeRunner{result: cannedScanResult()}
+	opts := model.ScanOptions{Attribution: model.ReportAttribution{ClusterID: "cluster-b", Actor: "u1"}}
+	tr, err := NewDiagnosisTools(r, opts)[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := tr.Data.(map[string]any)
+	if m["clusterId"] != "cluster-b" {
+		t.Fatalf("诊断结果必须携带绑定 ClusterID，got %v", m["clusterId"])
+	}
+	if r.opts.Attribution.ClusterID != "cluster-b" {
+		t.Fatalf("扫描子调用必须继承绑定目标，got %+v", r.opts.Attribution)
+	}
+}
+
 func TestScanClusterTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
 	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))

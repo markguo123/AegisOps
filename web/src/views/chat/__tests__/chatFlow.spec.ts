@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { TOKEN_KEY, USER_KEY } from '@/api/request'
 import ChatView from '@/views/chat/ChatView.vue'
@@ -83,6 +84,9 @@ function installFetch(
       if (url === '/api/v1/sessions' && (init.method ?? 'GET') === 'GET') {
         return new Response(JSON.stringify(sessions), { status: 200 })
       }
+      if (url === '/api/v1/sessions' && init.method === 'POST') {
+        return new Response(JSON.stringify(SESSION), { status: 200 })
+      }
       if (url.endsWith('/stream')) {
         return sseStream(frames)
       }
@@ -120,6 +124,20 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     localStorage.setItem(USER_KEY, JSON.stringify({ userId: 'u1', username: 'admin', role: 'admin' }))
     sessionStorage.clear()
     setActivePinia(createPinia())
+  })
+
+  it('工作台新建参数只消费一次，重新挂载不重复创建', async () => {
+    installFetch([])
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/chat', component: ChatView }] })
+    await router.push('/chat?cluster=c1&new=1')
+    await router.isReady()
+    const first = mount(ChatView, { global: { plugins: [router] } })
+    await vi.waitFor(() => expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body).length).toBe(1))
+    expect(router.currentRoute.value.query.new).toBeUndefined()
+    first.unmount()
+    mount(ChatView, { global: { plugins: [router] } })
+    await vi.waitFor(() => expect(router.currentRoute.value.query.cluster).toBeUndefined())
+    expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body)).toHaveLength(1)
   })
 
   it('加载会话列表并展示会话级 Token（刷新/重开仍可读）', async () => {

@@ -100,8 +100,11 @@ type ChatRequest struct {
 	Confirmation     Confirmation
 	KubeconfigPath   string
 	RequestCheck     func(*http.Request) error
-	SessionID        string
-	Query            string
+	// TargetCheck 在每次 kubectl 子进程执行前重验授权/集群/凭据版本（P12.2）。
+	// 为空表示不做运行期重验（CLI 直用/测试）。
+	TargetCheck func(context.Context) error
+	SessionID   string
+	Query       string
 	// UserID 是发起本轮的产品内用户，用于 Turn/审计归属。
 	UserID string
 	// AllowAnySession 仅由具备 chat.manage.all 的管理员请求设置。
@@ -390,6 +393,8 @@ func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 		// shell 通道开关来自静态配置（platform.exec.shell_enabled，默认开启）：
 		// Options 的零值是关闭，装配方必须显式传，别让默认镜像丢掉管道排障能力。
 		ShellEnabled: cfg.Platform.Exec.ShellEnabled,
+		TargetBound:  cfg.Kubernetes.TargetBound,
+		TargetCheck:  cfg.Kubernetes.TargetCheck,
 		Clientset:    cs,
 		Namespace:    cfg.Kubernetes.Namespace,
 		RESTConfig:   restConfig,
@@ -479,6 +484,10 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		cfg.Kubernetes.Kubeconfig = req.KubeconfigPath
 		cfg.Kubernetes.Context = ""
 		cfg.Kubernetes.RequestCheck = req.RequestCheck
+		// P12.2：平台会话的目标由服务端绑定到临时 kubeconfig；执行器据此
+		// 拒绝无法证明目标边界的 shell 与目标覆盖参数，不依赖人工审批。
+		cfg.Kubernetes.TargetBound = true
+		cfg.Kubernetes.TargetCheck = req.TargetCheck
 		makeReader = func() (scanner.Reader, error) { return chatReader(cfg) }
 		makeWriter = func() (tools.WriteRunner, error) { return chatWriteRunner(cfg) }
 	}
@@ -495,8 +504,12 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	}); err != nil {
 		return nil, err
 	}
-	// 诊断 Tool 复用一期 ScanService（P3）。
-	for _, dt := range tools.NewDiagnosisTools(s.scanFactory(), chatScanOptions(cfg)) {
+	// 诊断 Tool 复用一期 ScanService（P3）。P12.2：诊断子调用同样绑定会话
+	// ClusterID，工具结果与后续证据可追溯到真实目标。
+	scanOpts := chatScanOptions(cfg)
+	scanOpts.Attribution.ClusterID = sess.Cluster
+	scanOpts.Attribution.Actor = req.UserID
+	for _, dt := range tools.NewDiagnosisTools(s.scanFactory(), scanOpts) {
 		if err := reg.Register(dt); err != nil {
 			return nil, err
 		}

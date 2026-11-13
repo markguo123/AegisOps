@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -112,14 +113,35 @@ func (c *clusterEnv) adminToken(t *testing.T) string {
 	return token
 }
 
-// kubeconfigBody 构造最小可解析 kubeconfig 请求体（fake Connector 不校验结构，
-// 但 Content 必须有值以模拟"用户提交了配置"）。
+// kubeconfigBody 构造最小可解析 kubeconfig 请求体。服务层现在会先解析并固定
+// 显式 context 再交给 Connector，因此测试体也必须是真实结构；哨兵 token 用来
+// 断言凭据明文不进入响应/审计。
 func kubeconfigBody(name string) string {
 	b, _ := json.Marshal(map[string]string{
 		"name":       name,
-		"kubeconfig": sentinelToken + "-" + name,
+		"kubeconfig": kubeconfigYAML(name),
 	})
 	return string(b)
+}
+
+func kubeconfigYAML(name string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: c1
+  cluster:
+    server: https://10.0.0.1:6443
+contexts:
+- name: prod
+  context:
+    cluster: c1
+    user: u1
+current-context: prod
+users:
+- name: u1
+  user:
+    token: %s-%s
+`, sentinelToken, name)
 }
 
 func TestClusterRequiresAuth(t *testing.T) {
@@ -366,6 +388,111 @@ func TestClusterChangeAudit(t *testing.T) {
 	if clusterChanges == 0 {
 		t.Fatal("创建集群后应有 CLUSTER_CHANGE 审计")
 	}
+}
+
+// TestClusterWorkspaceListsCheckStateAndPermissions 验证工作台返回可信检查
+// 时间/状态与权限过滤结果，且不泄漏凭据。
+func TestClusterWorkspaceListsCheckStateAndPermissions(t *testing.T) {
+	c := newClusterServer(t, &fakeClusterConnector{
+		info: &cluster.Info{Name: "prod", Context: "prod", Server: "https://10.0.0.1:6443", Version: "v1.28.13"},
+	})
+	token := c.adminToken(t)
+	if resp, raw := c.do(t, http.MethodPost, "/api/v1/clusters", token, kubeconfigBody("prod")); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("创建应 201: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw := c.do(t, http.MethodGet, "/api/v1/clusters/workspace", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("workspace 应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	if strings.Contains(raw, sentinelToken) {
+		t.Fatal("workspace 泄漏凭据明文")
+	}
+	var view struct {
+		Summary struct {
+			Total     int `json:"total"`
+			Connected int `json:"connected"`
+			Unchecked int `json:"unchecked"`
+		} `json:"summary"`
+		Items []struct {
+			Cluster struct {
+				ID string `json:"id"`
+			} `json:"cluster"`
+			CheckState string `json:"checkState"`
+			CanManage  bool   `json:"canManage"`
+		} `json:"items"`
+	}
+	decodeData(t, mustReplay(t, raw), &view)
+	if view.Summary.Total != 1 || view.Summary.Connected != 1 || len(view.Items) != 1 {
+		t.Fatalf("workspace 统计不符: %+v", view)
+	}
+	if view.Items[0].CheckState != "ok" || !view.Items[0].CanManage {
+		t.Fatalf("admin 条目应 ok 且可管理: %+v", view.Items[0])
+	}
+}
+
+// TestClusterWorkspaceAllowedWithoutClusterRead 验证工作台走“登录即可”的
+// 入口（目标列表由后端按授权过滤），而原始集群列表仍要求 cluster.read。
+// 这条用例防止后登记的 `/clusters/{id}` 参数路由把 workspace 覆盖成 403。
+func TestClusterWorkspaceAllowedWithoutClusterRead(t *testing.T) {
+	c := newClusterServer(t, &fakeClusterConnector{
+		info: &cluster.Info{Name: "prod", Context: "prod", Server: "https://10.0.0.1:6443"},
+	})
+	admin := c.adminToken(t)
+	if resp, raw := c.do(t, http.MethodPost, "/api/v1/clusters", admin, kubeconfigBody("prod")); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("创建应 201: %d %s", resp.StatusCode, raw)
+	}
+	userToken := createRoleUser(t, c.store, c.authSvc, auth.RoleUser, "workspace-user", "workspace-pw")
+	if resp, raw := c.do(t, http.MethodGet, "/api/v1/clusters/workspace", userToken, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("普通用户工作台应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	if resp, raw := c.do(t, http.MethodGet, "/api/v1/clusters", userToken, ""); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("无 cluster.read 的原始列表应 403, got %d: %s", resp.StatusCode, raw)
+	}
+}
+
+// TestClusterUpdateRoute 验证原位凭据替换端点的成功与身份不一致路径。
+func TestClusterUpdateRoute(t *testing.T) {
+	conn := &fakeClusterConnector{info: &cluster.Info{
+		Name: "prod", Context: "prod", Server: "https://10.0.0.1:6443", Identity: "identity-a",
+	}}
+	c := newClusterServer(t, conn)
+	token := c.adminToken(t)
+	resp, raw := c.do(t, http.MethodPost, "/api/v1/clusters", token, kubeconfigBody("prod"))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("创建应 201: %d %s", resp.StatusCode, raw)
+	}
+	var created store.Cluster
+	decodeData(t, mustReplay(t, raw), &created)
+
+	body := `{"kubeconfig":` + mustQuote(kubeconfigYAML("prod")) + `}`
+	if resp, raw := c.do(t, http.MethodPatch, "/api/v1/clusters/"+created.ID, token, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("原位更新应 200: %d %s", resp.StatusCode, raw)
+	}
+	conn.info.Identity = "identity-b"
+	if resp, raw := c.do(t, http.MethodPatch, "/api/v1/clusters/"+created.ID, token, body); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("身份不一致应 409: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// TestClusterContextsRoute 验证接入前可列出显式 context。
+func TestClusterContextsRoute(t *testing.T) {
+	c := newClusterServer(t, &fakeClusterConnector{info: &cluster.Info{Name: "prod"}})
+	token := c.adminToken(t)
+	resp, raw := c.do(t, http.MethodPost, "/api/v1/clusters/contexts", token, kubeconfigBody("prod"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("contexts 应 200: %d %s", resp.StatusCode, raw)
+	}
+	var view cluster.ContextsView
+	decodeData(t, mustReplay(t, raw), &view)
+	if view.Current != "prod" || len(view.Contexts) != 1 {
+		t.Fatalf("context 列表不符: %+v", view)
+	}
+}
+
+// mustQuote 把 JSON 字符串安全嵌入另一个 JSON 文档。
+func mustQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // createRoleUser 创建指定角色的用户并返回其登录 token（测试辅助）。

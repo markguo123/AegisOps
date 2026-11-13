@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CircleClose,
@@ -58,6 +58,7 @@ import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 // 这里只传筛选条件、不做任何归属推断；跨 owner 下载的审计也由后端落，前端只提示。
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
 
 const reports = ref<ReportView[]>([])
 const clusters = ref<Cluster[]>([])
@@ -140,10 +141,28 @@ const mismatchText = computed(() => {
   return parts.length ? `历史对象待迁移：${parts.join('、')}` : ''
 })
 
+/**
+ * 目标下拉的选项来源：管理员走 /clusters 全量列表；普通用户没有 cluster.read
+ * 时退回 /auth/access 的授权集群。两者合并后同一 ClusterID 只出现一次，
+ * 名称只用于展示，筛选仍按稳定 ID 提交。
+ */
+const clusterOptions = computed<Array<{ id: string; name: string }>>(() => {
+  const map = new Map<string, { id: string; name: string }>()
+  for (const item of clusters.value) {
+    map.set(item.id, { id: item.id, name: item.name || item.id })
+  }
+  for (const item of targets.value) {
+    if (!map.has(item.id)) {
+      map.set(item.id, { id: item.id, name: item.name || item.id })
+    }
+  }
+  return [...map.values()]
+})
+
 const clusterName = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
-  for (const item of clusters.value) {
-    map[item.id] = item.name || item.id
+  for (const item of clusterOptions.value) {
+    map[item.id] = item.name
   }
   return map
 })
@@ -377,6 +396,8 @@ async function loadSidePanels(): Promise<void> {
     // 集群列表只服务于筛选项：拿不到就只留"全部集群"，不该连带打断报告列表。
     clusters.value = []
   }
+  // 普通用户没有 cluster.read，但报告页仍需要自己有权目标的名称/筛选项。
+  await refreshTargets()
   if (!canSeeStorage.value) {
     return
   }
@@ -767,9 +788,41 @@ function clearScanFilter(): void {
   void Promise.all([loadReports(), loadOverview()])
 }
 
-onMounted(() => {
-  void refreshAll()
-  void resumeActiveScan()
+/**
+ * P12.4 集群工作台入口：
+ *  - `?cluster=<id>` 按该目标筛选报告；
+ *  - `?cluster=<id>&scan=1` 预选目标并打开体检抽屉。
+ * 目标必须是当前用户可用的集群；不可用时明确提示，不悄悄换成别的目标。
+ */
+async function applyClusterEntry(): Promise<void> {
+  // 组件测试可在没有 router 的环境挂载；没有路由上下文时视为无入口参数。
+  if (!route) {
+    return
+  }
+  const cluster = route.query.cluster
+  if (typeof cluster !== 'string' || !cluster) {
+    return
+  }
+  await refreshTargets()
+  if (!targets.value.some((item) => item.id === cluster)) {
+    ElMessage.warning('该集群未接入或你无权访问；未自动改用其它目标')
+    return
+  }
+  filterCluster.value = cluster
+  target.value = cluster
+  page.value = 1
+  await Promise.all([loadReports(), loadOverview()])
+  if (route.query.scan === '1') {
+    await loadScope()
+    target.value = cluster
+    scanOpen.value = true
+  }
+}
+
+onMounted(async () => {
+  await refreshAll()
+  await resumeActiveScan()
+  await applyClusterEntry()
 })
 onBeforeUnmount(stopPolling)
 </script>
@@ -936,7 +989,7 @@ onBeforeUnmount(stopPolling)
           >
             <el-option label="全部集群" value="" />
             <el-option
-              v-for="item in clusters"
+              v-for="item in clusterOptions"
               :key="item.id"
               :label="item.name || item.id"
               :value="item.id"
