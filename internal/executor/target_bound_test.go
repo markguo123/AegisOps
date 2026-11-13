@@ -103,3 +103,12 @@ func TestTargetBoundRequiresCredential(t *testing.T) {
 		t.Fatalf("缺少绑定凭据时必须拒绝，got %v", err)
 	}
 }
+
+func TestTargetBoundSingleWriteUsesBoundArgv(t *testing.T) {
+	bin := fakeKubectl(t, "echo ARGS:%*")
+	r := NewRunner(Options{KubectlBin: bin, TargetBound: true, Kubeconfig: `C:\bound\config`, MaxBytes: 4096})
+	res, err := r.RunKubectl(context.Background(), "kubectl delete pod example -n default")
+	if err != nil || res.ExitCode != 0 || !strings.Contains(res.Stdout, "delete pod example -n default") {
+		t.Fatalf("single approved argv should reach bound executor: result=%+v err=%v", res, err)
+	}
+}

@@ -114,14 +114,11 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 	// 目标绑定模式：无法证明目标边界的 shell 命令一律拒绝，人工审批不放行。
 	// 覆盖重定向、命令替换、变量、awk/sed/xargs、任意解释器、环境赋值等全部
 	// 非受控构造；--context/--kubeconfig/--server 等目标覆盖参数在 argv 路径另判。
-	if r.targetBound && analysis.NeedsShell {
-		return Result{Command: command}, fmt.Errorf(
-			"%w：该命令含无法证明目标边界的 shell 构造（%s）。请改用单条 kubectl 只读命令、"+
-				"可证明只读组合（管道到 grep/head/tail/jq 等）或结构化工具；"+
-				"平台多集群会话不会因人工审批而放开此限制", ErrTargetIsolation, analysis.Reason)
-	}
 	pc, err := ParseCommandDetail(command)
 	if err != nil {
+		if r.targetBound && analysis.NeedsShell {
+			return Result{Command: command}, fmt.Errorf("%w：无法证明命令目标边界", ErrTargetIsolation)
+		}
 		return Result{Command: command}, err
 	}
 	if r.targetBound {

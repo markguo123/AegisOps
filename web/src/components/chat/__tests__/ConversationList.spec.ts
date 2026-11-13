@@ -28,6 +28,18 @@ function mountList(sessions: SessionSummary[], collapsed = false) {
  *   2. 折叠后用来恢复的展开按钮一度因为漏 import 图标而整个不渲染（进退两难）。
  */
 describe('ConversationList（P7.5 置顶分组与折叠开关）', () => {
+  it('按集群筛选时保留对应会话，切回全部后恢复', async () => {
+    const wrapper = mount(ConversationList, { props: {
+      sessions: [{ ...session('a'), clusterId: 'a' }, { ...session('b'), clusterId: 'b' }],
+      clusterNames: { a: '生产云', b: '验收云' }, activeId: null, loading: false,
+    } })
+    await wrapper.get('select[aria-label="按集群筛选会话"]').setValue('b')
+    expect(wrapper.findAll('.session-item')).toHaveLength(1)
+    expect(wrapper.text()).toContain('会话 b')
+    expect(wrapper.text()).not.toContain('会话 a')
+    await wrapper.get('select[aria-label="按集群筛选会话"]').setValue('')
+    expect(wrapper.findAll('.session-item')).toHaveLength(2)
+  })
   it('置顶组与普通组之间只画一条分隔线，且落在第一条非置顶会话上', () => {
     const wrapper = mountList([
       session('p1', true),

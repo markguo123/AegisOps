@@ -49,18 +49,22 @@ const emit = defineEmits<{
 const editingId = ref<string | null>(null)
 const draftName = ref('')
 const keyword = ref('')
+const clusterFilter = ref('')
+const clusterOptions = computed(() => {
+  const ids = new Set(props.sessions.map(s => s.clusterId).filter((id): id is string => Boolean(id)))
+  return [...ids].map(id => ({ id, name: props.clusterNames?.[id] || `目标不可用（${id}）` }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+})
 
 const collapsed = computed(() => props.collapsed === true)
 
 /** P7.5：搜索按标题与会话 id 做大小写不敏感过滤。 */
 const filteredSessions = computed(() => {
   const query = keyword.value.trim().toLowerCase()
-  if (!query) {
-    return props.sessions
-  }
   return props.sessions.filter(
     (session) =>
-      session.name.toLowerCase().includes(query) || session.id.toLowerCase().includes(query),
+      (!clusterFilter.value || session.clusterId === clusterFilter.value) &&
+      (!query || session.name.toLowerCase().includes(query) || session.id.toLowerCase().includes(query) || clusterLabel(session).toLowerCase().includes(query)),
   )
 })
 
@@ -145,6 +149,10 @@ function onMenuCommand(session: SessionSummary, command: string): void {
       </button>
     </div>
 
+    <select v-if="!collapsed" v-model="clusterFilter" class="cluster-filter" aria-label="按集群筛选会话">
+      <option value="">全部集群</option>
+      <option v-for="cluster in clusterOptions" :key="cluster.id" :value="cluster.id">{{ cluster.name }}</option>
+    </select>
     <el-input
       v-if="!collapsed"
       v-model="keyword"
@@ -205,7 +213,7 @@ function onMenuCommand(session: SessionSummary, command: string): void {
                   </span>
                 </div>
                 <p class="session-meta">
-                  <span v-if="clusterLabel(session)" class="session-cluster" :title="session.clusterId">
+                  <span v-if="clusterLabel(session)" class="session-cluster" :title="clusterLabel(session)">
                     {{ clusterLabel(session) }} ·
                   </span>
                   {{ session.messageCount }} 条 · {{ formatRelativeTime(session.lastModified) }}
@@ -302,6 +310,7 @@ function onMenuCommand(session: SessionSummary, command: string): void {
 .list-search {
   flex: none;
 }
+.cluster-filter { width: 100%; flex: none; padding: 7px 9px; border: 1px solid var(--app-hairline); border-radius: 6px; background: var(--app-surface); color: var(--app-text); }
 
 .list-body {
   flex: 1;

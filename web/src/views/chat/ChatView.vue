@@ -40,7 +40,14 @@ const input = ref('')
 const sending = ref(false)
 const composerRef = ref<InstanceType<typeof ComposerBox> | null>(null)
 const auth = useAuthStore()
-const {clusters,target,refresh:loadScope}=useClusterAccess()
+const {clusters,refresh:loadScope}=useClusterAccess()
+const showClusterPicker = ref(false)
+const clusterQuery = ref('')
+const creatingSession = ref(false)
+const matchingClusters = computed(() => {
+  const query = clusterQuery.value.trim().toLowerCase()
+  return clusters.value.filter(c => c.name.toLowerCase().includes(query))
+})
 
 const CONVERSATIONS_KEY = 'aegisops_conversations_collapsed'
 const conversationsCollapsed = ref(localStorage.getItem(CONVERSATIONS_KEY) === '1')
@@ -224,11 +231,15 @@ function handleReconnect(): void {
   }
 }
 
-async function handleCreate(): Promise<void> {
+async function createForCluster(id: string): Promise<void> {
+  if (creatingSession.value) return
+  creatingSession.value = true
   try {
     await loadScope()
-    if(!target.value){ElMessage.warning('请先选择已授权集群；无可选项时请联系管理员');return}
-    const session = await createSession({clusterId:target.value})
+    if (!clusters.value.some(c => c.id === id)) { ElMessage.warning('该集群不可用或无权访问'); return }
+    const session = await createSession({clusterId:id})
+    showClusterPicker.value = false
+    mobileDrawerOpen.value = false
     activeId.value = session.id
     sessionStorage.setItem(ACTIVE_SESSION_KEY, session.id)
     await loadSessions()
@@ -236,7 +247,17 @@ async function handleCreate(): Promise<void> {
     composerRef.value?.focus()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '创建会话失败')
+  } finally {
+    creatingSession.value = false
   }
+}
+
+async function handleCreate(): Promise<void> {
+  await loadScope()
+  if (clusters.value.length === 0) { ElMessage.warning('没有可用集群，请联系管理员'); return }
+  if (clusters.value.length === 1) { await createForCluster(clusters.value[0]!.id); return }
+  clusterQuery.value = ''
+  showClusterPicker.value = true
 }
 
 async function handleRename(payload: { id: string; name: string }): Promise<void> {
@@ -376,9 +397,8 @@ async function applyClusterEntry(): Promise<void> {
     ElMessage.warning('该集群未接入或你无权访问；未创建会话（不会自动改用其它集群）')
     return
   }
-  target.value = id
   if (createNew) {
-    await handleCreate()
+    await createForCluster(id)
   }
 }
 
@@ -410,23 +430,10 @@ watch(
   () => stream.events.value.length,
   () => {
     const events = stream.events.value
-    let terminalSeen = false
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const event = events[i]
-      if (terminalSeen) {
-        break
-      }
-      if (event.event_type === 'session.completed' || event.event_type === 'session.failed') {
-        terminalSeen = true
-        break
-      }
-      if (event.event_type === 'turn.completed') {
-        terminalSeen = true
-        break
-      }
-    }
-    if (terminalSeen) {
+    const last = events[events.length - 1]
+    if (last && ['session.completed', 'session.failed', 'turn.completed'].includes(last.event_type)) {
       sending.value = false
+      void loadSessions()
     }
   },
   { deep: false },
@@ -435,6 +442,16 @@ watch(
 
 <template>
   <section class="chat-page" :class="{ 'ctx-collapsed': conversationsCollapsed }">
+    <el-dialog v-model="showClusterPicker" title="选择问诊集群" width="420px" append-to-body>
+      <p class="cluster-dialog-hint">选择后创建新会话，已有会话仍绑定原集群。</p>
+      <el-input v-model="clusterQuery" placeholder="搜索集群" clearable aria-label="搜索集群" />
+      <div class="cluster-dialog-list">
+        <button v-for="cluster in matchingClusters" :key="cluster.id" class="cluster-dialog-option" type="button" :disabled="creatingSession" @click="createForCluster(cluster.id)">
+          {{ cluster.name }} <span>开始问诊 ›</span>
+        </button>
+        <p v-if="!matchingClusters.length">没有匹配的集群</p>
+      </div>
+    </el-dialog>
     <ConversationList
       class="chat-side"
       :class="{ 'drawer-open': mobileDrawerOpen }"
@@ -469,17 +486,6 @@ watch(
           aria-label="打开会话列表"
           @click="mobileDrawerOpen = true"
         />
-        <div class="target-picker">
-          <span class="target-label">新会话目标</span>
-          <el-select
-            v-model="target"
-            aria-label="新会话的集群"
-            placeholder="选择新会话的集群"
-            style="max-width:200px"
-          >
-            <el-option v-for="c in clusters" :key="c.id" :label="c.name" :value="c.id"/>
-          </el-select>
-        </div>
         <div class="chat-heading">
           <h2>{{ activeSession?.name || '未选择会话' }}</h2>
           <span v-if="activeSession" class="chat-id" :title="activeSession.id">
@@ -567,6 +573,11 @@ watch(
 </template>
 
 <style scoped>
+.cluster-dialog-hint { color: var(--app-muted); margin: 0 0 14px; }
+.cluster-dialog-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; margin-top: 14px; }
+.cluster-dialog-option { display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 12px; border: 1px solid var(--app-hairline); border-radius: 8px; color: var(--app-text); background: var(--app-card-bg); cursor: pointer; text-align: left; }
+.cluster-dialog-option:hover { border-color: var(--app-accent); }
+.cluster-dialog-option span { color: var(--app-accent); white-space: nowrap; }
 .chat-page {
   display: grid;
   /* 对齐原型 .chat-pane：会话栏 240px + 16px 间距；收起态 56px */

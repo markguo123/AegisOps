@@ -6,6 +6,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { TOKEN_KEY, USER_KEY } from '@/api/request'
 import ChatView from '@/views/chat/ChatView.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
+import ConversationList from '@/components/chat/ConversationList.vue'
 
 /**
  * P2.12 E2E 冒烟（前端全链路，后端以 fetch 打桩）：
@@ -65,6 +66,7 @@ function installFetch(
     canWrite: true,
     canDestroy: false,
   },
+  accessClusters?: unknown[],
 ): void {
   vi.stubGlobal(
     'fetch',
@@ -77,7 +79,7 @@ function installFetch(
       }
       if (url === '/api/v1/auth/access') {
         return new Response(
-          JSON.stringify({ request_id: 'r', timestamp: new Date().toISOString(), data: [{id:"c1",name:"prod",access:{rules:[{scopeType:"namespace",namespaces:(scope as {namespaces:string[]}).namespaces,actions:["read"]}]}}] }),
+          JSON.stringify({ request_id: 'r', timestamp: new Date().toISOString(), data: accessClusters ?? [{id:"c1",name:"prod",access:{rules:[{scopeType:"namespace",namespaces:(scope as {namespaces:string[]}).namespaces,actions:["read"]}]}}] }),
           { status: 200 },
         )
       }
@@ -138,6 +140,21 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     mount(ChatView, { global: { plugins: [router] } })
     await vi.waitFor(() => expect(router.currentRoute.value.query.cluster).toBeUndefined())
     expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body)).toHaveLength(1)
+  })
+
+  it('多个集群时点击新建后选择目标，不改变原会话', async () => {
+    installFetch([], [], [SESSION], undefined, [
+      { id: 'c1', name: '生产云', access: { rules: [] } },
+      { id: 'c2', name: '验收云', access: { rules: [] } },
+    ])
+    const wrapper = mount(ChatView, { attachTo: document.body })
+    await vi.waitFor(() => expect(wrapper.find('.session-item').exists()).toBe(true))
+    wrapper.getComponent(ConversationList).vm.$emit('create')
+    await vi.waitFor(() => expect(document.body.textContent).toContain('选择问诊集群'))
+    const option = [...document.querySelectorAll<HTMLButtonElement>('.cluster-dialog-option')].find(el => el.textContent?.includes('验收云'))
+    expect(option).toBeTruthy()
+    option!.click()
+    await vi.waitFor(() => expect(calls.some(c => c.url === '/api/v1/sessions' && (c.body as {clusterId?: string})?.clusterId === 'c2')).toBe(true))
   })
 
   it('加载会话列表并展示会话级 Token（刷新/重开仍可读）', async () => {
