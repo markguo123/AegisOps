@@ -116,6 +116,25 @@ const activeClusterName = computed(() => {
   return clusterLabels.value[id] || `目标不可用（${id}）`
 })
 
+/** 当前会话创建者：管理员跨用户查看时也必须能明确看到归属。 */
+const activeOwnerName = computed(() => {
+  const sess = activeSession.value
+  if (!sess) return ''
+  if (sess.ownerName) return sess.ownerName
+  if (sess.ownerId && sess.ownerId === auth.user?.userId) {
+    return auth.user?.displayName || auth.user?.username || sess.ownerId
+  }
+  return sess.ownerId || ''
+})
+
+/** 仅用于提示“正在查看他人会话”，不代表审批或操作权限。 */
+const viewingOthersSession = computed(
+  () =>
+    Boolean(auth.user?.userId) &&
+    Boolean(activeSession.value?.ownerId) &&
+    activeSession.value?.ownerId !== auth.user?.userId,
+)
+
 const showScopeWelcome = computed(() => {
   if (!activeSession.value || activeSession.value.messageCount > 0) {
     return false
@@ -458,6 +477,7 @@ watch(
       :sessions="sessions"
       :active-id="activeId"
       :cluster-names="clusterLabels"
+      :current-user-id="auth.user?.userId"
       :loading="loading"
       :collapsed="conversationsCollapsed"
       @create="handleCreate"
@@ -496,11 +516,16 @@ watch(
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
             目标集群：{{ activeClusterName || '未绑定' }}
           </span>
+          <span class="owner-badge" :title="activeOwnerName">
+            创建者：{{ activeOwnerName || '未知' }}
+          </span>
+          <span v-if="viewingOthersSession" class="state-pill tone-waiting" title="管理员查看他人会话，操作仍按平台权限与目标授权判定">
+            他人会话
+          </span>
           <TokenUsageBadge :token="sessionToken" />
           <span class="state-pill" :class="`tone-${sessionStateTone(activeSession.state)}`">
             {{ activeSession.state }}
           </span>
-          <span class="chat-count"> {{ activeSession.messageCount }} 条消息 </span>
         </div>
       </header>
       <div class="chat-body">
@@ -645,7 +670,8 @@ watch(
 .chat-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   flex: none;
 }
 
@@ -668,18 +694,29 @@ watch(
 }
 
 /* 当前会话绑定目标：与“新会话目标”选择器视觉分离，避免误以为切换器会迁移会话。 */
-.cluster-badge {
+.cluster-badge,
+.owner-badge {
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 9px;
-  border: 1px solid var(--app-accent-border);
   border-radius: 999px;
-  background: var(--app-accent-soft);
-  color: var(--app-accent-2);
   font-size: 11.5px;
   font-weight: 600;
+}
+
+.cluster-badge {
+  border: 1px solid var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent-2);
+}
+
+.owner-badge {
+  max-width: 150px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface-2);
+  color: var(--app-muted);
 }
 
 .chat-body {

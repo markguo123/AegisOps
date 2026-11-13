@@ -12,6 +12,8 @@ import { addCsrfHeader } from './request'
 export interface SessionSummary {
   clusterId?:string
   ownerId?:string
+  /** 管理员跨用户列表时的 owner 展示名；缺失时用 ownerId 兜底。 */
+  ownerName?:string
   id: string
   name: string
   state: string

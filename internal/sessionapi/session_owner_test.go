@@ -117,6 +117,13 @@ func ownerHarness(t *testing.T, chat chatService) (*httptest.Server, *auditCaptu
 	capture := &auditCapture{}
 	srv := httptest.NewServer(New(chat, "m").
 		WithAudit(capture.sink).
+		WithOwnerNames(func(context.Context) (map[string]string, error) {
+			return map[string]string{
+				"u-owner": "Owner Name",
+				"u-other": "Other Name",
+				"u-admin": "Admin Name",
+			}, nil
+		}).
 		AuthenticatedHandler(ownershipResolver(
 			map[string]string{
 				"tok-owner":    "owner",
@@ -233,6 +240,26 @@ func newOwnerChat() *fakeChat {
 	}
 	chat.sessions["s-other"] = &session.Session{ID: "s-other", UserID: "u-other", Name: "other session"}
 	return chat
+}
+
+// TestSessionListOwnerNameForAdmin 验证管理员跨用户列表能拿到 owner 展示名，
+// 普通用户列表不解析/不泄漏他人的 owner 名称。
+func TestSessionListOwnerNameForAdmin(t *testing.T) {
+	srv, _ := ownerHarness(t, newOwnerChat())
+	status, body := call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-admin", "")
+	if status != http.StatusOK {
+		t.Fatalf("admin list = %d", status)
+	}
+	if !strings.Contains(body, `"ownerName":"Owner Name"`) || !strings.Contains(body, `"ownerName":"Other Name"`) {
+		t.Fatalf("管理员列表缺少 owner 展示名: %s", body)
+	}
+	status, body = call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-owner", "")
+	if status != http.StatusOK {
+		t.Fatalf("owner list = %d", status)
+	}
+	if strings.Contains(body, "Other Name") || strings.Contains(body, "s-other") {
+		t.Fatalf("普通用户列表泄漏他人会话/名称: %s", body)
+	}
 }
 
 // TestForeignUserCannotTouchAnySessionSurface 覆盖零权限用户与只持有

@@ -126,6 +126,9 @@ type Server struct {
 	scope    ScopeResolver
 	// audit 写跨用户会话操作留痕（U-06）；nil 时跳过，不影响业务请求。
 	audit AuditSink
+	// ownerNames 仅在管理员跨用户读列表时解析 owner 展示名；nil 或失败时前端
+	// 回退到稳定 ownerId，不影响列表本身。
+	ownerNames func(context.Context) (map[string]string, error)
 
 	mu           sync.Mutex
 	broadcasters map[string]*Broadcaster
@@ -189,6 +192,12 @@ func New(chat chatService, model string) *Server {
 // WithScopeResolver 为平台 Chat 注入执行前资源范围判定。
 func (s *Server) WithScopeResolver(resolve ScopeResolver) *Server {
 	s.scope = resolve
+	return s
+}
+
+// WithOwnerNames 注入会话 owner 展示名解析（仅用于管理员跨用户列表）。
+func (s *Server) WithOwnerNames(resolve func(context.Context) (map[string]string, error)) *Server {
+	s.ownerNames = resolve
 	return s
 }
 
@@ -267,8 +276,10 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type item struct {
-		ClusterID    string    `json:"clusterId,omitempty"`
-		OwnerID      string    `json:"ownerId,omitempty"`
+		ClusterID string `json:"clusterId,omitempty"`
+		OwnerID   string `json:"ownerId,omitempty"`
+		// OwnerName 仅管理员跨用户读列表时回填展示名；缺失时前端用 ownerId 兜底。
+		OwnerName    string    `json:"ownerName,omitempty"`
 		ID           string    `json:"id"`
 		Name         string    `json:"name"`
 		State        string    `json:"state"`
@@ -287,6 +298,13 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		return list[i].LastModified.After(list[j].LastModified)
 	})
+	ownerNames := map[string]string{}
+	if s.ownerNames != nil && principal.canReadAllSessions() {
+		// 展示名解析失败只影响标签，不能阻断列表；前端会用稳定 ownerId 兜底。
+		if resolved, err := s.ownerNames(r.Context()); err == nil {
+			ownerNames = resolved
+		}
+	}
 	out := make([]item, 0, len(list))
 	for _, sess := range list {
 		if s.platform != nil && !principal.canReadAllSessions() {
@@ -299,6 +317,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		out = append(out, item{
 			ID:   sess.ID,
 			Name: sessionTitle(sess), ClusterID: sess.Cluster, OwnerID: sess.UserID,
+			OwnerName:    ownerNames[sess.UserID],
 			State:        sess.State,
 			Model:        sess.Model,
 			MessageCount: sess.TotalMessages(),

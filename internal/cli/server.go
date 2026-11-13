@@ -146,7 +146,23 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			// admin 跨用户会话操作（读取/改名/置顶/删除/发消息/审批/取消）统一留痕（U-06）。
 			chatAPI := sessionapi.New(chat, cfg.LLM.Model).
 				WithAudit(auditSvc.Record).
-				WithPlatformAccess(platformAccess)
+				WithPlatformAccess(platformAccess).
+				// 管理员跨用户列表展示 owner 名称；普通用户列表只含本人，不解析。
+				WithOwnerNames(func(ctx context.Context) (map[string]string, error) {
+					users, err := st.Users().List(ctx)
+					if err != nil {
+						return nil, err
+					}
+					names := make(map[string]string, len(users))
+					for _, u := range users {
+						name := strings.TrimSpace(u.DisplayName)
+						if name == "" {
+							name = u.Username
+						}
+						names[u.ID] = name
+					}
+					return names, nil
+				})
 			sessionHandler := server.CORS(server.DefaultCORS())(
 				server.RequestID(chatAPI.AuthenticatedHandler(authSvc.RecheckToken)),
 			)
