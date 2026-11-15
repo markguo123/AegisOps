@@ -29,9 +29,10 @@ type AccessScope struct {
 
 var (
 	localTools = map[string]bool{
-		"read_tool_result": true,
-		"list_skills":      true,
-		"get_skill":        true,
+		"ask_user_question": true,
+		"read_tool_result":  true,
+		"list_skills":       true,
+		"get_skill":         true,
 	}
 	clusterOnlyTools = map[string]bool{
 		"get_node":         true,

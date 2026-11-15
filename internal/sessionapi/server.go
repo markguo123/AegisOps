@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -119,11 +120,13 @@ type confirmationTicket struct {
 }
 
 type Server struct {
-	tickets  map[string]confirmationTicket
-	chat     chatService
-	model    string
-	platform *service.PlatformAccess
-	scope    ScopeResolver
+	questions     map[string]*decision.Pending
+	questionViews map[string]decision.Question
+	tickets       map[string]confirmationTicket
+	chat          chatService
+	model         string
+	platform      *service.PlatformAccess
+	scope         ScopeResolver
 	// audit 写跨用户会话操作留痕（U-06）；nil 时跳过，不影响业务请求。
 	audit AuditSink
 	// ownerNames 仅在管理员跨用户读列表时解析 owner 展示名；nil 或失败时前端
@@ -212,6 +215,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/pin", s.handlePinSession)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/stream", s.handleStream)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/question", s.handleQuestion)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/question", s.handleQuestion)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/send-message", s.handleSendMessage)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/cancel", s.handleCancel)
@@ -802,7 +807,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if bound != nil {
 		approvalContext = fmt.Sprintf("%x", sha256.Sum256([]byte(bound.CredentialVersion+":"+bearerToken(r))))
 	}
-	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, KubeconfigPath: kubePath, RequestCheck: check, TargetCheck: targetCheck,
+	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, Ask: s.askQuestion, KubeconfigPath: kubePath, RequestCheck: check, TargetCheck: targetCheck,
 		SessionID:       id,
 		Query:           body.Query,
 		UserID:          principal.User.ID,

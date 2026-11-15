@@ -159,3 +159,21 @@ export async function deleteSession(id: string): Promise<{ deleted: string }> {
     method: 'DELETE',
   })
 }
+
+export interface UserQuestion {
+  id: string
+  session_id: string
+  turn_id: string
+  question: string
+  options: { id: string; label: string; impact: string; recommended?: boolean }[]
+  expires_at: string
+}
+export function getQuestion(id: string): Promise<UserQuestion | null> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(id)}/question`)
+}
+export function answerQuestion(q: UserQuestion, status: string, option: string, text: string): Promise<unknown> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(q.session_id)}/question`, {
+    method: 'POST', body: JSON.stringify({ id: q.id, session_id: q.session_id, turn_id: q.turn_id, status,
+      option_id: status === 'selected' ? option : undefined, text: status === 'text' ? text : undefined }),
+  })
+}

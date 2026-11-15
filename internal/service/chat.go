@@ -15,6 +15,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/kubernetes"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
@@ -95,6 +96,7 @@ type ChatEvent struct {
 type Confirmation func(context.Context, sse.ApprovalData) (string, <-chan string, func(), error)
 
 type ChatRequest struct {
+	Ask              decision.Asker
 	ApprovalContext  string
 	CoverageSnapshot func() []byte
 	Confirmation     Confirmation
@@ -592,10 +594,16 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		events <- ChatEvent{Type: ChatEventProgress, Text: fmt.Sprintf("已注入 Skill：%s（%s）", h.name, h.mode)}
 	}
 	ag := agent.New(agent.Options{
-		LLM:            client,
-		Tools:          reg,
-		Session:        sess,
-		Approver:       approver,
+		LLM:      client,
+		Tools:    reg,
+		Session:  sess,
+		Approver: approver,
+		Ask:      req.Ask,
+		QuestionEvent: func(kind string, data any) {
+			if s.sink != nil {
+				s.sink(sse.New(sess.ID, scope.turn(), scope.step(), sse.EventType(kind), data))
+			}
+		},
 		ApprovalPolicy: &pol,
 		Recorder:       recorder,
 		Tracer:         tracer,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/audit"
+	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
@@ -44,11 +45,13 @@ type SecretValueApprover interface {
 
 // Options 是 Agent 装配参数。
 type Options struct {
-	LLM      llm.LLMClient
-	Tools    *tools.Registry
-	Session  *session.Session
-	Approver Approver
-	Recorder audit.Recorder
+	LLM           llm.LLMClient
+	Tools         *tools.Registry
+	Session       *session.Session
+	Approver      Approver
+	Ask           decision.Asker
+	QuestionEvent func(string, any)
+	Recorder      audit.Recorder
 	// Tracer 观察 Agent 运行生命周期（P1.8），service 层用它持久化 Turn/Step；nil 时跳过。
 	Tracer Tracer
 	// TurnUserID 记录本轮 Turn 归属的产品内用户（P1.5），可为空。
@@ -85,16 +88,19 @@ type Agent struct {
 	// Input 是 UI → Agent 的消息流（用户输入/审批响应）。
 	Input chan any
 
-	LLM            llm.LLMClient
-	Tools          *tools.Registry
-	Session        *session.Session
-	Approver       Approver
-	Recorder       audit.Recorder
-	ApprovalPolicy *approval.Policy
-	Tracer         Tracer
-	TurnUserID     string
-	AccessScope    *tools.AccessScope
-	SkillContext   string
+	LLM                llm.LLMClient
+	Tools              *tools.Registry
+	Session            *session.Session
+	Approver           Approver
+	Ask                decision.Asker
+	QuestionEvent      func(string, any)
+	decisionUnresolved bool
+	Recorder           audit.Recorder
+	ApprovalPolicy     *approval.Policy
+	Tracer             Tracer
+	TurnUserID         string
+	AccessScope        *tools.AccessScope
+	SkillContext       string
 
 	MaxIterations  int
 	MaxToolCalls   int
@@ -126,6 +132,8 @@ func New(opts Options) *Agent {
 		Tools:           opts.Tools,
 		Session:         opts.Session,
 		Approver:        opts.Approver,
+		Ask:             opts.Ask,
+		QuestionEvent:   opts.QuestionEvent,
 		Recorder:        opts.Recorder,
 		ApprovalPolicy:  opts.ApprovalPolicy,
 		Tracer:          opts.Tracer,
@@ -190,6 +198,10 @@ func New(opts Options) *Agent {
 		if !disabledReader {
 			_ = a.Tools.Register(a.resultCache)
 		}
+	}
+	if a.Tools != nil {
+		a.Tools.Remove("ask_user_question")
+		_ = a.Tools.Register(&questionTool{agent: a})
 	}
 	if a.ApprovalPolicy == nil {
 		// 未显式指定时默认 strict + 要求审批，与 v1 行为一致。

@@ -18,6 +18,7 @@ import {
 import type { AgentTurnData } from '@/api/sse'
 import ConversationList from '@/components/chat/ConversationList.vue'
 import MessageTimeline from '@/components/chat/MessageTimeline.vue'
+import QuestionCard from '@/components/chat/QuestionCard.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
 import TokenUsageBadge from '@/components/chat/TokenUsageBadge.vue'
 import TechEmptyState from '@/components/TechEmptyState.vue'
@@ -35,6 +36,7 @@ const sessions = ref<SessionSummary[]>([])
 const loading = ref(false)
 const activeId = ref<string | null>(sessionStorage.getItem(ACTIVE_SESSION_KEY))
 const stream = useChatStream()
+const questionRevision = computed(() => stream.events.value.filter(e => e.event_type === 'question.required' || e.event_type === 'question.resolved').length)
 
 const input = ref('')
 const sending = ref(false)
@@ -582,6 +584,7 @@ watch(
       </div>
 
       <footer class="chat-composer">
+<QuestionCard :session-id="activeId" :revision="questionRevision" :running="sending" />
         <ComposerBox
           ref="composerRef"
           v-model="input"

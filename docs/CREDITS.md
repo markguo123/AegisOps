@@ -11,3 +11,11 @@
 - 失败反馈沿用我方既有 `tools.Present` 错误码，补充失败后的模型指导与受控重试，不宣称直接复制上游错误代码。评测和安全回归测试为我方新增，不冒充上游测试移植。
 
 其他历史借鉴声明仍以各源文件现有许可证头及既有文档记录为准。
+
+## DeepSeek Harness 用户决策交互
+
+- 来源：https://github.com/deepseek-ai/deepseek-harness ，MIT，Copyright (c) 2026 DeepSeek。
+- 2026-11-14 读取 master 的 packages/interaction/tool-ask-user/src/timed.ts；未取得固定提交 ID，不宣称已固定版本。
+- 直接复制 description 的前两句到 internal/agent/prompts/user_question_guidance.txt；完整许可见同目录 DSH-LICENSE。复制内容随仓库保存，不在运行时下载。
+- 工具调用后等待答案、选项影响说明、自由输入与跳过、输入区问题卡为设计借鉴。Go 协议与 Vue 组件按本项目独立实现；没有复制 Cordis 运行时、定时继续和跨进程恢复代码。
+- AegisOps 的提问不授权写操作，未决状态阻止当前运行继续工具调用。

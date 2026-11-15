@@ -235,6 +235,7 @@ func runChatInteractive(cmd *cobra.Command, chat service.ChatService, sessionID 
 		events, err := chat.Chat(cmd.Context(), service.ChatRequest{
 			SessionID:       sessionID,
 			Query:           query,
+			Ask:             terminalDecision(cmd.InOrStdin(), in, w),
 			SkipPermissions: f.skipPermissions,
 		}, respond)
 		if err != nil {

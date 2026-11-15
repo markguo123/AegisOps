@@ -23,6 +23,8 @@ export type AgentEventType =
   | 'tool.started'
   | 'tool.completed'
   | 'observation.created'
+  | 'question.required'
+  | 'question.resolved'
   | 'approval.required'
   | 'approval.approved'
   | 'approval.rejected'

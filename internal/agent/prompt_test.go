@@ -77,3 +77,13 @@ func TestShimPromptIncludesCreateProtocol(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptUsesDecisionToolWithoutForcedAlternatives(t *testing.T) {
+	p := basePrompt()
+	if !strings.Contains(p, "ask_user_question") || strings.Contains(p, "≥2 条") {
+		t.Fatal("decision guidance missing or forced alternatives remain")
+	}
+	if !strings.Contains(p, "选择方案不授权具体写操作") {
+		t.Fatal("approval boundary missing")
+	}
+}

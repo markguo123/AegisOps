@@ -27,6 +27,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	defer func() { a.SetState(AgentStateDone) }()
 	a.clearSensitiveValues()
 	a.unknownWrite = false
+	a.decisionUnresolved = false
 	defer a.clearSensitiveValues()
 
 	a.Session.AddMessage(session.Message{Role: "user", Type: "text", Content: query})
@@ -142,6 +143,15 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			msgs = append(msgs, llm.Message{Role: "assistant", Content: step.rawJSON})
 		}
 
+		for _, c := range step.calls {
+			if c.Name == "ask_user_question" {
+				step.calls = []llm.ToolCall{c}
+				if mode == "native" {
+					msgs[len(msgs)-1].ToolCalls = step.calls
+				}
+				break
+			}
+		}
 		// 批量审批：native 模式下一轮返回 2+ 写工具调用时，合并为一次确认。
 		batchApproved, batchDeclined := a.batchApprove(ctx, step.calls)
 		answered := map[string]bool{}
@@ -692,7 +702,7 @@ func (a *Agent) approvalDecision(t tools.Tool, args json.RawMessage) approval.De
 func (a *Agent) batchApprove(ctx context.Context, calls []llm.ToolCall) (approved, declined map[string]bool) {
 	approved = map[string]bool{}
 	declined = map[string]bool{}
-	if a.unknownWrite || a.Approver == nil || len(calls) < 2 {
+	if a.decisionUnresolved || a.unknownWrite || a.Approver == nil || len(calls) < 2 {
 		return // 无 approver 或少于 2 个调用，走个体审批
 	}
 	// 收集需要审批的调用（非只读 + 未授权 + 未被硬拦截，或 shell 只读）。
@@ -806,6 +816,9 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	t, ok := a.Tools.Lookup(call.Name)
 	if !ok {
 		return tools.ResultError("unknown tool: " + call.Name)
+	}
+	if a.decisionUnresolved {
+		return tools.ResultError("USER_DECISION_UNRESOLVED: stop this task and report the unanswered decision")
 	}
 	if a.unknownWrite && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
 		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{"name": call.Name, "reason": "previous_write_outcome_unknown"})

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { ArrowDown, CopyDocument, WarningFilled } from '@element-plus/icons-vue'
 
+import QuestionRecord from './QuestionRecord.vue'
 import MarkdownView from './MarkdownView.vue'
 import YamlBlock from './render/YamlBlock.vue'
 import LogBlock from './render/LogBlock.vue'
@@ -370,7 +371,8 @@ function toggle(): void {
         </div>
       </template>
       <template v-else>
-        <TerminalBlock v-if="view.type === 'terminal'" :data="view.parse" />
+        <QuestionRecord v-if="tool.name === 'ask_user_question'" :value="maskedResult" />
+<TerminalBlock v-else-if="view.type === 'terminal'" :data="view.parse" />
         <StructuredTable
           v-else-if="view.type === 'table'"
           :items="view.parse as unknown[]"

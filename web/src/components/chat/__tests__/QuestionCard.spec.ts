@@ -1,0 +1,47 @@
+import { mount, flushPromises } from '@vue/test-utils'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import QuestionCard from '../QuestionCard.vue'
+import QuestionRecord from '../QuestionRecord.vue'
+const api = vi.hoisted(() => ({ getQuestion: vi.fn(), answerQuestion: vi.fn() }))
+vi.mock('@/api/sessions', () => api)
+describe('QuestionCard', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+  it('does not submit a recommendation until the user selects and submits', async () => {
+    api.answerQuestion.mockResolvedValue({})
+    api.getQuestion.mockResolvedValue({ id: 'q', session_id: 's', turn_id: 't', question: '选择存储', options: [{ id: 'a', label: 'A', impact: '影响', recommended: true }] })
+    const w = mount(QuestionCard, { props: { sessionId: 's' } })
+    await flushPromises()
+    expect(api.answerQuestion).not.toHaveBeenCalled()
+    expect(w.findAll('button')[1].attributes('disabled')).toBeDefined()
+    await w.find('input[type=radio]').setValue()
+    await w.findAll('button')[1].trigger('click')
+    await flushPromises()
+    expect(api.answerQuestion).toHaveBeenCalledWith(expect.objectContaining({ id: 'q' }), 'selected', 'a', '')
+    expect(w.find('section').exists()).toBe(false)
+    w.unmount()
+  })
+  it('restores pending questions and keeps input after a failed submission', async () => {
+    api.getQuestion.mockResolvedValue({ id: 'q', session_id: 's', turn_id: 't', question: '选择存储', options: [] })
+    api.answerQuestion.mockRejectedValueOnce(new Error('网络中断'))
+    const w = mount(QuestionCard, { props: { sessionId: 's' } })
+    await flushPromises()
+    await w.find('input[type=checkbox]').setValue(true)
+    await w.find('textarea').setValue('保留现状')
+    await w.findAll('button')[1].trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('网络中断')
+    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('保留现状')
+    expect(api.answerQuestion).toHaveBeenCalledWith(expect.anything(), 'text', '', '保留现状')
+    api.answerQuestion.mockResolvedValueOnce({})
+    await w.findAll('button')[0].trigger('click')
+    await flushPromises()
+    expect(api.answerQuestion.mock.calls.at(-1)?.[1]).toBe('skipped')
+    w.unmount()
+  })
+  it('renders a settled record without allowing resubmission', () => {
+    const w = mount(QuestionRecord, { props: { value: { question: { question: '选择存储', options: [{ id: 'a', label: '标准', impact: '一般负载' }] }, answer: { status: 'selected', option_id: 'a' } } } })
+    expect(w.text()).toContain('用户决策：标准')
+    expect(w.find('button').exists()).toBe(false)
+    w.unmount()
+  })
+})

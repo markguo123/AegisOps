@@ -22,6 +22,8 @@ const (
 	EventToolStarted        EventType = "tool.started"
 	EventToolCompleted      EventType = "tool.completed"
 	EventObservationCreated EventType = "observation.created"
+	EventQuestionRequired   EventType = "question.required"
+	EventQuestionResolved   EventType = "question.resolved"
 	EventApprovalRequired   EventType = "approval.required"
 	EventApprovalApproved   EventType = "approval.approved"
 	EventApprovalRejected   EventType = "approval.rejected"
