@@ -81,6 +81,9 @@ server:
 blobs:
   # 对象存储驱动：s3（生产）；db/dir/off 为显式备选
   driver: s3
+  # driver=dir 的根目录（容器内绝对路径，必须位于可写卷下，例如 /data/blobs）。
+  # dir 驱动留空会被 Chart 直接拒绝渲染：运行时没有可靠的默认值。
+  dir: ""
   # 可选：包含 AEGISOPS_PLATFORM_BLOBS_* 键的环境变量 Secret 名（envFrom）
   existingSecret: ""
 

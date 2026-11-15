@@ -7,8 +7,11 @@ database:
   driver: sqlite
 
 blobs:
-  # 体验使用本地目录保存附件
+  # 体验使用本地目录保存附件。dir 驱动必须显式给出根目录：
+  # 留空会让 server 在构造对象存储时直接拒启（dir backend needs platform.blobs.dir）。
+  # /data 在 Chart 里是 PVC（persistence.enabled=true 时），容器内可写。
   driver: dir
+  dir: /data/blobs
 
 server:
   # 体验模式显式允许 HTTP 登录（生产禁止）

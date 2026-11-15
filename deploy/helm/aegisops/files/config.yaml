@@ -15,7 +15,7 @@ platform:
   blobs:                      # 二进制对象后端（P8.1 / D-32）：附件、报告产物、可选会话正文外置
     driver: db                # off | db | dir | s3；默认 db，未接对象存储时行为与四期前一致
     prefix: aegisops             # 对象键首段，≤32 字符
-    dir: ""                   # driver=dir 才用；容器内留空 = /data/blobs（须挂可写卷）
+    dir: ""                   # driver=dir 必填（无运行期默认）：由 Helm 从 blobs.dir 渲染（容器内建议 /data/blobs，须挂可写卷）
     endpoint: ""              # driver=s3 才用；现场地址属环境专有值，经 Secret/env 注入
     region: us-east-1         # 签名区域；MinIO 默认 us-east-1
     use_tls: false            # 集群内自建 MinIO 常见 false

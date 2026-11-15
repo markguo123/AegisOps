@@ -290,6 +290,7 @@ func TestHelmRejectsUnsafeOrIncompleteProductionValues(t *testing.T) {
 		{"s3-secret", []string{"--set", "blobs.existingSecret="}},
 		{"sqlite-ephemeral", []string{"--set", "database.driver=sqlite", "--set", "persistence.enabled=false"}},
 		{"dir-ephemeral", []string{"--set", "blobs.driver=dir", "--set", "persistence.enabled=false"}},
+		{"dir-without-path", []string{"--set", "blobs.driver=dir", "--set", "blobs.dir="}},
 		{"http-production", []string{"--set", "server.publicURL=http://ops.invalid"}},
 		{"migration-mode", []string{"--set", "migration.mode=unknown"}},
 	} {
@@ -299,6 +300,24 @@ func TestHelmRejectsUnsafeOrIncompleteProductionValues(t *testing.T) {
 				t.Fatalf("unsafe/incomplete values accepted: %s", out)
 			}
 		})
+	}
+}
+
+func TestHelmQuickstartRendersBlobDirectory(t *testing.T) {
+	// driver=dir 在服务端没有运行时默认值：blobs.dir 留空会让 server 在构造对象存储时
+	// 直接拒启（object storage backend: dir backend needs platform.blobs.dir），表现为
+	// CrashLoopBackOff。所以体验预设必须在 Helm 渲染层就给出可写卷下的具体路径。
+	docs := hcMustRender(t, "-f", filepath.Join("..", "..", "deploy", "helm", "aegisops", "values-quickstart.yaml"))
+	body := hcAt(hcFind(t, docs, "ConfigMap", "aegisops-config"), "data", "config.yaml").(string)
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if driver := hcAt(cfg, "platform", "blobs", "driver"); driver != "dir" {
+		t.Fatalf("quickstart blob driver = %v, want dir", driver)
+	}
+	if dir := hcAt(cfg, "platform", "blobs", "dir"); dir != "/data/blobs" {
+		t.Fatalf("quickstart blobs.dir = %v, want /data/blobs (dir has no runtime default)", dir)
 	}
 }
 
