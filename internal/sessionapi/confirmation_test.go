@@ -2,6 +2,7 @@ package sessionapi
 
 import (
 	"context"
+	"errors"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/store"
@@ -10,6 +11,43 @@ import (
 	"testing"
 	"time"
 )
+
+func TestApprovalAuditFailureAllowsRetry(t *testing.T) {
+	chat := newFakeChat()
+	chat.sessions["s"] = &session.Session{ID: "s", UserID: "u-owner"}
+	s := New(chat, "model").WithPlatformAccess(&service.PlatformAccess{})
+	s.pending["s"] = make(chan string, 1)
+	id, reply, done := s.newConfirmation("s", "")
+	defer done()
+	failing := true
+	s.WithAudit(func(context.Context, store.AuditEvent) error {
+		if failing {
+			return errors.New("audit unavailable")
+		}
+		return nil
+	})
+	h := s.AuthenticatedHandler(ownershipResolver(map[string]string{"token": "owner"}, nil))
+	for _, want := range []int{503, 200} {
+		r := httptest.NewRequest("POST", "/api/v1/sessions/s/approve", strings.NewReader(`{"choice":"yes","approvalId":"`+id+`"}`))
+		r.Header.Set("Authorization", "Bearer token")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("status=%d want=%d body=%s", w.Code, want, w.Body.String())
+		}
+		if failing {
+			select {
+			case <-reply:
+				t.Fatal("approval woke before audit succeeded")
+			default:
+			}
+		}
+		failing = false
+	}
+	if <-reply != "yes" {
+		t.Fatal("retry lost the approved answer")
+	}
+}
 
 func TestPlatformConfirmationCannotPreapproveOrReplay(t *testing.T) {
 	chat := newFakeChat()
@@ -29,7 +67,7 @@ func TestPlatformConfirmationCannotPreapproveOrReplay(t *testing.T) {
 		}
 	}
 	submit("", 409)
-	id, ch, done := s.newConfirmation("s")
+	id, ch, done := s.newConfirmation("s", "")
 	submit("other", 409)
 	submit(id, 200)
 	if <-ch != "yes" {
@@ -37,7 +75,7 @@ func TestPlatformConfirmationCannotPreapproveOrReplay(t *testing.T) {
 	}
 	submit(id, 409)
 	done()
-	next, _, closeNext := s.newConfirmation("s")
+	next, _, closeNext := s.newConfirmation("s", "")
 	defer closeNext()
 	submit(id, 409)
 	ticket := s.tickets["s"]

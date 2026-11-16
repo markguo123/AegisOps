@@ -77,7 +77,7 @@ type ChatChoiceOption struct {
 type ChatChoice struct {
 	Prompt   string             `json:"prompt"`
 	Options  []ChatChoiceOption `json:"options"`
-	Approval *sse.ApprovalData  `json:"approval,omitempty"`
+	Approval *sse.Interaction   `json:"approval,omitempty"`
 	// Secret 为 true 时该请求要收集 Secret 值：前端用密码框，值不回显、不入会话与审计。
 	Secret bool `json:"secret,omitempty"`
 }
@@ -93,7 +93,8 @@ type ChatEvent struct {
 }
 
 // ChatRequest 是一次对话请求。
-type Confirmation func(context.Context, sse.ApprovalData) (string, <-chan string, func(), error)
+// Confirmation 是会话 API 的审批票据入口：展示统一 Interaction 外壳并等待答复。
+type Confirmation func(context.Context, sse.Interaction) (string, <-chan string, func(), error)
 
 type ChatRequest struct {
 	Ask              decision.Asker
@@ -106,7 +107,9 @@ type ChatRequest struct {
 	// 为空表示不做运行期重验（CLI 直用/测试）。
 	TargetCheck func(context.Context) error
 	SessionID   string
-	Query       string
+	// TurnID 由会话 API 在接收消息时分配（202 响应需要它）；为空时由 Agent 生成。
+	TurnID string
+	Query  string
 	// UserID 是发起本轮的产品内用户，用于 Turn/审计归属。
 	UserID string
 	// AllowAnySession 仅由具备 chat.manage.all 的管理员请求设置。
@@ -192,7 +195,10 @@ type chatService struct {
 	skillsPlat *SkillPlatform
 	// sink 非空时把统一 SSE 事件（P1.9 事件路由）实时广播给会话客户端；
 	// 三期 ChatEvent 事件流原样保留（D-08：迁移期旧事件继续可消费）。
-	sink func(sse.Event)
+	// flow 是 Chat 单一输出管道（方案 25）：事件在这里安全处理、微批、原子提交
+	// 后才广播；sink 仅作为“提交后广播”钩子存在。
+	flow       *chatFlow
+	startupErr error
 	// resolveCfg 非空时每轮 Chat 用它取生效配置（P6.1，配置中心 + env 覆盖）。
 	resolveCfg  RuntimeConfigResolver
 	resultStore agent.ResultStore
@@ -230,7 +236,7 @@ func newChat(cfg *config.Config, newReader func() (scanner.Reader, error), llmFa
 	if newWriteRunner == nil {
 		newWriteRunner = func() (tools.WriteRunner, error) { return chatWriteRunner(cfg) }
 	}
-	return &chatService{
+	svc := &chatService{
 		cfg:             cfg,
 		sessions:        session.NewManager(sessStore),
 		sessionsInStore: sessionsInStore,
@@ -241,6 +247,13 @@ func newChat(cfg *config.Config, newReader func() (scanner.Reader, error), llmFa
 		proposals:       tools.NewProposalStore(),
 		store:           st,
 	}
+	if recovery, ok := st.(interface{ RecoverChatRuns(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		svc.startupErr = recovery.RecoverChatRuns(ctx)
+		cancel()
+	}
+	svc.ensureFlow()
+	return svc
 }
 
 // NewChatWithStore 用 Store 持久化创建四期 Agent 服务（P1.8）：非空 store 时把每轮
@@ -272,18 +285,19 @@ func warnLegacySessionFiles(dir string) {
 	}
 }
 
-// NewChatWithSink 创建四期 Agent 服务：保留三期事件流，并通过 sink 实时广播统一 SSE 事件（P1.9）。
-// 无 Store 参与，仅做事件路由广播。
+// NewChatWithSink 创建四期 Agent 服务：保留三期事件流，并通过 sink 广播
+// 已提交的 Chat 语义事件（方案 25：提交成功后发布）。
 func NewChatWithSink(cfg *config.Config, newReader func() (scanner.Reader, error), llmFactory func(llm.Options) llm.LLMClient, scanFactory func() tools.ScanRunner, newWriteRunner func() (tools.WriteRunner, error), sink func(sse.Event)) ChatService {
 	svc := newChat(cfg, newReader, llmFactory, scanFactory, newWriteRunner, nil).(*chatService)
-	svc.sink = sink
+	svc.SetSink(sink)
 	return svc
 }
 
-// NewChatWithStoreAndSink 创建四期 Agent 服务：同时做 Store 持久化（P1.8）与统一 SSE 事件广播（P1.9）。
+// NewChatWithStoreAndSink 创建四期 Agent 服务：同时做 Store 持久化（P1.8）与
+// 统一 Chat 事件广播（P1.9，方案 25 单一出口）。
 func NewChatWithStoreAndSink(cfg *config.Config, newReader func() (scanner.Reader, error), llmFactory func(llm.Options) llm.LLMClient, scanFactory func() tools.ScanRunner, newWriteRunner func() (tools.WriteRunner, error), st store.Store, sink func(sse.Event)) ChatService {
 	svc := newChat(cfg, newReader, llmFactory, scanFactory, newWriteRunner, st).(*chatService)
-	svc.sink = sink
+	svc.SetSink(sink)
 	return svc
 }
 
@@ -332,9 +346,32 @@ func (s *chatService) liveSkillRegistry() skills.Registry {
 	return skills.New()
 }
 
-// SetSink 挂载统一 SSE 事件广播（P1.9 事件路由入口，Web 用可选接口断言注入）。
+// SetSink 挂载“提交后广播”钩子与连接终止帧钩子（方案 25 §4/§9）。
 func (s *chatService) SetSink(sink func(sse.Event)) {
-	s.sink = sink
+	s.ensureFlow()
+	if s.flow == nil {
+		return
+	}
+	s.flow.SetPublisher(sink)
+}
+
+// SetFatal 挂载非持久 stream.fatal 帧钩子（会话 API 用它中断当前连接）。
+func (s *chatService) SetFatal(fn func(sessionID string, data sse.FatalData)) {
+	s.ensureFlow()
+	if s.flow == nil {
+		return
+	}
+	s.flow.SetFatal(fn)
+}
+
+// ensureFlow 在 Store 支持 Chat 事实源时装配单一输出管道。
+func (s *chatService) ensureFlow() {
+	if s.flow != nil || s.store == nil {
+		return
+	}
+	if cs, ok := s.store.(store.ChatStore); ok {
+		s.flow = newChatFlow(cs)
+	}
 }
 
 // chatReader 从配置构建只读 Kubernetes 门面（chat 用）。
@@ -461,6 +498,9 @@ func createToolOptions(cfg *config.Config) tools.CreateOptions {
 
 // Chat 编排一轮对话：装配 Agent → 转发事件 → 持久化会话。
 func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan string) (<-chan ChatEvent, error) {
+	if s.startupErr != nil {
+		return nil, fmt.Errorf("recover interrupted chat runs: %w", s.startupErr)
+	}
 	sess, err := s.sessions.Get(req.SessionID)
 	if err != nil {
 		return nil, err
@@ -558,14 +598,18 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		SkipPermissions: req.UserID == "" && (req.SkipPermissions || cfg.Agent.SkipPermissions),
 		DenyOps:         cfg.Agent.DenyOps,
 	}
-	// P1.9: 生命周期观察器同时负责 Store 持久化与统一事件广播，approver 复用同一
-	// runScope 给 approval.required 补全关联字段。
+	// P1.9: 生命周期观察器只负责 Store 持久化；展示事件走单一输出管道。
 	tracer := s.chatTracer(ctx, sess, scope)
+	// 单一输出管道（方案 25）：本轮运行的所有展示事件经同一有序写者提交后广播。
+	s.ensureFlow()
+	var writer *chatWriter
+	if s.flow != nil {
+		writer = s.flow.Open(sess.ID)
+	}
 	approver := &chatApprover{
 		events:  events,
 		respond: respond, confirmation: req.Confirmation, cluster: sess.Cluster,
-		sink:  s.sink,
-		scope: scope,
+		flow: writer,
 	}
 	client := s.llmFactory(llm.Options{
 		Endpoint:        cfg.LLM.Endpoint,
@@ -579,9 +623,16 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		DisableStream:   !cfg.LLM.Stream, // llm.stream=false：ChatStream 退化为非流式
 	})
 	recorder := s.newAuditRecorder(sess, scope)
-	// P1.9: 会话创建即广播 session.created；后续 Turn/Step 生命周期由 Tracer 转发。
-	if s.sink != nil {
-		s.sink(sse.New(sess.ID, "", "", sse.EventSessionCreated, sse.SessionData{State: sess.State}))
+	// 运行上下文独立于 HTTP 请求：SSE 断开不影响执行；输出不可靠时由写者取消。
+	runCtx, cancelRun := context.WithCancel(ctx)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cancelRun()
+		}
+	}()
+	if writer != nil {
+		writer.SetRunCancel(cancelRun)
 	}
 	// P3.8.4：procedural 自定义 Skill 装配（显式 @ 指定或自动意图检索），命中正文
 	// 拼接为不可信方法论附录注入 Agent system prompt，并记录命中统计与 SKILL_RUN
@@ -594,16 +645,12 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		events <- ChatEvent{Type: ChatEventProgress, Text: fmt.Sprintf("已注入 Skill：%s（%s）", h.name, h.mode)}
 	}
 	ag := agent.New(agent.Options{
-		LLM:      client,
-		Tools:    reg,
-		Session:  sess,
-		Approver: approver,
-		Ask:      req.Ask,
-		QuestionEvent: func(kind string, data any) {
-			if s.sink != nil {
-				s.sink(sse.New(sess.ID, scope.turn(), scope.step(), sse.EventType(kind), data))
-			}
-		},
+		LLM:            client,
+		Tools:          reg,
+		Session:        sess,
+		Approver:       approver,
+		Ask:            req.Ask,
+		Flow:           agentFlow(writer),
 		ApprovalPolicy: &pol,
 		Recorder:       recorder,
 		Tracer:         tracer,
@@ -620,10 +667,20 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		ResultStore:    s.resultStore,
 		DisabledTools:  cfg.Agent.DisabledTools,
 		TurnUserID:     req.UserID,
+		TurnID:         req.TurnID,
 		AccessScope:    req.AccessScope,
 	})
-	go s.runChat(ctx, ag, sess, req, events, recorder, s.sink, scope)
+	handedOff = true
+	go s.runChat(runCtx, ag, sess, req, events, recorder, writer, cancelRun, scope)
 	return events, nil
+}
+
+// agentFlow 把单会话写者适配成 agent.Flow；未装配管道时返回 nil（CLI 直用）。
+func agentFlow(w *chatWriter) agent.Flow {
+	if w == nil {
+		return nil
+	}
+	return w
 }
 
 // chatTracer 装配生命周期观察器：统一事件广播器（P1.9）+ Store 持久化（P1.8），
@@ -641,10 +698,11 @@ func (s *chatService) chatTracer(ctx context.Context, sess *session.Session, sco
 			persist = &persistTracer{store: s.store}
 		}
 	}
-	if s.sink == nil && persist == nil {
+	if s.flow == nil && persist == nil {
 		return nil
 	}
-	return &fanOutTracer{scope: scope, persist: persist, sink: s.sink}
+	// Tracer 只观察与持久化 Turn/Step，不再产生第二份展示事件（方案 25 §4）。
+	return persist
 }
 
 // persistTracer 把 Agent 生命周期回调写入四期 Store（P1.8）。落库前由 Store 侧统一脱敏，
@@ -715,33 +773,24 @@ func (s *chatService) auditFileCopyEnabled() bool {
 	return s.cfg == nil || s.cfg.Agent.AuditFileCopy
 }
 
-func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *session.Session, req ChatRequest, events chan<- ChatEvent, recorder audit.Recorder, sink func(sse.Event), scope *runScope) {
+func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *session.Session, req ChatRequest, events chan<- ChatEvent, recorder audit.Recorder, writer *chatWriter, cancelRun context.CancelFunc, scope *runScope) {
 	defer close(events)
 	defer func() { _ = recorder.Close() }()
+	defer cancelRun()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		var pendingAnswer strings.Builder
 		hadToolCall := false
-		// 分片序号按 role 各自计数：reasoning 与 assistant 共用一个计数器会让
-		// 报告的“第几段”被思考分片推高，消费方无法据此排序。
-		reasoningIndex := 0
-		answerIndex := 0
 		for m := range ag.Output {
 			if ev, ok := translateEvent(m); ok {
 				switch ev.Type {
-				case ChatEventReasoningDelta:
-					events <- ev
-					emitMessageDelta(sink, scope, "reasoning", ev.Text, reasoningIndex)
-					reasoningIndex++
 				case ChatEventProgress:
 					events <- ev
 				case ChatEventAnswerDelta, ChatEventDelta:
 					// 先缓存回答增量。若后续发现本轮实际包含工具调用，
 					// 这段内容只能是工具前的中间说明，不能提前展示为报告。
 					pendingAnswer.WriteString(ev.Text)
-					emitMessageDelta(sink, scope, "assistant", ev.Text, answerIndex)
-					answerIndex++
 				case ChatEventToolCall:
 					if progress := summarizeToolPrelude(pendingAnswer.String()); progress != "" {
 						events <- ChatEvent{Type: ChatEventProgress, Text: progress}
@@ -764,32 +813,44 @@ func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *sessio
 	}()
 	answer, usage, chatErr := ag.Chat(ctx, req.Query)
 	sess.State = string(ag.State)
-	// 先关通道并等转发协程收尾，再发终态事件。事件顺序必须是
-	// message.delta… → message.completed（权威全文）→ session.completed / failed；
-	// 否则最后一段正文会落在终态之后，被前端当成新分片并永久停在“正在生成…”。
+	// 先关通道并等转发协程收尾，再提交终态：展示事实必须在宣告结束之前落库。
 	close(ag.Output)
 	<-done
-	if sink != nil {
-		if answer != "" {
-			sink(sse.New(sess.ID, scope.turn(), "", sse.EventMessageCompleted, sse.MessageData{
-				Role: "assistant", Delta: store.RedactJSONPayload(answer),
-			}))
-		}
-		if chatErr != nil {
-			sink(sse.New(sess.ID, scope.turn(), "", sse.EventSessionFailed, sse.SessionData{
-				State: sess.State, Reason: chatErr.Error(),
-			}))
-		} else {
-			sink(sse.New(sess.ID, scope.turn(), "", sse.EventSessionCompleted, sse.SessionData{State: sess.State}))
-		}
-	}
-	// 会话落库 + 容量闸门反馈（P8.6）：预警与超限都必须走到用户眼前。真机上出过 MySQL
-	// 「Data too long」把整轮对话静默吞掉的事故——用户看到的是「回复正常，历史里没有」，
-	// 服务端日志里那行 Warn 没人看得见。
 	if req.CoverageSnapshot != nil {
 		sess.Coverage = req.CoverageSnapshot()
 	}
-	capacityWarn, capacityFail := s.persistTurnSession(ctx, sess)
+	// 终态与模型历史同一事务提交，提交成功才发布 turn.status(done/failed)。
+	var capacityWarn, capacityFail string
+	if writer != nil {
+		finishCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := writer.Finish(finishCtx, ag.TurnSnapshot(), sess, ag.FinalMessageID())
+		cancel()
+		if err != nil {
+			slog.Warn("chat: 终态提交失败", "session", sess.ID, "error", err)
+			writer.failOutput(err)
+			// Agent has exited. Reconcile only after its writer has stopped.
+			if recovery, ok := s.store.(interface {
+				InterruptChatRun(context.Context, string) error
+			}); ok {
+				<-writer.done
+				recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if recoveryErr := recovery.InterruptChatRun(recoveryCtx, sess.ID); recoveryErr != nil {
+					slog.Warn("chat: 中断状态保存失败", "session", sess.ID, "error", recoveryErr)
+				}
+				recoveryCancel()
+			}
+			if errors.Is(err, store.ErrSessionTooLarge) {
+				// 容量超限不是“输出链路故障”：回复本身已完成，只是这次没存进会话。
+				capacityFail = fmt.Sprintf(
+					"本轮回复没有存进会话：%v。回复内容本身已完成，请新建会话继续，或由管理员调大 agent.session_max_bytes。", err)
+			} else {
+				capacityFail = "本轮输出未能可靠保存，请重新同步会话"
+			}
+		}
+	} else {
+		// 无平台 Store 的终端直用模式：沿用会话文件/内存事实源。
+		capacityWarn, capacityFail = s.persistTurnSession(ctx, sess)
+	}
 	events <- ChatEvent{Type: ChatEventAnswer, Text: answer, Usage: &usage}
 	if chatErr != nil {
 		events <- ChatEvent{Type: ChatEventError, Text: chatErr.Error()}
@@ -800,6 +861,9 @@ func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *sessio
 	}
 	if capacityFail != "" {
 		events <- ChatEvent{Type: ChatEventError, Text: capacityFail}
+		if writer != nil {
+			s.flow.Notice(sess.ID, "", sse.NoticeError, "SESSION_SAVE_FAILED", capacityFail)
+		}
 	}
 }
 
@@ -880,15 +944,6 @@ func sessionCapacityNotices(rep session.SizeReport, err error, id string) (warni
 // emitMessageDelta 通过 sink 广播统一 message.delta 事件（携带当前 turn/step 作用域）。
 // 增量与终态走同一套脱敏（sse 包约定：写入事件流的内容在封装前必须脱敏），
 // 避免同一段正文在流式过程中与 message.completed 里呈现不同内容。
-func emitMessageDelta(sink func(sse.Event), scope *runScope, role, delta string, index int) {
-	if sink == nil {
-		return
-	}
-	sink(sse.New(scope.session(), scope.turn(), scope.step(), sse.EventMessageDelta, sse.MessageData{
-		Role: role, Delta: store.RedactJSONPayload(delta), Index: index,
-	}))
-}
-
 // summarizeToolPrelude 保留工具调用前的短进度说明，避免把真正的诊断文本直接丢掉。
 // 关键点：只过滤明显的状态噪音（空文本、超长文本、Markdown/代码块），不要因为
 // “修复/建议/结论”等词语出现在思考过程中而误伤实际诊断内容。
@@ -948,7 +1003,7 @@ func translateEvent(m agent.Message) (ChatEvent, bool) {
 	return ChatEvent{}, false
 }
 
-// chatApprover 把审批请求转成 choice-request 事件，并等待 respond 回传选择。
+// chatApprover 把审批请求转成统一 Interaction 并等待 respond 回传选择。
 type chatApprover struct {
 	confirmation Confirmation
 	cluster      string
@@ -956,103 +1011,90 @@ type chatApprover struct {
 	respond      <-chan string
 	skip         bool
 	autoApprove  bool
-	// sink 非空时以统一事件顺带广播审批请求（P1.9）。
-	sink  func(sse.Event)
-	scope *runScope
+	// flow 非空时把审批请求作为 interaction.updated 提交后展示（单一出口）。
+	flow *chatWriter
 }
 
 func (a *chatApprover) Confirm(ctx context.Context, prompt string, options []agent.UserChoiceOption) (string, error) {
 	return a.confirm(ctx, prompt, options, nil)
 }
 
-// ConfirmStructured 在保留 CLI/旧事件 prompt 的同时，向统一 SSE 下发结构化审批事实。
+// ConfirmStructured 在保留 CLI/旧事件 prompt 的同时，提交结构化审批事实。
 func (a *chatApprover) ConfirmStructured(ctx context.Context, req agent.ApprovalRequest) (string, error) {
-	data := approvalDataFromPlan(req)
-	return a.confirm(ctx, req.Prompt, req.Options, &data)
+	data := interactionFromPlan(req)
+	if req.InteractionID != "" {
+		data.InteractionID = req.InteractionID
+	}
+	return a.confirm(ctx, req.Prompt, req.Options, data)
 }
 
-func approvalDataFromPlan(req agent.ApprovalRequest) sse.ApprovalData {
+// interactionFromPlan 把审批计划映射成统一 Interaction 公开载荷（已脱敏）。
+func interactionFromPlan(req agent.ApprovalRequest) *sse.Interaction {
 	plan := req.Plan
-	data := sse.ApprovalData{
-		Title:        plan.Title,
-		Tool:         plan.Tool,
-		Operation:    plan.Operation,
-		Risk:         plan.Risk,
-		Summary:      plan.Summary,
-		Command:      plan.Command,
-		Prompt:       req.Prompt,
-		Options:      sseChoiceOptions(req.Options),
+	in := &sse.Interaction{
+		InteractionID: "int_" + flowID(), TurnID: "", ToolCallID: req.ToolCallID,
+		Kind: sse.InteractionApproval, Status: sse.InteractionPending, Revision: 0,
+		Title: plan.Title, Tool: plan.Tool, Operation: plan.Operation, Risk: plan.Risk,
+		Summary: plan.Summary, Command: plan.Command, Prompt: req.Prompt,
 		Verification: append([]string(nil), plan.Verification...),
 	}
+	for _, o := range req.Options {
+		in.Options = append(in.Options, sse.ChoiceOption{Label: o.Label, Value: o.Value})
+	}
 	if plan.Target != (tools.ApprovalTarget{}) {
-		data.Target = &sse.ApprovalTarget{
+		in.Target = &sse.Target{
 			Cluster: plan.Target.Cluster, Namespace: plan.Target.Namespace,
 			Group: plan.Target.Group, Version: plan.Target.Version,
 			Kind: plan.Target.Kind, Name: plan.Target.Name,
 		}
 	}
 	for _, change := range plan.Changes {
-		data.Changes = append(data.Changes, sse.ApprovalChange{
+		in.Changes = append(in.Changes, sse.Change{
 			Path: change.Path, Operation: change.Operation, Before: change.Before,
 			After: change.After, Description: change.Description,
 		})
 	}
 	for _, check := range plan.Checks {
-		data.Checks = append(data.Checks, sse.ApprovalCheck{
-			Name: check.Name, Status: check.Status, Message: check.Message,
-		})
+		in.Checks = append(in.Checks, sse.Check{Name: check.Name, Status: check.Status, Message: check.Message})
 	}
-	return data
+	return in
 }
 
-func sseChoiceOptions(options []agent.UserChoiceOption) []sse.ChoiceOption {
-	out := make([]sse.ChoiceOption, 0, len(options))
-	for _, o := range options {
-		out = append(out, sse.ChoiceOption{Label: o.Label, Value: o.Value})
-	}
-	return out
-}
-
-func (a *chatApprover) confirm(ctx context.Context, prompt string, options []agent.UserChoiceOption, approvalData *sse.ApprovalData) (string, error) {
+func (a *chatApprover) confirm(ctx context.Context, prompt string, options []agent.UserChoiceOption, interaction *sse.Interaction) (string, error) {
 	if a.skip || a.autoApprove {
 		return agent.ChoiceYes, nil
 	}
 	reply := a.respond
-	if a.confirmation != nil {
-		if approvalData == nil {
-			approvalData = &sse.ApprovalData{Prompt: prompt, Options: sseChoiceOptions(options)}
+	if interaction == nil {
+		interaction = &sse.Interaction{
+			InteractionID: "int_" + flowID(), Kind: sse.InteractionApproval,
+			Status: sse.InteractionPending, Prompt: prompt,
 		}
-		id, ch, done, err := a.confirmation(ctx, *approvalData)
+		for _, o := range options {
+			interaction.Options = append(interaction.Options, sse.ChoiceOption{Label: o.Label, Value: o.Value})
+		}
+	}
+	if a.confirmation != nil {
+		id, ch, done, err := a.confirmation(ctx, *interaction)
 		if err != nil {
 			return "", err
 		}
-
 		defer done()
 		reply = ch
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		approvalData.ID = id
-		if approvalData.Target == nil {
-			approvalData.Target = &sse.ApprovalTarget{}
+		interaction.InteractionID = id
+		if interaction.Target == nil {
+			interaction.Target = &sse.Target{}
 		}
-		approvalData.Target.Cluster = a.cluster
+		interaction.Target.Cluster = a.cluster
 	}
 	opts := make([]ChatChoiceOption, 0, len(options))
 	for _, o := range options {
 		opts = append(opts, ChatChoiceOption{Label: o.Label, Value: o.Value})
 	}
-	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: prompt, Options: opts, Approval: approvalData}}
-	if a.sink != nil {
-		data := sse.ApprovalData{Prompt: prompt}
-		if approvalData != nil {
-			data = *approvalData
-			data.Prompt = prompt
-		} else {
-			data.Options = sseChoiceOptions(options)
-		}
-		a.sink(sse.New(a.scope.session(), a.scope.turn(), a.scope.step(), sse.EventApprovalRequired, data))
-	}
+	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: prompt, Options: opts, Approval: interaction}}
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -1061,33 +1103,30 @@ func (a *chatApprover) confirm(ctx context.Context, prompt string, options []age
 	}
 }
 
-// RequestSecretValue 走同一条 choice 通道索取 Secret 值（secret=true）。
+// RequestSecretValue 走同一条 Interaction 通道索取 Secret 值（secret=true）。
 // 返回值只存在于内存与本次工具调用，不进事件流、会话文件与审计日志。
-func (a *chatApprover) RequestSecretValue(ctx context.Context, prompt string) (string, error) {
+func (a *chatApprover) RequestSecretValue(ctx context.Context, req agent.SecretValueRequest) (string, error) {
 	if a.skip || a.autoApprove {
 		return "", errors.New("非交互模式下无法向用户索取 Secret 值，请改用 $GENERATE 由 AegisOps 随机生成")
 	}
+	interaction := sse.Interaction{
+		InteractionID: req.InteractionID, Kind: sse.InteractionSecretRead,
+		Status: sse.InteractionPending, Prompt: req.Prompt, Secret: true, ToolCallID: req.ToolCallID,
+	}
 	reply := a.respond
-	var id string
 	if a.confirmation != nil {
-		key, ch, done, err := a.confirmation(ctx, sse.ApprovalData{Secret: true})
+		key, ch, done, err := a.confirmation(ctx, interaction)
 		if err != nil {
 			return "", err
 		}
 		defer done()
-		id = key
+		interaction.InteractionID = key
 		reply = ch
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 	}
-	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: prompt, Secret: true, Approval: &sse.ApprovalData{ID: id, Secret: true}}}
-	if a.sink != nil {
-		// 只下发 secret=true 标记，明文值从不进入事件流（AGENTS.md 红线）。
-		a.sink(sse.New(a.scope.session(), a.scope.turn(), a.scope.step(), sse.EventApprovalRequired, sse.ApprovalData{
-			ID: id, Prompt: prompt, Secret: true,
-		}))
-	}
+	a.events <- ChatEvent{Type: ChatEventChoice, Choice: &ChatChoice{Prompt: req.Prompt, Secret: true, Approval: &interaction}}
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()

@@ -13,6 +13,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
+	"github.com/k8s-ai/k8s-ai/internal/sse"
 	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
@@ -24,10 +25,72 @@ type fakeChat struct {
 	gotChoice          string
 	gotSkills          []string
 	gotSkipPermissions bool
+	// v2 展示事实源桩：发布后的事件与规范条目供 SSE/时间线读取。
+	sink   func(sse.Event)
+	seq    map[string]uint64
+	events map[string][]sse.Event
+	items  map[string][]sse.Item
+	turns  map[string]sse.TurnView
 }
 
 func newFakeChat(script ...service.ChatEvent) *fakeChat {
-	return &fakeChat{sessions: map[string]*session.Session{}, script: script}
+	return &fakeChat{
+		sessions: map[string]*session.Session{}, script: script,
+		seq: map[string]uint64{}, events: map[string][]sse.Event{},
+		items: map[string][]sse.Item{}, turns: map[string]sse.TurnView{},
+	}
+}
+
+func (f *fakeChat) SetSink(sink func(sse.Event)) { f.sink = sink }
+
+func (f *fakeChat) publish(sessionID, turnID string, typ sse.EventType, data any, item *sse.Item) {
+	f.mu.Lock()
+	f.seq[sessionID]++
+	e := sse.NewEvent(sessionID, turnID, typ, data)
+	e.Seq = f.seq[sessionID]
+	f.events[sessionID] = append(f.events[sessionID], e)
+	if item != nil {
+		item.ItemOrder = int64(len(f.items[sessionID]) + 1)
+		f.items[sessionID] = append(f.items[sessionID], *item)
+	}
+	if t, ok := f.turns[sessionID]; ok {
+		t.Revision = e.Seq
+		f.turns[sessionID] = t
+	}
+	sink := f.sink
+	f.mu.Unlock()
+	if sink != nil {
+		sink(e)
+	}
+}
+
+func (f *fakeChat) Snapshot(_ context.Context, sessionID string, _ int) (sse.Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	snap := sse.Snapshot{ProtocolVersion: 2, SessionID: sessionID, Cursor: f.seq[sessionID]}
+	if t, ok := f.turns[sessionID]; ok {
+		snap.Turns = append(snap.Turns, t)
+	}
+	snap.Items = append([]sse.Item(nil), f.items[sessionID]...)
+	return snap, nil
+}
+
+func (f *fakeChat) EventsAfter(_ context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []sse.Event
+	for _, e := range f.events[sessionID] {
+		if e.Seq > cursor && len(out) < limit {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeChat) Head(_ context.Context, sessionID string) (uint64, uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.seq[sessionID], 0, nil
 }
 
 func (f *fakeChat) GetOrCreateSession(id, _, _ string) (*session.Session, error) {
@@ -129,14 +192,57 @@ func (f *fakeChat) Chat(ctx context.Context, req service.ChatRequest, respond <-
 	f.gotSkills = append([]string{}, req.Skills...)
 	f.gotSkipPermissions = req.SkipPermissions
 	f.mu.Unlock()
+	turnID := req.TurnID
+	if turnID == "" {
+		turnID = "turn-test"
+	}
 	out := make(chan service.ChatEvent, len(f.script)+4)
+	finish := func(status sse.TurnStatus) {
+		f.mu.Lock()
+		t := f.turns[req.SessionID]
+		t.TurnID, t.SessionID, t.Status = turnID, req.SessionID, status
+		if t.Usage.TotalTokens == 0 {
+			t.Usage = sse.TokenUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}
+		}
+		f.turns[req.SessionID] = t
+		f.mu.Unlock()
+	}
 	go func() {
 		defer close(out)
+		f.mu.Lock()
+		f.turns[req.SessionID] = sse.TurnView{TurnID: turnID, SessionID: req.SessionID, Input: req.Query, Status: sse.TurnRunning}
+		f.mu.Unlock()
+		f.publish(req.SessionID, turnID, sse.EventTurnStatus, sse.TurnStatusData{TurnID: turnID, Status: sse.TurnRunning}, nil)
+		toolSeen := map[string]*sse.ToolCall{}
 		for _, e := range f.script {
 			if e.Type == service.ChatEventToolResponse && e.Tool != nil {
 				f.persistToolResponse(req.SessionID, e.Tool)
+				tool := toolSeen[e.Tool.Name]
+				if tool == nil {
+					tool = &sse.ToolCall{ToolCallID: "tc-" + e.Tool.Name, TurnID: turnID, Name: e.Tool.Name}
+				}
+				tool.Status = sse.ToolSucceeded
+				tool.Result = e.Tool.Result
+				tool.Summary = e.Tool.Summary
+				tool.Data = e.Tool.Data
+				f.publish(req.SessionID, turnID, sse.EventToolUpdated, sse.ToolUpdatedData{Tool: tool},
+					&sse.Item{Type: sse.ItemTool, Tool: tool})
 			}
 			if e.Type == service.ChatEventChoice {
+				interaction := &sse.Interaction{
+					InteractionID: "int-test", TurnID: turnID, Kind: sse.InteractionApproval,
+					Status: sse.InteractionPending, Prompt: "确认执行？",
+					Options: []sse.ChoiceOption{{Label: "确认执行", Value: "yes"}},
+				}
+				if e.Choice != nil && e.Choice.Approval != nil {
+					interaction.InteractionID = e.Choice.Approval.InteractionID
+					if interaction.InteractionID == "" {
+						interaction.InteractionID = "int-test"
+					}
+					interaction.Prompt = e.Choice.Prompt
+				}
+				f.publish(req.SessionID, turnID, sse.EventInteractionUpdated, sse.InteractionUpdatedData{Interaction: interaction},
+					&sse.Item{Type: sse.ItemInteraction, Interaction: interaction})
 				select {
 				case <-ctx.Done():
 					return
@@ -144,12 +250,42 @@ func (f *fakeChat) Chat(ctx context.Context, req service.ChatRequest, respond <-
 					f.mu.Lock()
 					f.gotChoice = c
 					f.mu.Unlock()
-					out <- service.ChatEvent{Type: service.ChatEventAnswer, Text: "approved:" + c}
+					interaction.Status = sse.InteractionApproved
+					f.publish(req.SessionID, turnID, sse.EventInteractionUpdated, sse.InteractionUpdatedData{Interaction: interaction},
+						&sse.Item{Type: sse.ItemInteraction, Interaction: interaction})
+					answer := "approved:" + c
+					msg := &sse.Message{
+						MessageID: "m-answer", TurnID: turnID, InvocationID: "i-answer", Role: "assistant",
+						Purpose: sse.PurposeFinal, Status: sse.MessageCompleted,
+						Parts: []sse.Part{{PartID: "p-answer", Type: sse.PartText, Text: answer, LastIndex: 1}},
+					}
+					f.publish(req.SessionID, turnID, sse.EventMessageCompleted, sse.MessageCompletedData{Message: msg},
+						&sse.Item{Type: sse.ItemMessage, Message: msg})
+					finish(sse.TurnDone)
+					f.publish(req.SessionID, turnID, sse.EventTurnStatus, sse.TurnStatusData{TurnID: turnID, Status: sse.TurnDone, FinalMessageID: msg.MessageID}, nil)
+					out <- service.ChatEvent{Type: service.ChatEventAnswer, Text: answer}
 					return
 				}
 			}
+			if e.Type == service.ChatEventToolCall && e.Tool != nil {
+				tool := &sse.ToolCall{ToolCallID: "tc-" + e.Tool.Name, TurnID: turnID, Name: e.Tool.Name, Status: sse.ToolRunning}
+				toolSeen[e.Tool.Name] = tool
+				f.publish(req.SessionID, turnID, sse.EventToolUpdated, sse.ToolUpdatedData{Tool: tool},
+					&sse.Item{Type: sse.ItemTool, Tool: tool})
+			}
+			if e.Type == service.ChatEventAnswer && e.Text != "" {
+				msg := &sse.Message{
+					MessageID: "m-answer", TurnID: turnID, InvocationID: "i-answer", Role: "assistant",
+					Purpose: sse.PurposeFinal, Status: sse.MessageCompleted,
+					Parts: []sse.Part{{PartID: "p-answer", Type: sse.PartText, Text: e.Text, LastIndex: 1}},
+				}
+				f.publish(req.SessionID, turnID, sse.EventMessageCompleted, sse.MessageCompletedData{Message: msg},
+					&sse.Item{Type: sse.ItemMessage, Message: msg})
+			}
 			out <- e
 		}
+		finish(sse.TurnDone)
+		f.publish(req.SessionID, turnID, sse.EventTurnStatus, sse.TurnStatusData{TurnID: turnID, Status: sse.TurnDone}, nil)
 	}()
 	return out, nil
 }
@@ -306,9 +442,12 @@ func TestCancelActiveRun(t *testing.T) {
 	}
 }
 
-// startSSE 打开一条 SSE 连接：收到 history 快照后通知 connected，继续读到 want 事件。
+// startSSE 打开一条协议 v2 SSE 连接：收到规范快照后通知 connected，继续读到 want。
 // 必须在独立 goroutine 中调用（阻塞式）。
 func startSSE(url string, connected chan<- struct{}, want string) (string, error) {
+	if !strings.Contains(url, "?") {
+		url += "?protocol=2"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -325,7 +464,7 @@ func startSSE(url string, connected chan<- struct{}, want string) (string, error
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		switch {
-		case strings.Contains(data, "history"):
+		case strings.Contains(data, "stream.snapshot"):
 			close(connected)
 		case strings.Contains(data, want):
 			return data, nil
@@ -335,6 +474,9 @@ func startSSE(url string, connected chan<- struct{}, want string) (string, error
 }
 
 func readHistory(url string) (string, error) {
+	if !strings.Contains(url, "?") {
+		url += "?protocol=2"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -350,7 +492,7 @@ func readHistory(url string) (string, error) {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
-		if strings.Contains(data, "history") {
+		if strings.Contains(data, "stream.snapshot") {
 			return data, nil
 		}
 	}
@@ -390,7 +532,7 @@ func TestStreamAndSendMessage(t *testing.T) {
 		if r.err != nil {
 			t.Fatal(r.err)
 		}
-		if !strings.Contains(r.data, "answer") {
+		if !strings.Contains(r.data, "message.completed") && !strings.Contains(r.data, "完成") {
 			t.Fatalf("SSE 数据异常: %s", r.data)
 		}
 	case <-time.After(5 * time.Second):

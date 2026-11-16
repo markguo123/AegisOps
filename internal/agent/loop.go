@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/session"
+	"github.com/k8s-ai/k8s-ai/internal/sse"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
@@ -36,8 +38,12 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 
 	// P1.8: 记录本轮运行轨迹（pending → running），供 service 层持久化回放。
 	a.stepSeq = 0
+	turnID := a.TurnID
+	if turnID == "" {
+		turnID = newID()
+	}
 	a.turn = &session.Turn{
-		ID:        newID(),
+		ID:        turnID,
 		SessionID: a.Session.ID,
 		UserID:    a.TurnUserID,
 		Status:    session.TurnPending,
@@ -47,12 +53,21 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	}
 	_ = a.turn.Start()
 	a.trace().TurnStarted(ctx, a.turn)
+	// 运行状态是 UI 的唯一依据：开始即 running/checking，等待与终态各自成事件。
+	a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityChecking, "")
 	// 任何退出路径都要广播一次 Turn 终态；显式 Complete/Fail 的路径不受影响。
 	defer func() {
 		if a.turn.Status == session.TurnRunning || a.turn.Status == session.TurnWaiting {
-			_ = a.turn.Fail("agent run ended without terminal turn state")
+			if errors.Is(ctx.Err(), context.Canceled) {
+				_ = a.turn.Cancel()
+			} else {
+				_ = a.turn.Fail("agent run ended without terminal turn state")
+			}
 		}
-		a.trace().TurnUpdated(ctx, a.turn)
+		// 平台输出由 service 将终态与模型历史原子提交后发布。
+		if a.Flow == nil {
+			a.trace().TurnUpdated(ctx, a.turn)
+		}
 	}()
 
 	mode := a.ToolCalling
@@ -95,10 +110,14 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		}
 		msgs, req.Messages = prepared, prepared
 		a.audit(ctx, audit.ActionLLMRequest, map[string]any{"mode": mode, "messages": len(msgs), "tools": len(req.Tools)})
+		// 每次模型调用有自己的消息与 invocation_id；正文先建立 part 再接收增量。
+		a.beginFlowMessage(ctx)
+		a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityGenerating, "")
 		resp, streamed, err := a.chatOnce(ctx, mode, req)
 		if err != nil {
 			// auto 模式：网关不支持原生 tools 时降级 shim 重试一次。
 			if mode == "native" && a.ToolCalling == "auto" && isUnsupportedToolsError(err) {
+				a.interruptFlowMessage(ctx, err)
 				a.completeStep(ctx, reason, false, "native tools unsupported; retrying in shim mode")
 				mode = "shim"
 				msgs[0] = llm.Message{Role: "system", Content: a.systemPromptFor("shim")}
@@ -106,6 +125,8 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			}
 			a.audit(ctx, audit.ActionLLMError, map[string]any{"error": err.Error()})
 			a.EmitCritical(Message{Source: SourceAgent, Type: MessageTypeError, Payload: err.Error()})
+			a.interruptFlowMessage(ctx, err)
+			a.flowNotice(ctx, sse.NoticeError, "MODEL_REQUEST_FAILED", err.Error())
 			a.completeStep(ctx, reason, false, err.Error())
 			a.turn.Token = toSessionUsage(usage)
 			_ = a.turn.Fail(err.Error())
@@ -117,6 +138,8 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		step, err := a.parseStep(mode, resp)
 		if err != nil {
 			a.EmitCritical(Message{Source: SourceAgent, Type: MessageTypeError, Payload: err.Error()})
+			a.completeFlowMessage(ctx, sse.PurposePending, "", err)
+			a.flowNotice(ctx, sse.NoticeError, "MODEL_RESPONSE_INVALID", err.Error())
 			a.completeStep(ctx, reason, false, err.Error())
 			a.turn.Token = toSessionUsage(usage)
 			_ = a.turn.Fail(err.Error())
@@ -126,6 +149,9 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			step.answer = a.redactSensitive(step.answer)
 			a.Session.AddMessage(session.Message{Role: "assistant", Type: "text", Content: step.answer})
 			a.completeStep(ctx, reason, true, a.redactSensitive(summarizeReason(mode, resp)))
+			// 最终回答：完整 Message 提交后由调用方提交 Turn 终态。
+			a.flowFinalMessageID = a.flowMsgID()
+			a.completeFlowMessage(ctx, sse.PurposeFinal, step.answer, nil)
 			// P1.8: 最终回答输出 Step。
 			response := a.beginStep(ctx, session.StepResponse, "", "")
 			a.completeStep(ctx, response, true, truncateText(step.answer, 240))
@@ -135,6 +161,14 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			return step.answer, usage, nil
 		}
 		a.completeStep(ctx, reason, true, summarizeReason(mode, resp))
+		// 有工具调用时本次模型调用正文收敛为 commentary（过程说明不消失）。
+		commentary := ""
+		if mode == "native" {
+			if streamed || resp != nil {
+				commentary = a.redactSensitive(strings.TrimSpace(resp.Content))
+			}
+		}
+		a.completeFlowMessage(ctx, sse.PurposeCommentary, commentary, nil)
 
 		// 记录 assistant 消息（native 带 tool_calls，shim 带 JSON）。
 		if mode == "native" {
@@ -171,6 +205,17 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			safeCallArgs := a.safeArguments(call.Arguments)
 			toolStep := a.beginStep(ctx, session.StepTool, call.Name, string(safeCallArgs))
 			started := time.Now()
+			risk := a.toolRisk(call)
+			// 工具卡从开始到结果共用同一个 tool_call_id；重试会产生新的 ID。
+			flowTool := &sse.ToolCall{
+				ToolCallID: call.ID, TurnID: a.turn.ID, StepID: toolStep.ID,
+				MessageID: a.flowLastMessageID, Name: call.Name,
+				Params: string(safeCallArgs), Status: sse.ToolStarted,
+				Risk: risk, StartedAt: &started,
+			}
+			a.flowTool(ctx, flowTool)
+			flowTool.Status = sse.ToolRunning
+			a.flowTool(ctx, flowTool)
 			if failedToolCalls[failureKey] > 0 && (!retryableFailures[failureKey] || failedToolCalls[failureKey] >= 2) {
 				// 同一工具、同一参数已经失败过，禁止原样重试；
 				// 让 LLM 更换参数或选择替代工具，避免耗尽工具调用预算。
@@ -201,7 +246,6 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			// P7.4：摘要/形态/耗时/风险在本次执行时一次性计算，事件流与落库共用。
 			summary := a.redactSensitive(tools.ToolSummary(tr.Text))
 			displayType := presentation.DisplayType
-			risk := a.toolRisk(call)
 			toolStep.ErrorCode = presentation.ErrorCode
 			a.completeStep(ctx, toolStep, ok, truncateText(a.redactSensitive(tr.Text), 240))
 			// P1.8: 工具结果观察 Step（成功 done / 失败 failed）。
@@ -221,6 +265,40 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			observe.ExitCode = presentation.ExitCode
 			observe.ErrorCode = presentation.ErrorCode
 			a.completeStep(ctx, observe, ok, truncateText(a.redactSensitive(tr.Text), 240))
+			// 工具卡终态：成功/失败/拒绝/未知 明确区分；失败工具不使整轮失败。
+			finished := time.Now()
+			flowTool.Status = sse.ToolSucceeded
+			if !ok {
+				switch {
+				case batchDeclined[call.ID], a.declinedResult(tr.Text):
+					flowTool.Status = sse.ToolDenied
+				case a.unknownWrite:
+					flowTool.Status = sse.ToolUnknown
+				default:
+					flowTool.Status = sse.ToolFailed
+				}
+			}
+			flowTool.Ok = &ok
+			flowTool.Result = truncateText(a.redactSensitive(tr.Text), 2000)
+			flowTool.Summary = summary
+			flowTool.DisplayType = displayType
+			flowTool.DurationMs = durationMs
+			flowTool.Risk = risk
+			flowTool.Command = safeCommand
+			flowTool.Stdout = safeStdout
+			flowTool.Stderr = safeStderr
+			flowTool.ExitCode = presentation.ExitCode
+			flowTool.ErrorCode = presentation.ErrorCode
+			flowTool.Data = safeData
+			flowTool.FinishedAt = &finished
+			if !ok {
+				if presentation.ErrorCode == "" {
+					flowTool.Error = "工具执行失败"
+				} else {
+					flowTool.Error = presentation.ErrorCode
+				}
+			}
+			a.flowTool(ctx, flowTool)
 			if !ok && (toolExecuted || presentation.ErrorCode == tools.ErrorRBACDenied || presentation.ErrorCode == tools.ErrorScopeDenied || presentation.ErrorCode == tools.ErrorAuthentication) {
 				failedToolCalls[failureKey]++
 			}
@@ -333,6 +411,10 @@ func (a *Agent) chatOnce(ctx context.Context, mode string, req llm.ChatRequest) 
 		}
 		received = true
 		pending.WriteString(delta)
+		// 真实增量：安全模式下逐段进入同一输出管道；敏感值在场时抑制实时释放。
+		if !a.hasSensitiveValues() {
+			a.flowDelta(ctx, a.flowTextPartID(), delta)
+		}
 	})
 	if err != nil && !received {
 		// 流式失败且未发出任何增量：回退非流式 Chat（自带重试），避免双倍 LLM 调用。
@@ -365,6 +447,9 @@ func (a *Agent) chatOnceTyped(ctx context.Context, sc llm.TypedStreamClient, req
 			think.WriteString(ev.Text)
 			if !a.hasSensitiveValues() {
 				a.Emit(Message{Source: SourceModel, Type: MessageTypeReasoningDelta, Payload: ev.Text})
+				// reasoning 为独立 part，仅在提供方实际返回可展示内容时创建。
+				partID := a.ensureReasoningPart(ctx)
+				a.flowDelta(ctx, partID, ev.Text)
 			}
 		case llm.StreamContentDelta:
 			if ev.Text == "" {
@@ -372,6 +457,9 @@ func (a *Agent) chatOnceTyped(ctx context.Context, sc llm.TypedStreamClient, req
 			}
 			received = true
 			pending.WriteString(ev.Text)
+			if !a.hasSensitiveValues() {
+				a.flowDelta(ctx, a.flowTextPartID(), ev.Text)
+			}
 		}
 	})
 	// 思考内容按“每轮 LLM 调用一条消息”就地落库：位置先于本轮的思考终态，
@@ -923,6 +1011,10 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			}
 			prompt += "\n\n是否执行？"
 			plan := a.approvalPlan(t, call, detail, clusterAccessChecked)
+			// 统一 Interaction：审批卡与问题卡同源展示，答复只代表展示状态，
+			// 写权限仍由原审批门禁决定。
+			interaction := a.newApprovalInteraction(plan, call.ID)
+			a.flowInteraction(ctx, interaction)
 			// P1.8: 审批 Step（挂起到等待用户确认）。
 			approvalStep := a.beginStep(ctx, session.StepApproval, call.Name, "")
 			a.waitStep(ctx, approvalStep)
@@ -943,12 +1035,23 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 					{Label: "拒绝", Value: ChoiceNo},
 				}
 			}
-			choice, err := a.confirmApproval(ctx, prompt, approvalOptions, plan)
+			choice, err := a.confirmApproval(ctx, prompt, approvalOptions, plan, call.ID, interaction.InteractionID)
+			// 审批返回后（无论结果）本轮继续运行，等待态必须显式结束。
+			a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
 			if err != nil {
+				interaction.Status = sse.InteractionCanceled
+				a.flowInteraction(ctx, interaction)
 				a.audit(ctx, audit.ActionApprovalDenied, map[string]any{"name": call.Name, "reason": err.Error()})
 				a.completeStep(ctx, approvalStep, false, err.Error())
 				return tools.ResultError("approval error: " + err.Error())
 			}
+			if choice == ChoiceNo {
+				interaction.Status = sse.InteractionRejected
+			} else {
+				interaction.Status = sse.InteractionApproved
+			}
+			interaction.Answer = choice
+			a.flowInteraction(ctx, interaction)
 			switch choice {
 			case ChoiceYesNoAskAgain:
 				a.completeStep(ctx, approvalStep, true, "approved_forever")
@@ -980,7 +1083,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		}
 	}
 	// 审批通过后才索取 Secret 明文值（三期 R4.5）：值只活在 execCtx 里，不进历史。
-	execCtx, secretErr := a.collectSecretValues(ctx, t, call.Arguments)
+	execCtx, secretErr := a.collectSecretValues(ctx, t, call.ID, call.Arguments)
 	if secretErr != "" {
 		return tools.ResultError(secretErr)
 	}
@@ -993,6 +1096,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			return tools.ResultError(err.Error())
 		}
 	}
+	a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
 	tr, err := t.Execute(execCtx, call.Arguments)
 	if err != nil {
 		tr = tools.ResultError(err.Error())
@@ -1019,9 +1123,14 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	return tr
 }
 
-func (a *Agent) confirmApproval(ctx context.Context, prompt string, options []UserChoiceOption, plan tools.ApprovalPlan) (string, error) {
+func (a *Agent) confirmApproval(ctx context.Context, prompt string, options []UserChoiceOption, plan tools.ApprovalPlan, toolCallID, interactionID string) (string, error) {
+	// 等待审批是运行状态的一部分，与“连接状态”分离由前端独立展示。
+	a.flowTurnStatus(ctx, sse.TurnWaiting, sse.WaitApproval, "", "")
 	if structured, ok := a.Approver.(StructuredApprover); ok {
-		return structured.ConfirmStructured(ctx, ApprovalRequest{Prompt: prompt, Options: options, Plan: plan})
+		return structured.ConfirmStructured(ctx, ApprovalRequest{
+			Prompt: prompt, Options: options, Plan: plan,
+			ToolCallID: toolCallID, InteractionID: interactionID,
+		})
 	}
 	return a.Approver.Confirm(ctx, prompt, options)
 }
@@ -1102,7 +1211,7 @@ func (a *Agent) scopeCheck(ctx context.Context, call llm.ToolCall) error {
 // 这是 Secret 值进入执行器的唯一入口：值只存在于返回的 ctx 里，随本次工具调用结束消失，
 // 不进会话文件、审计、LLM 请求，也不缓存进 Session。交互通道不具备安全取值能力时直接拒绝，
 // 宁可让模型改用 $GENERATE，也不让明文值绕道进入对话历史。
-func (a *Agent) collectSecretValues(ctx context.Context, t tools.Tool, input json.RawMessage) (context.Context, string) {
+func (a *Agent) collectSecretValues(ctx context.Context, t tools.Tool, toolCallID string, input json.RawMessage) (context.Context, string) {
 	planner, ok := t.(tools.SecretValuePlanner)
 	if !ok {
 		return ctx, ""
@@ -1118,20 +1227,46 @@ func (a *Agent) collectSecretValues(ctx context.Context, t tools.Tool, input jso
 	values := make(map[tools.SecretValueKey]string, len(pending))
 	for _, item := range pending {
 		a.audit(ctx, audit.ActionSecretValueRequested, map[string]any{"tool": t.Name(), "key": item.Key})
-		value, err := approver.RequestSecretValue(ctx, item.Prompt)
+		interaction := &sse.Interaction{
+			InteractionID: "int_" + newID(), TurnID: a.turn.ID, ToolCallID: toolCallID,
+			Kind: sse.InteractionSecretRead, Status: sse.InteractionPending,
+			Prompt: a.redactSensitive(item.Prompt), Secret: true,
+		}
+		a.flowInteraction(ctx, interaction)
+		a.flowTurnStatus(ctx, sse.TurnWaiting, sse.WaitSecret, "", "")
+		value, err := approver.RequestSecretValue(ctx, SecretValueRequest{
+			Prompt: item.Prompt, InteractionID: interaction.InteractionID, ToolCallID: toolCallID,
+		})
+		a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
 		if err != nil {
+			interaction.Status = sse.InteractionCanceled
+			a.flowInteraction(ctx, interaction)
 			return ctx, "Secret 取值失败：" + err.Error()
 		}
 		if strings.TrimSpace(value) == "" {
+			interaction.Status = sse.InteractionRejected
+			a.flowInteraction(ctx, interaction)
 			a.audit(ctx, audit.ActionApprovalDenied, map[string]any{
 				"tool": t.Name(), "key": item.Key, "reason": "secret_value_not_provided",
 			})
 			return ctx, "USER_DECLINED_SECRET_VALUE: 用户未提供 " + item.Key.String() +
 				" 的值，本次创建已取消。不要重复追问同一个值；可改用 $GENERATE 生成随机值，或与用户确认下一步方案"
 		}
+		interaction.Status = sse.InteractionAnswered
+		a.flowInteraction(ctx, interaction)
 		values[item.Key] = value
 	}
 	return tools.WithSecretValues(ctx, values), ""
+}
+
+// declinedResult 判断工具结果是否属于“用户拒绝/未提供”而不是执行失败。
+func (a *Agent) declinedResult(text string) bool {
+	for _, marker := range []string{"USER_EXPLICITLY_DECLINED", "DECLINED_TOO_MANY_TIMES", "USER_DECLINED_SECRET_VALUE"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // formatDeclinedMsg 格式化第一次/第二次"被用户拒绝"时回传给 LLM 的文本。

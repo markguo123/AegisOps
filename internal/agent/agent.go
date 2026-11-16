@@ -13,6 +13,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/session"
+	"github.com/k8s-ai/k8s-ai/internal/sse"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
@@ -28,6 +29,10 @@ type ApprovalRequest struct {
 	Prompt  string
 	Options []UserChoiceOption
 	Plan    tools.ApprovalPlan
+	// ToolCallID 关联发起本次审批的工具调用，Interaction 展示与工具卡同源。
+	ToolCallID string
+	// InteractionID 是本轮审批交互的稳定 ID（由 Agent 生成，展示与答复共用）。
+	InteractionID string
 }
 
 // StructuredApprover 是 Approver 的可选能力。未实现时 Agent 回退普通 Confirm，
@@ -36,11 +41,18 @@ type StructuredApprover interface {
 	ConfirmStructured(ctx context.Context, req ApprovalRequest) (string, error)
 }
 
+// SecretValueRequest 是一次 Secret 取值交互的公开描述（不含明文值）。
+type SecretValueRequest struct {
+	Prompt        string
+	InteractionID string
+	ToolCallID    string
+}
+
 // SecretValueApprover 是 Approver 的可选接口：审批通过后向用户索取单个 Secret 明文值
 // （三期 R4.5）。值只在内存与一次提交里存在，绝不写进会话、审计与 LLM 请求。
 type SecretValueApprover interface {
 	// RequestSecretValue 提问并等待用户输入；返回空串表示用户放弃（该次创建取消）。
-	RequestSecretValue(ctx context.Context, prompt string) (string, error)
+	RequestSecretValue(ctx context.Context, req SecretValueRequest) (string, error)
 }
 
 // Options 是 Agent 装配参数。
@@ -54,8 +66,13 @@ type Options struct {
 	Recorder      audit.Recorder
 	// Tracer 观察 Agent 运行生命周期（P1.8），service 层用它持久化 Turn/Step；nil 时跳过。
 	Tracer Tracer
+	// Flow 是语义输出出口（方案 25）：事件在产生时绑定稳定 ID，由 service
+	// 统一安全处理、提交与广播。nil 时只保留 CLI 消息总线输出。
+	Flow Flow
 	// TurnUserID 记录本轮 Turn 归属的产品内用户（P1.5），可为空。
 	TurnUserID string
+	// TurnID 是调用方预分配的 Turn ID（会话 API 202 响应需要）；空则由 Agent 生成。
+	TurnID string
 	// AccessScope 是本次运行的 Kubernetes 资源授权范围，工具执行前强制校验。
 	AccessScope *tools.AccessScope
 	// SkillContext 是命中用户自定义 procedural Skill 的方法论附录（P3.8.4），
@@ -98,7 +115,9 @@ type Agent struct {
 	Recorder           audit.Recorder
 	ApprovalPolicy     *approval.Policy
 	Tracer             Tracer
+	Flow               Flow
 	TurnUserID         string
+	TurnID             string
 	AccessScope        *tools.AccessScope
 	SkillContext       string
 
@@ -119,6 +138,11 @@ type Agent struct {
 	turn            *session.Turn
 	stepSeq         int
 	sensitiveValues map[string]struct{}
+	// flowMsg 是本次模型调用正在输出的消息；flowLastMessageID 记录最近一条
+	// 已收口消息，工具卡据此绑定发起它的消息。
+	flowMsg           *sse.Message
+	flowLastMessageID string
+	flowFinalMessageID string
 }
 
 // New 创建 Agent 实例并应用默认值。
@@ -137,7 +161,9 @@ func New(opts Options) *Agent {
 		Recorder:        opts.Recorder,
 		ApprovalPolicy:  opts.ApprovalPolicy,
 		Tracer:          opts.Tracer,
+		Flow:            opts.Flow,
 		TurnUserID:      opts.TurnUserID,
+		TurnID:          opts.TurnID,
 		AccessScope:     opts.AccessScope,
 		SkillContext:    opts.SkillContext,
 		MaxIterations:   opts.MaxIterations,

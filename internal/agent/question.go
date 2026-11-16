@@ -9,6 +9,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/model"
+	"github.com/k8s-ai/k8s-ai/internal/sse"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
@@ -51,6 +52,17 @@ func (t *questionTool) Execute(ctx context.Context, input json.RawMessage) (tool
 		return tools.ResultError(err.Error()), nil
 	}
 	defer p.Close()
+	// 统一 Interaction 外壳：问题卡与审批卡同源展示，但选择不授予写权限。
+	options := make([]sse.ChoiceOption, 0, len(q.Options))
+	for _, o := range q.Options {
+		options = append(options, sse.ChoiceOption{Label: o.Label, Value: o.ID, Impact: o.Impact, Recommended: o.Recommended})
+	}
+	interaction := &sse.Interaction{
+		InteractionID: q.ID, TurnID: q.TurnID, Kind: sse.InteractionQuestion,
+		Status: sse.InteractionPending, Prompt: q.Question, Options: options,
+		ExpiresAt: &q.ExpiresAt,
+	}
+	a.flowInteraction(ctx, interaction)
 	if a.QuestionEvent != nil {
 		a.QuestionEvent("question.required", a.safeStructured(q))
 	}
@@ -60,9 +72,11 @@ func (t *questionTool) Execute(ctx context.Context, input json.RawMessage) (tool
 		wait, cancel := context.WithDeadline(ctx, q.ExpiresAt)
 		defer cancel()
 		_ = a.turn.Wait()
+		a.flowTurnStatus(ctx, sse.TurnWaiting, sse.WaitQuestion, "", "")
 		a.trace().TurnUpdated(ctx, a.turn)
 		answer, err = a.Ask(wait, q)
 		_ = a.turn.Resume()
+		a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityChecking, "")
 		a.trace().TurnUpdated(ctx, a.turn)
 		if err != nil {
 			answer = decision.Answer{ID: q.ID, SessionID: q.SessionID, TurnID: q.TurnID, Status: "canceled"}
@@ -75,10 +89,33 @@ func (t *questionTool) Execute(ctx context.Context, input json.RawMessage) (tool
 			answer.OptionID = ""
 		}
 	}
+	// 交互终态与 Turn 状态分开表达：answered 永远不等于审批 approved。
+	interaction.Status = interactionStatusOf(answer.Status)
+	interaction.Answer = a.redactSensitive(answer.OptionID)
+	if interaction.Answer == "" && answer.Status == "text" {
+		interaction.Answer = a.redactSensitive(answer.Text)
+	}
+	a.flowInteraction(ctx, interaction)
 	if a.QuestionEvent != nil {
 		a.QuestionEvent("question.resolved", a.safeStructured(map[string]any{"question": q, "answer": answer}))
 	}
 	a.audit(ctx, "decision.response", map[string]any{"question_id": q.ID, "turn_id": q.TurnID, "status": answer.Status})
 	a.decisionUnresolved = answer.Status != "selected" && answer.Status != "text"
 	return tools.ToolResult{Data: map[string]any{"question": q, "answer": answer}, Text: "用户决策：" + answer.Status}, nil
+}
+
+// interactionStatusOf 把决策答案状态映射为公开交互状态。
+func interactionStatusOf(status string) sse.InteractionStatus {
+	switch status {
+	case "selected", "text":
+		return sse.InteractionAnswered
+	case "skipped":
+		return sse.InteractionSkipped
+	case "timed_out":
+		return sse.InteractionTimedOut
+	case "canceled":
+		return sse.InteractionCanceled
+	default:
+		return sse.InteractionInvalidated
+	}
 }

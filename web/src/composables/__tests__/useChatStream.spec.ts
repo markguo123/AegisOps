@@ -3,6 +3,61 @@ import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick } from 'vue'
 
 import { useChatStream } from '@/composables/useChatStream'
+import type { ChatSnapshot } from '@/api/chat'
+
+describe('Chat connection watchdog', () => {
+  it('heartbeats keep the connection alive beyond 45 seconds', async () => {
+    vi.useFakeTimers()
+    let push!: ReadableStreamDefaultController<Uint8Array>
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit = {}) => {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          push = controller
+          init.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
+        },
+      }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { stream, unmount } = mountStream()
+    try {
+      void stream.connect('s1')
+      await vi.advanceTimersByTimeAsync(1)
+      for (let i = 0; i < 5; i += 1) {
+        await vi.advanceTimersByTimeAsync(15_000)
+        push.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
+        await vi.advanceTimersByTimeAsync(1)
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(stream.status.value).toBe('open')
+    } finally {
+      unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a silent connection opens a replacement after the watchdog expires', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit = {}) => {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          init.signal?.addEventListener('abort', () => controller.close(), { once: true })
+        },
+      }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { stream, unmount } = mountStream()
+    try {
+      void stream.connect('s1')
+      await vi.advanceTimersByTimeAsync(45_001)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(stream.status.value).toBe('open')
+    } finally {
+      unmount()
+      vi.useRealTimers()
+    }
+  })
+})
 
 /** 在真实组件实例内使用组合式函数（对齐运行时生命周期，避免裸调用告警）。 */
 function mountStream() {
@@ -32,15 +87,68 @@ function sseResponse(frames: unknown[], closeAfter = true): Response {
   return new Response(stream, { status: 200 })
 }
 
-describe('useChatStream（P2.5 会话流生命周期）', () => {
-  it('以历史快照为断点重建，并把实时事件按序追加', async () => {
+function snapshot(cursor = 0): ChatSnapshot {
+  return {
+    protocol_version: 2,
+    session_id: 's1',
+    cursor,
+    replay_floor: 0,
+    turns: [
+      {
+        turn_id: 't1',
+        session_id: 's1',
+        input: '诊断',
+        status: 'running',
+        usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+        revision: cursor,
+      },
+    ],
+    items: [],
+  }
+}
+
+function deltaEvent(seq: number, delta: string, index = 0): unknown {
+  return {
+    protocol_version: 2,
+    session_id: 's1',
+    turn_id: 't1',
+    event_type: 'message.delta',
+    seq,
+    timestamp: new Date().toISOString(),
+    data: { message_id: 'm1', part_id: 'p1', index, delta },
+  }
+}
+
+describe('useChatStream（协议 v2 生命周期）', () => {
+  it('安装规范快照并按 seq 归并事件', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
         sseResponse(
           [
-            { type: 'history', sessionId: 's1', state: 'idle', messages: [], token: { total_tokens: 5 } },
-            { event_type: 'turn.started', data: { input: '诊断' } },
+            { event_type: 'stream.snapshot', data: snapshot(1) },
+            {
+              protocol_version: 2,
+              session_id: 's1',
+              turn_id: 't1',
+              event_type: 'message.started',
+              seq: 2,
+              timestamp: new Date().toISOString(),
+              data: {
+                message: {
+                  message_id: 'm1',
+                  turn_id: 't1',
+                  invocation_id: 'i1',
+                  role: 'assistant',
+                  purpose: 'pending',
+                  status: 'streaming',
+                  parts: [{ part_id: 'p1', type: 'text', last_index: 0 }],
+                  item_order: 1,
+                  revision: 2,
+                },
+              },
+            },
+            deltaEvent(3, '你好'),
           ],
           false,
         ),
@@ -48,23 +156,50 @@ describe('useChatStream（P2.5 会话流生命周期）', () => {
     )
     const { stream, unmount } = mountStream()
     void stream.connect('s1')
-    await vi.waitFor(() => expect(stream.events.value.length).toBe(1))
+    await vi.waitFor(() => expect(stream.items.value).toHaveLength(1))
 
     expect(stream.status.value).toBe('open')
-    expect(stream.history.value?.token?.total_tokens).toBe(5)
-    expect(stream.events.value[0].event_type).toBe('turn.started')
+    expect(stream.turns.value[0].turn_id).toBe('t1')
+    expect(stream.token.value.total_tokens).toBe(1)
+    const item = stream.items.value[0]
+    expect(item.type).toBe('message')
+    if (item.type === 'message') {
+      expect(item.message.parts[0].text).toBe('你好')
+      expect(item.message.parts[0].last_index).toBe(1)
+    }
     unmount()
   })
 
-  it('重连回放后按 seq 去重，避免同一工具事件生成重复卡片', async () => {
+  it('重复 seq 忽略，不重复追加分片', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
         sseResponse(
           [
-            { type: 'history', sessionId: 's1', state: 'running', messages: [], token: null },
-            { event_type: 'tool.started', seq: 7, data: { tool: 'kubectl' } },
-            { event_type: 'tool.started', seq: 7, data: { tool: 'kubectl' } },
+            { event_type: 'stream.snapshot', data: { ...snapshot(1), items: [] } },
+            {
+              protocol_version: 2,
+              session_id: 's1',
+              turn_id: 't1',
+              event_type: 'message.started',
+              seq: 2,
+              timestamp: new Date().toISOString(),
+              data: {
+                message: {
+                  message_id: 'm1',
+                  turn_id: 't1',
+                  invocation_id: 'i1',
+                  role: 'assistant',
+                  purpose: 'pending',
+                  status: 'streaming',
+                  parts: [{ part_id: 'p1', type: 'text', last_index: 0 }],
+                  item_order: 1,
+                  revision: 2,
+                },
+              },
+            },
+            deltaEvent(3, '甲'),
+            deltaEvent(3, '甲'),
           ],
           false,
         ),
@@ -72,10 +207,65 @@ describe('useChatStream（P2.5 会话流生命周期）', () => {
     )
     const { stream, unmount } = mountStream()
     void stream.connect('s1')
-    await vi.waitFor(() => expect(stream.events.value.length).toBe(1))
+    await vi.waitFor(() => expect(stream.items.value).toHaveLength(1))
+    await nextTick()
+    const item = stream.items.value[0]
+    if (item.type === 'message') {
+      expect(item.message.parts[0].text).toBe('甲')
+    }
+    unmount()
+  })
 
-    expect(stream.events.value[0].seq).toBe(7)
-    expect(stream.events.value).toHaveLength(1)
+  it('seq 缺口语义事件触发重新同步而不是追加到错误对象', async () => {
+    let calls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls += 1
+        if (calls === 1) {
+          return sseResponse(
+            [{ event_type: 'stream.snapshot', data: snapshot(1) }, deltaEvent(9, '缺口的增量')],
+            false,
+          )
+        }
+        return sseResponse(
+          [
+            { event_type: 'stream.snapshot', data: snapshot(1) },
+            {
+              protocol_version: 2,
+              session_id: 's1',
+              turn_id: 't1',
+              event_type: 'message.started',
+              seq: 2,
+              timestamp: new Date().toISOString(),
+              data: {
+                message: {
+                  message_id: 'm1',
+                  turn_id: 't1',
+                  invocation_id: 'i1',
+                  role: 'assistant',
+                  purpose: 'pending',
+                  status: 'streaming',
+                  parts: [{ part_id: 'p1', type: 'text', last_index: 0 }],
+                  item_order: 1,
+                  revision: 2,
+                },
+              },
+            },
+            deltaEvent(3, '补齐的增量'),
+          ],
+          false,
+        )
+      }),
+    )
+    const { stream, unmount } = mountStream()
+    void stream.connect('s1')
+    await vi.waitFor(() => expect(calls).toBeGreaterThan(1))
+    await vi.waitFor(() => expect(stream.items.value).toHaveLength(1))
+    const item = stream.items.value[0]
+    if (item.type === 'message') {
+      expect(item.message.parts[0].text).toBe('补齐的增量')
+    }
     unmount()
   })
 
@@ -87,7 +277,7 @@ describe('useChatStream（P2.5 会话流生命周期）', () => {
         if (init.signal) {
           signals.push(init.signal)
         }
-        return sseResponse([{ event_type: 'turn.started', data: { input: 'x' } }], false)
+        return sseResponse([{ event_type: 'stream.snapshot', data: snapshot(0) }], false)
       }),
     )
     const { stream, unmount } = mountStream()
@@ -98,18 +288,17 @@ describe('useChatStream（P2.5 会话流生命周期）', () => {
 
     expect(signals[0].aborted).toBe(true)
     expect(stream.sessionId.value).toBe('s2')
-    expect(stream.events.value.length).toBeLessThanOrEqual(1)
     unmount()
   })
 
-  it('流被服务端关闭后进入重连退避（指数退避 + 重连计数）', async () => {
+  it('429/500 进入重连退避，401 停止重试', async () => {
     vi.useFakeTimers()
     let calls = 0
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
         calls += 1
-        return sseResponse([], true)
+        return new Response('', { status: 500 })
       }),
     )
     const { stream, unmount } = mountStream()
@@ -119,31 +308,15 @@ describe('useChatStream（P2.5 会话流生命周期）', () => {
 
     expect(stream.status.value).toBe('reconnecting')
     expect(stream.reconnectAttempt.value).toBeGreaterThanOrEqual(1)
-    expect(stream.error.value).toContain('重连')
+    stream.stop()
+
+    calls = 0
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
+    void stream.connect('s1')
+    await vi.waitFor(() => expect(stream.status.value).toBe('closed'))
+    expect(stream.error.value).toContain('登录')
     stream.stop()
     vi.useRealTimers()
-    unmount()
-  })
-
-  it('stop() 复位为 idle 并中止连接', async () => {
-    const signals: AbortSignal[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_url: string, init: RequestInit = {}) => {
-        if (init.signal) {
-          signals.push(init.signal)
-        }
-        return sseResponse([], false)
-      }),
-    )
-    const { stream, unmount } = mountStream()
-    void stream.connect('s1')
-    await vi.waitFor(() => expect(signals.length).toBe(1))
-    stream.stop()
-
-    expect(signals[0].aborted).toBe(true)
-    expect(stream.status.value).toBe('idle')
-    expect(stream.sessionId.value).toBeNull()
     unmount()
   })
 })

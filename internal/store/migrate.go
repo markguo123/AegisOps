@@ -13,7 +13,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 12
+const schemaVersion = 13
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -68,6 +68,109 @@ var migrations = []migration{
 	{version: 10, name: "external user identities", up: migrateV10},
 	{version: 11, name: "two platform roles and report coverage", up: migrateV11},
 	{version: 12, name: "cluster identity and last check metadata", up: migrateV12},
+	{version: 13, name: "chat display entities and persistent event log", up: migrateV13},
+}
+
+// schemaV13 是 Chat 展示事实源（方案 25 §5.2）。所有会话共用一套表：
+// chat_items 存规范对象（版本化载荷），chat_chunks 存高频文本追加块，
+// chat_events 存持久事件日志（session_id+seq 唯一），chat_stream_heads 存
+// 会话水位/回放下限，chat_commits 登记提交命令 ID 以支持不明确结果的重试。
+var schemaV13 = []tableSpec{
+	{
+		name: "chat_items",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "item_id", kind: colText},
+			{name: "item_type", kind: colText},
+			{name: "turn_id", kind: colText, def: "''"},
+			{name: "item_order", kind: colInt, def: "0"},
+			{name: "revision", kind: colInt, def: "0"},
+			{name: "payload", kind: colLong},
+			{name: "updated_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "item_id"},
+	},
+	{
+		name: "chat_chunks",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "message_id", kind: colText},
+			{name: "part_id", kind: colText},
+			{name: "idx", kind: colInt},
+			{name: "text", kind: colLong},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "message_id", "part_id", "idx"},
+	},
+	{
+		name: "chat_events",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "seq", kind: colInt},
+			{name: "event_type", kind: colText},
+			{name: "turn_id", kind: colText, def: "''"},
+			{name: "payload", kind: colLong},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "seq"},
+	},
+	{
+		name: "chat_stream_heads",
+		cols: []column{
+			{name: "session_id", kind: colText, primary: true},
+			{name: "head", kind: colInt, def: "0"},
+			{name: "replay_floor", kind: colInt, def: "0"},
+			{name: "protocol_version", kind: colInt, def: "2"},
+			{name: "epoch", kind: colInt, def: "0"},
+			{name: "updated_at", kind: colTime},
+		},
+	},
+	{
+		name: "chat_commits",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "command_id", kind: colText},
+			{name: "first_seq", kind: colInt, def: "0"},
+			{name: "last_seq", kind: colInt, def: "0"},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "command_id"},
+	},
+	{
+		name: "chat_legacy_migrations",
+		cols: []column{
+			{name: "session_id", kind: colText, primary: true},
+			{name: "source_digest", kind: colText, def: "''"},
+			{name: "item_count", kind: colInt, def: "0"},
+			{name: "migrated_at", kind: colTime},
+		},
+	},
+}
+
+var schemaV13Indexes = []indexSpec{
+	{name: "idx_chat_items_order", table: "chat_items", cols: "session_id, item_order"},
+	{name: "idx_chat_items_turn", table: "chat_items", cols: "session_id, turn_id"},
+	{name: "idx_chat_chunks_message", table: "chat_chunks", cols: "session_id, message_id"},
+	{name: "idx_chat_events_created", table: "chat_events", cols: "session_id, created_at"},
+	{name: "idx_chat_commits_created", table: "chat_commits", cols: "created_at"},
+}
+
+// migrateV13 建 Chat 展示实体与持久事件日志表（SQL 由 dialect 按驱动渲染）。
+func migrateV13(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, t := range schemaV13 {
+		if _, err := tx.ExecContext(ctx, d.createTable(t)); err != nil {
+			return fmt.Errorf("create table %s: %w", t.name, err)
+		}
+	}
+	for _, idx := range schemaV13Indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(idx.name, idx.table, idx.cols)); err != nil {
+			if d.isDuplicateIndexErr(err) {
+				continue
+			}
+			return fmt.Errorf("create index %s: %w", idx.name, err)
+		}
+	}
+	return nil
 }
 
 // migrateV12 给 clusters 补集群身份依据与最近连测元数据（P12.3/P12.4）。

@@ -56,11 +56,14 @@ function cellTone(key: string, value: unknown): StatusTone | null {
 }
 
 const columns = computed<string[]>(() => {
-  const records = (props.items ?? []).slice(0, 6).filter(
+  // 工具可能声明 displayType=table 但返回标量/对象：这里按空表降级，
+  // 不让格式化层因载荷形态不符而抛错（渲染层只负责展示，不改变语义）。
+  const source = Array.isArray(props.items) ? props.items : []
+  const records = source.slice(0, 6).filter(
     (item): item is Record<string, unknown> =>
       !!item && typeof item === 'object' && !Array.isArray(item),
   )
-  const total = props.items.length
+  const total = source.length
 
   const configured = props.kind ? TL_LIST_COLUMNS[props.kind] : undefined
   if (configured) {

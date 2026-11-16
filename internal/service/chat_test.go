@@ -53,7 +53,7 @@ func TestChatServicePersistsReasoningInRoundOrder(t *testing.T) {
 		{reasoning: []string{"汇总异常项"}, content: "## 体检报告\n\n发现 1 个异常项"},
 	}}
 	col := &collector{}
-	svc := testChatServiceWithSink(t, fl, col)
+	svc := testChatServiceWithFlow(t, fl, col)
 	if _, err := svc.GetOrCreateSession("hist-order", "", "qwen-plus"); err != nil {
 		t.Fatal(err)
 	}

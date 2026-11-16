@@ -4,6 +4,7 @@
 package sessionapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,12 +73,29 @@ func (p requestPrincipal) canManageAllSessions() bool {
 	return p.Role != nil && permission.HasPermission(p.Role.Permissions, permission.ChatManageAll)
 }
 
-// sseEmitter 是可为 ChatService 挂载统一事件广播的可选接口。
+// sseEmitter 是可为 ChatService 挂载提交后广播与终止帧钩子的可选接口。
 type sseEmitter interface {
 	SetSink(sink func(sse.Event))
 }
 
-// Broadcaster 每会话一个，SSE 消息扇出（设计借鉴 kubectl-ai）。
+type fatalEmitter interface {
+	SetFatal(fn func(sessionID string, data sse.FatalData))
+}
+
+// chatDisplay 是 ChatService 的可选展示读取能力（规范快照与游标补齐）。
+type chatDisplay interface {
+	Snapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error)
+	EventsAfter(ctx context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error)
+	Head(ctx context.Context, sessionID string) (head, floor uint64, err error)
+}
+
+// chatMigrator 把旧会话按需转换为规范展示对象（幂等）。
+type chatMigrator interface {
+	EnsureChatDisplay(ctx context.Context, sessionID string) error
+}
+
+// Broadcaster 每会话一个：只负责唤醒与扇出“已提交”的 SSE 帧。
+// 业务事实以数据库事件日志为准，丢失一次唤醒不影响收尾（心跳核对 head）。
 type Broadcaster struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
@@ -87,7 +106,7 @@ func newBroadcaster() *Broadcaster {
 }
 
 func (b *Broadcaster) add() chan []byte {
-	ch := make(chan []byte, 256)
+	ch := make(chan []byte, 128)
 	b.mu.Lock()
 	b.clients[ch] = struct{}{}
 	b.mu.Unlock()
@@ -100,14 +119,17 @@ func (b *Broadcaster) remove(ch chan []byte) {
 	b.mu.Unlock()
 }
 
-func (b *Broadcaster) broadcast(msg []byte) {
+// broadcast 投递一帧；缓冲满时直接断连（关闭通道），由客户端带游标重连补齐，
+// 不静默丢弃后继续使用残缺内容。
+func (b *Broadcaster) broadcast(frame []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for ch := range b.clients {
 		select {
-		case ch <- msg:
+		case ch <- frame:
 		default:
-			// 客户端消费慢则丢消息（SSE 重连时以历史快照兜底）。
+			close(ch)
+			delete(b.clients, ch)
 		}
 	}
 }
@@ -134,19 +156,23 @@ type Server struct {
 	ownerNames func(context.Context) (map[string]string, error)
 
 	mu           sync.Mutex
+	approvalMu   sync.Mutex
 	broadcasters map[string]*Broadcaster
 	pending      map[string]chan string        // sessionID → 当前 Chat 的审批响应通道
 	runs         map[string]context.CancelFunc // sessionID → 当前 Chat 运行取消函数
-	eventSeq     map[string]uint64
-	eventLogs    map[string][]bufferedEvent
+	// idempotency 保存客户端请求幂等键 → 已分配的 turn_id 与请求安全指纹。
+	// 首版保存在进程内（24h TTL），重启后不再去重；展示事实与游标仍在数据库。
+	idempotency map[string]idempotencyEntry
 }
 
-type bufferedEvent struct {
-	seq uint64
-	raw []byte
+type idempotencyEntry struct {
+	fingerprint string
+	sessionID   string
+	turnID      string
+	expires     time.Time
 }
 
-const maxBufferedEventsPerSession = 512
+const idempotencyTTL = 24 * time.Hour
 
 // New 创建会话 API 服务。
 func New(chat chatService, model string) *Server {
@@ -155,38 +181,25 @@ func New(chat chatService, model string) *Server {
 		model:        model,
 		broadcasters: map[string]*Broadcaster{},
 		tickets:      map[string]confirmationTicket{}, pending: map[string]chan string{},
-		runs:      map[string]context.CancelFunc{},
-		eventSeq:  map[string]uint64{},
-		eventLogs: map[string][]bufferedEvent{},
+		runs:        map[string]context.CancelFunc{},
+		idempotency: map[string]idempotencyEntry{},
 	}
-	// 服务端事件路由：统一事件按 session_id 扇出到对应 Broadcaster；
-	// 旧 ChatEvent JSON 仍在 handleSendMessage 里并行广播，两者不互相覆盖。
+	// 只广播已提交的语义事件：事件 id 与 seq 由存储事务分配，广播层不改写。
 	if em, ok := chat.(sseEmitter); ok {
 		em.SetSink(func(e sse.Event) {
-			// 事件日志只保留当前运行回合，供重连时补齐工具/审批流；
-			// 新一回合开始或会话重新发消息时清空旧日志，避免与历史快照重复。
-			s.mu.Lock()
-			id := e.SessionID
-			if e.EventType == sse.EventSessionCreated || e.EventType == sse.EventTurnStarted {
-				s.eventLogs[id] = nil
-			}
-			s.eventSeq[id]++
-			e.Seq = s.eventSeq[id]
-			raw, err := json.Marshal(e)
-			if err != nil {
-				s.mu.Unlock()
-				slog.Warn("sessionapi: 统一事件序列化失败", "error", err)
+			if e.SessionID == "" {
 				return
 			}
-			if id != "" {
-				logs := append(s.eventLogs[id], bufferedEvent{seq: e.Seq, raw: raw})
-				if len(logs) > maxBufferedEventsPerSession {
-					logs = logs[len(logs)-maxBufferedEventsPerSession:]
-				}
-				s.eventLogs[id] = logs
+			s.broadcaster(e.SessionID).broadcast(sse.EventFrame(e))
+		})
+	}
+	// 输出无法可靠保存：发送非持久 stream.fatal 并断开订阅者，由客户端重新同步。
+	if fm, ok := chat.(fatalEmitter); ok {
+		fm.SetFatal(func(sessionID string, data sse.FatalData) {
+			if sessionID == "" {
+				return
 			}
-			s.mu.Unlock()
-			s.broadcaster(e.SessionID).broadcast(raw)
+			s.broadcaster(sessionID).broadcast(sse.ControlFrameBytes(sse.NewFatalFrame(sessionID, data)))
 		})
 	}
 	return s
@@ -215,6 +228,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/pin", s.handlePinSession)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/stream", s.handleStream)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/timeline", s.handleTimeline)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/question", s.handleQuestion)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/question", s.handleQuestion)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/send-message", s.handleSendMessage)
@@ -561,13 +575,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	delete(s.broadcasters, id)
 	delete(s.pending, id)
 	delete(s.runs, id)
-	delete(s.eventSeq, id)
-	delete(s.eventLogs, id)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
-// handleStream 以 SSE 推送会话事件：先发历史快照，再转发实时事件。
+// handleStream 以协议 v2 推送会话事件：无游标先发规范快照，有游标先补齐日志再订阅。
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	flusher, ok := w.(http.Flusher)
@@ -575,68 +587,234 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
 		return
 	}
+	// 旧协议客户端明确拒绝，不混发旧帧（方案 25 §9.1）。
+	if r.URL.Query().Get("protocol") != "2" {
+		writeUpgradeRequired(w)
+		return
+	}
 	sess, err := s.readableSession(r, id)
 	if err != nil {
 		writeSessionAccessError(w, err)
 		return
 	}
-	// admin 读取他人会话的历史快照/事件流属于跨用户读取，必须留痕。
 	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
 		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
+	display, ok := s.chat.(chatDisplay)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("chat display store unavailable"))
+		return
+	}
+	// 旧会话在首次读取时按需转换（幂等，失败不阻塞读取：仍可退化为空快照）。
+	if migrator, ok := s.chat.(chatMigrator); ok {
+		if err := migrator.EnsureChatDisplay(r.Context(), id); err != nil {
+			slog.Warn("sessionapi: 旧会话展示转换失败", "session", id, "error", err)
+		}
+	}
+	cursor, hasCursor, err := requestedCursor(r, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
-	// 反向代理（Nginx 等）默认缓冲响应体，会把 SSE 攒成一段一段；显式关闭本响应的
-	// 缓冲，代理配置遗漏时也能正常推流（P6.11）。
 	w.Header().Set("X-Accel-Buffering", "no")
 	b := s.broadcaster(id)
 	ch := b.add()
 	defer b.remove(ch)
-	snapshot, _ := json.Marshal(map[string]any{
-		"type":      "history",
-		"sessionId": sess.ID,
-		"state":     sess.State,
-		"messages":  sess.Messages,
-		// Token 为会话级累计用量（P2.13）：刷新/重开会话后右下角统计仍可读。
-		"token": s.sessionToken(sess.ID),
-	})
-	fmt.Fprintf(w, "data: %s\n\n", snapshot)
-	flusher.Flush()
 
-	// 运行中回合的事件日志先补齐，再消费实时通道。客户端按 seq 去重，
-	// 因此这里与快照之后到达的实时帧重叠也不会产生重复卡片。
-	if sess.State == "running" || sess.State == "waiting" {
-		s.mu.Lock()
-		logs := append([]bufferedEvent(nil), s.eventLogs[id]...)
-		s.mu.Unlock()
-		for _, item := range logs {
-			if !s.canStream(r, sess) {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", item.raw)
-			flusher.Flush()
+	write := func(frame []byte) bool {
+		if len(frame) == 0 {
+			return true
+		}
+		if _, err := w.Write(frame); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	installSnapshot := func() bool {
+		snap, err := display.Snapshot(r.Context(), id, 30)
+		if err != nil {
+			slog.Warn("sessionapi: 读取规范快照失败", "session", id, "error", err)
+			write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{
+				Code: "SNAPSHOT_UNAVAILABLE", Message: "无法读取会话快照", Retryable: true,
+			})))
+			return false
+		}
+		cursor = snap.Cursor
+		hasCursor = true
+		return write(sse.ControlFrameBytes(sse.NewSnapshotFrame(snap)))
+	}
+	if !hasCursor {
+		if !installSnapshot() {
+			return
 		}
 	}
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	// 登记订阅之后再读日志：通知只负责唤醒，事实永远来自数据库。
+	if hasCursor {
+		head, floor, err := display.Head(r.Context(), id)
+		if err != nil {
+			write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{Code: "HEAD_UNAVAILABLE", Message: "无法读取会话水位", Retryable: true})))
+			return
+		}
+		if cursor < floor || cursor > head {
+			write(sse.ControlFrameBytes(sse.NewResetRequiredFrame(id, sse.ResetRequiredData{Reason: "cursor_out_of_replay_window", Cursor: head})))
+			if !installSnapshot() {
+				return
+			}
+		}
+	}
+	catchUp := func() bool {
+		for {
+			if !s.canStream(r, sess) {
+				return false
+			}
+			events, err := display.EventsAfter(r.Context(), id, cursor, 200)
+			if err != nil {
+				if errors.Is(err, store.ErrChatReplayUnavailable) {
+					write(sse.ControlFrameBytes(sse.NewResetRequiredFrame(id, sse.ResetRequiredData{Reason: "cursor_out_of_replay_window"})))
+					return installSnapshot()
+				}
+				slog.Warn("sessionapi: 读取事件日志失败", "session", id, "error", err)
+				write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{Code: "REPLAY_UNAVAILABLE", Message: "读取会话事件失败", Retryable: true})))
+				return false
+			}
+			if len(events) == 0 {
+				return true
+			}
+			for _, e := range events {
+				if !write(sse.EventFrame(e)) {
+					return false
+				}
+				cursor = e.Seq
+			}
+			if len(events) < 200 {
+				return true
+			}
+		}
+	}
+	if !catchUp() {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			if !s.canStream(r, sess) {
-				return
-			}
 		case <-r.Context().Done():
 			return
-		case msg := <-ch:
+		case frame, ok := <-ch:
+			if !ok {
+				// 慢客户端缓冲已满：断开让客户端带游标重连补齐。
+				return
+			}
 			if !s.canStream(r, sess) {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
+			// 只把通知当作“有新事件”的信号，事实仍从日志读取并校验游标。
+			if bytes.Contains(frame, []byte(`"event_type":"stream.fatal"`)) {
+				write(frame)
+				return
+			}
+			if !catchUp() {
+				return
+			}
+		case <-heartbeat.C:
+			if !s.canStream(r, sess) {
+				return
+			}
+			head, _, err := display.Head(r.Context(), id)
+			if err == nil && head > cursor {
+				if !catchUp() {
+					return
+				}
+				continue
+			}
+			if !write(sse.Heartbeat()) {
+				return
+			}
 		}
 	}
+}
+
+// handleTimeline 返回规范展示对象、当前 Turn/Interaction 与水位（历史首屏）。
+func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, err := s.readableSession(r, id)
+	if err != nil {
+		writeSessionAccessError(w, err)
+		return
+	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
+	display, ok := s.chat.(chatDisplay)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("chat display store unavailable"))
+		return
+	}
+	if migrator, ok := s.chat.(chatMigrator); ok {
+		if err := migrator.EnsureChatDisplay(r.Context(), id); err != nil {
+			slog.Warn("sessionapi: 旧会话展示转换失败", "session", id, "error", err)
+		}
+	}
+	limit := 30
+	if raw := r.URL.Query().Get("turn_limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > 100 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("turn_limit must be 1..100"))
+			return
+		}
+		limit = n
+	}
+	snap, err := display.Snapshot(r.Context(), id, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// requestedCursor 解析 ?after= 与 Last-Event-ID；两者同时出现且不一致时 400。
+func requestedCursor(r *http.Request, sessionID string) (uint64, bool, error) {
+	after := strings.TrimSpace(r.URL.Query().Get("after"))
+	lastID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	if after != "" && lastID != "" && after != lastID {
+		return 0, false, fmt.Errorf("after and Last-Event-ID conflict")
+	}
+	raw := after
+	if raw == "" {
+		raw = lastID
+	}
+	if raw == "" {
+		return 0, false, nil
+	}
+	if sid, seq, ok := sse.ParseSSEID(raw); ok {
+		if sid != sessionID {
+			return 0, false, fmt.Errorf("cursor belongs to another session")
+		}
+		return seq, true, nil
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid cursor")
+	}
+	return n, true, nil
+}
+
+// writeUpgradeRequired 拒绝旧 Chat 流契约客户端（426 + 升级提示）。
+func writeUpgradeRequired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUpgradeRequired)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":            "chat stream protocol v2 required",
+		"code":             "UPGRADE_REQUIRED",
+		"protocol_version": sse.ProtocolVersion,
+		"upgrade":          "refresh the web client; old event streams are no longer served",
+	})
 }
 
 // handleSendMessage 发起一轮 Chat 并把事件广播到会话的 SSE 客户端。
@@ -680,6 +858,31 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the session owner can perform this action"})
 		return
 	}
+	// 请求幂等：同一操作者 + 会话 + 动作 + 内容指纹在 24h 内复用同一个 turn_id，
+	// 重复键不创建第二轮；键相同但内容变化返回 409。
+	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	fingerprint := ""
+	if idemKey != "" {
+		sum := sha256.Sum256([]byte(caller.User.ID + "\x00" + id + "\x00send-message\x00" + body.Query + "\x00" + strings.Join(body.Skills, ",")))
+		fingerprint = fmt.Sprintf("%x", sum)
+		s.mu.Lock()
+		if entry, ok := s.idempotency[idemKey]; ok {
+			if time.Now().Before(entry.expires) {
+				s.mu.Unlock()
+				if entry.fingerprint != fingerprint || entry.sessionID != id {
+					writeError(w, http.StatusConflict, fmt.Errorf("idempotency key reused with different content"))
+					return
+				}
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"sessionId": id, "turnId": entry.turnID, "protocolVersion": sse.ProtocolVersion, "duplicate": true,
+				})
+				return
+			}
+			delete(s.idempotency, idemKey)
+		}
+		s.mu.Unlock()
+	}
+	turnID := "turn_" + rand.Text()
 	var bound *service.BoundRun
 	if s.platform != nil {
 		var c authz.Coverage
@@ -718,6 +921,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pending[id] = respond
 	s.runs[id] = cancelChat
+	if idemKey != "" {
+		s.idempotency[idemKey] = idempotencyEntry{
+			fingerprint: fingerprint, sessionID: id, turnID: turnID,
+			expires: time.Now().Add(idempotencyTTL),
+		}
+	}
 	s.mu.Unlock()
 
 	// Chat 生命周期独立于 HTTP 请求：请求返回后 SSE 仍需持续推送。
@@ -785,11 +994,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	var confirm service.Confirmation
 	if s.platform != nil {
-		confirm = func(ctx context.Context, data sse.ApprovalData) (string, <-chan string, func(), error) {
+		confirm = func(ctx context.Context, data sse.Interaction) (string, <-chan string, func(), error) {
 			if s.audit == nil {
 				return "", nil, nil, fmt.Errorf("audit unavailable")
 			}
-			key, ch, done := s.newConfirmation(id)
+			key, ch, done := s.newConfirmation(id, data.InteractionID)
 			raw, _ := json.Marshal(data)
 			payload, _ := json.Marshal(map[string]any{"planSHA256": fmt.Sprintf("%x", sha256.Sum256(raw)), "sessionVersion": principal.User.SessionVersion, "credentialVersion": bound.CredentialVersion, "expiresAt": time.Now().UTC().Add(5 * time.Minute), "target": data.Target})
 			if e := s.audit(ctx, store.AuditEvent{Action: "approval.request", EventType: store.AuditEventApproval, SessionID: id, UserID: principal.User.ID, ClusterID: sess.Cluster, ApprovalID: key, Payload: string(payload), Operation: data.Operation, Risk: data.Risk, Status: "pending"}); e != nil {
@@ -809,6 +1018,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, Ask: s.askQuestion, KubeconfigPath: kubePath, RequestCheck: check, TargetCheck: targetCheck,
 		SessionID:       id,
+		TurnID:          turnID,
 		Query:           body.Query,
 		UserID:          principal.User.ID,
 		AllowAnySession: principal.canManageAllSessions(),
@@ -820,6 +1030,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.pending, id)
 		delete(s.runs, id)
+		if idemKey != "" {
+			delete(s.idempotency, idemKey)
+		}
 		s.mu.Unlock()
 		if errors.Is(err, settings.ErrModelNotConfigured) {
 			// 模型未配置是配置态问题，不是服务端故障：409 + 原提示，前端据此引导去
@@ -855,7 +1068,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			b.broadcast(raw)
 		}
 	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"sessionId": id})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"sessionId": id, "turnId": turnID, "protocolVersion": sse.ProtocolVersion,
+	})
 }
 
 // handleCancel 取消当前会话正在执行的 Chat 运行。
@@ -883,14 +1098,21 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 
 // handleApprove 把审批选择回传给当前 Chat 的 respond 通道。
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
 	id := r.PathValue("id")
 	var body struct {
-		ApprovalID string `json:"approvalId"`
-		Choice     string `json:"choice"`
+		ApprovalID       string `json:"approvalId"`
+		InteractionID    string `json:"interactionId"`
+		Choice           string `json:"choice"`
+		ExpectedRevision uint64 `json:"expectedRevision"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if body.ApprovalID == "" {
+		body.ApprovalID = body.InteractionID
 	}
 	sess, err := s.ownedSession(r, id)
 	if err != nil {
@@ -908,7 +1130,6 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		ticket, exists := s.tickets[id]
 		ok = ok && exists && body.ApprovalID == ticket.id && time.Now().Before(ticket.expires)
 		if ok {
-			delete(s.tickets, id)
 			respond = ticket.reply
 		}
 	}
@@ -927,8 +1148,25 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if committer, exists := s.chat.(interface {
+		CommitApproval(context.Context, string, string, string, uint64) error
+	}); exists {
+		if err := committer.CommitApproval(r.Context(), id, body.ApprovalID, body.Choice, body.ExpectedRevision); err != nil {
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, store.ErrChatHeadConflict) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, fmt.Errorf("approval decision was not accepted"))
+			return
+		}
+	}
 	select {
 	case respond <- body.Choice:
+		s.mu.Lock()
+		if ticket, exists := s.tickets[id]; exists && ticket.id == body.ApprovalID {
+			delete(s.tickets, id)
+		}
+		s.mu.Unlock()
 		// 不回显 choice：Secret 值经此通道提交，响应体必须原样返回会话 id。
 		// 同理，跨用户审批审计只记身份，绝不记 choice 值。
 		s.recordCrossUserAction(r, sess, actionAdminSessionApprove, store.AuditEventApproval, nil)
@@ -938,8 +1176,12 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) newConfirmation(sessionID string) (string, <-chan string, func()) {
-	ticket := confirmationTicket{rand.Text(), time.Now().Add(5 * time.Minute), make(chan string, 1)}
+func (s *Server) newConfirmation(sessionID, interactionID string) (string, <-chan string, func()) {
+	id := interactionID
+	if id == "" {
+		id = rand.Text()
+	}
+	ticket := confirmationTicket{id, time.Now().Add(5 * time.Minute), make(chan string, 1)}
 	s.mu.Lock()
 	s.tickets[sessionID] = ticket
 	s.mu.Unlock()

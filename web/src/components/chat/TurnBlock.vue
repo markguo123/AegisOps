@@ -4,16 +4,15 @@ import { ArrowDown, WarningFilled } from '@element-plus/icons-vue'
 
 import type { TurnUiData } from './turn'
 import { formatDuration } from './turn'
-import AgentStepper, { type AgentStep, type StepState } from './AgentStepper.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
+import QuestionInteraction from './QuestionInteraction.vue'
 import MarkdownView from './MarkdownView.vue'
 
 /**
- * P2.7 TurnBlock：单回合容器。
- * 头部：序号 + 状态摘要 + 用户输入 + 耗时 + token；body 可折叠，
- * 内含 思考面板 / 步进器 / 工具卡 / 审批卡 / 最终报告（markdown）。
+ * 单回合容器：用户输入 + 真实过程条目（消息/工具/问题/审批/告警）。
+ * 不再渲染固定“思考→工具→观察→报告”步进器，运行状态只来自 Turn 状态与 activity。
  */
 
 const props = withDefaults(
@@ -33,6 +32,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'approve', value: string,id?:string): void
   (e: 'reject',id?:string): void
+  (e: 'answer', payload: { interactionId: string; status: 'selected' | 'text' | 'skipped'; optionId?: string; text?: string }): void
 }>()
 
 const open = ref(true)
@@ -50,6 +50,8 @@ const statusType = computed<'primary' | 'success' | 'danger' | 'warning' | 'info
       return 'danger'
     case 'waiting':
       return 'warning'
+    case 'canceled':
+      return 'info'
     default:
       return 'info'
   }
@@ -58,15 +60,49 @@ const statusType = computed<'primary' | 'success' | 'danger' | 'warning' | 'info
 const statusLabel = computed(() => {
   switch (props.turn.status) {
     case 'running':
-      return '运行中'
+      return activityText.value || '运行中'
     case 'completed':
       return '已完成'
     case 'failed':
       return '失败'
+    case 'canceled':
+      return '已取消'
     case 'waiting':
-      return '待处理'
+      return waitText.value
+    case 'pending':
+      return '已接收'
     default:
       return props.turn.status
+  }
+})
+
+/** 等待原因来自 turn.wait_reason，不与连接状态混用。 */
+const waitText = computed(() => {
+  switch (props.turn.waitReason) {
+    case 'question':
+      return '等待你选择'
+    case 'approval':
+      return '等待你审批'
+    case 'secret':
+      return '等待敏感输入'
+    default:
+      return '等待你的确认'
+  }
+})
+
+/** 运行中措辞只由真实 activity 产生。 */
+const activityText = computed(() => {
+  switch (props.turn.activity) {
+    case 'checking':
+      return '检查中'
+    case 'generating':
+      return '生成回复'
+    case 'executing':
+      return '执行中'
+    case 'verifying':
+      return '验证中'
+    default:
+      return ''
   }
 })
 
@@ -94,73 +130,6 @@ const reportDone = computed(() =>
 
 const hasToolCards = computed(() => props.turn.items.some((item) => item.type === 'tool'))
 
-const steps = computed<AgentStep[]>(() => {
-  const turn = props.turn
-  const reasoningItems = turn.items.filter((item) => item.type === 'reasoning')
-  const toolItems = turn.items.filter((item) => item.type === 'tool')
-  const reportItems = turn.items.filter((item) => item.type === 'report')
-
-  const lastReasoning = reasoningItems[reasoningItems.length - 1]
-  const lastReport = reportItems[reportItems.length - 1]
-  const hasTool = toolItems.length > 0
-  const toolRunning = toolItems.some((item) => item.data.status === 'running')
-  const toolDone = toolItems.some((item) => item.data.status === 'done')
-  const hasObservation = toolItems.some(
-    (item) => item.data.status === 'done' && item.data.ok !== undefined && item.data.ok !== null,
-  )
-
-  const reportRunning = !!lastReport?.data.streaming
-  const reportDone = !!lastReport?.data.done
-
-  const result: AgentStep[] = [
-    {
-      key: 'reason',
-      label: '思考',
-      state: (lastReasoning
-        ? lastReasoning.data.streaming
-          ? 'active'
-          : 'done'
-        : turn.status === 'failed' || turn.status === 'completed'
-          ? 'error'
-          : 'pending') as StepState,
-    },
-    {
-      key: 'tool',
-      label: '工具',
-      state: (toolRunning
-        ? 'active'
-        : toolDone
-          ? 'done'
-          : hasTool
-            ? 'pending'
-            : 'idle') as StepState,
-    },
-    {
-      key: 'observe',
-      label: '观察',
-      state: (hasObservation
-        ? 'done'
-        : toolRunning
-          ? 'active'
-          : hasTool
-            ? 'pending'
-            : 'idle') as StepState,
-    },
-    {
-      key: 'report',
-      label: '报告',
-      state: (reportRunning
-        ? 'active'
-        : reportDone
-          ? 'done'
-          : turn.status === 'failed'
-            ? 'error'
-            : 'pending') as StepState,
-    },
-  ]
-  return result
-})
-
 function timeLabel(value?: string): string {
   if (!value) return ''
   const d = new Date(value)
@@ -175,28 +144,6 @@ function timeLabel(value?: string): string {
  */
 function itemAnchor(item: { data: { key: string } }): string {
   return `step-${props.turn.key}-${item.data.key}`
-}
-
-const navSteps = computed<AgentStep[]>(() => {
-  const lastOf = (type: 'reasoning' | 'tool' | 'report') =>
-    [...props.turn.items].reverse().find((item) => item.type === type)
-  const anchors: Record<string, ReturnType<typeof lastOf>> = {
-    reason: lastOf('reasoning'),
-    tool: lastOf('tool'),
-    observe: lastOf('tool'),
-    report: lastOf('report'),
-  }
-  return steps.value.map((step) => {
-    const target = anchors[step.key]
-    return { ...step, anchor: target ? itemAnchor(target) : undefined }
-  })
-})
-
-function locateStep(step: AgentStep): void {
-  if (!step.anchor) {
-    return
-  }
-  document.getElementById(step.anchor)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
 }
 </script>
 
@@ -226,8 +173,6 @@ function locateStep(step: AgentStep): void {
         <span class="question-role">你</span>
         <p class="question-text">{{ turn.input }}</p>
       </article>
-
-      <AgentStepper :steps="navSteps" @select="locateStep" />
 
       <div v-if="hasToolCards" class="turn-tools">
         <button type="button" class="turn-tools-btn" @click="expandAllSignal += 1">
@@ -273,6 +218,19 @@ function locateStep(step: AgentStep): void {
             @approve="(v,id)=>emit('approve',v,id)"
             @reject="emit('reject',$event)"
           />
+          <QuestionInteraction
+            v-else-if="item.type === 'question'"
+            class="turn-item"
+            :question="item.data"
+            @answer="(payload)=>emit('answer',payload)"
+          />
+          <p
+            v-else-if="item.type === 'notice'"
+            class="turn-item notice"
+            :class="item.data.severity"
+          >
+            {{ item.data.message }}
+          </p>
           <article
             v-else-if="item.type === 'report'"
             :id="itemAnchor(item)"
@@ -280,7 +238,7 @@ function locateStep(step: AgentStep): void {
             :class="{ streaming: item.data.streaming }"
           >
             <div class="report-head">
-              <span class="report-label">最终报告</span>
+              <span class="report-label">{{ item.data.purpose === 'final' ? '最终回答' : '过程说明' }}</span>
               <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
             </div>
             <MarkdownView :text="item.data.text" />
@@ -500,5 +458,27 @@ function locateStep(step: AgentStep): void {
 /* P7.2：Run Bar 定位时避开 sticky 顶栏 */
 .turn-item {
   scroll-margin-top: 56px;
+}
+
+.notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-2);
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.notice.warning {
+  border-color: var(--app-warning-border, var(--app-border));
+  color: var(--app-warning, var(--app-text));
+}
+
+.notice.error {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
 }
 </style>

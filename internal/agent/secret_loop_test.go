@@ -57,7 +57,7 @@ func (a *secretApprover) Confirm(context.Context, string, []UserChoiceOption) (s
 	return ChoiceYes, nil
 }
 
-func (a *secretApprover) RequestSecretValue(context.Context, string) (string, error) {
+func (a *secretApprover) RequestSecretValue(context.Context, SecretValueRequest) (string, error) {
 	a.asks++
 	if a.err != nil {
 		return "", a.err

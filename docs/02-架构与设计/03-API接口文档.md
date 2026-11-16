@@ -1,5 +1,8 @@
 # AegisOps API 接口契约设计
 
+> **2026-11-16 契约更新**：Chat 流式旧设计废弃整改，新目标见 [25-方案-Chat流式输出与前端展示统一](25-方案-Chat流式输出与前端展示统一.md)（ADR-055，尚未实现）。下文现有 HTTP 接口与旧字段仅供当前代码核对；身份和 owner 一律以现行身份方案及后端强校验为准，不从旧 admin/operator 描述派生权限。
+
+
 - 版本：v4.0.0（企业平台）
 - 日期：2026-10-23（初版）/ 2026-11-03（发起体检契约收窄与报告三面登记，见 17-方案） / 2026-11-04（报告清单清理两面登记，见方案 15 v1.12；补体检发起面 v1.1：format 单选、阶段账、停止体检、报告总览、按需导出 Markdown）/ 2026-11-05（补结构化报告的 canonical 证据与诊断投影契约）
 - 状态：四期企业平台落地中
@@ -342,91 +345,21 @@ POST   /api/v1/sessions/{id}/cancel        // own 或 admin
 `token` 为会话级 token 用量合计（`{promptTokens, completionTokens, totalTokens}`）；
 无记录时字段缺省，`history` 快照中显式为 `null`，前端隐藏统计而不是显示 0。
 
-### 9.1 事件契约（`service.ChatEvent`）
+### 9.1 原 ChatEvent 与四期事件目录：废弃整改
 
-| 类型 | 编码 | 说明 |
-|---|---|---|
-| state | `state` | Agent 状态快照 |
-| answer-delta | `answer-delta` | 最终回答流式增量 |
-| reasoning-delta | `reasoning-delta` | 推理过程增量（Web 分析面板） |
-| tool-call | `tool-call` | 工具调用发起（名称/参数/风险等级） |
-| tool-response | `tool-response` | 工具结果（脱敏、截断） |
-| progress | `progress` | 阶段进度摘要 |
-| answer | `answer` | 最终回答全文（收尾） |
-| error | `error` | 错误事件 |
-| choice-request | `choice-request` | 请求用户审批选择（审批卡片） |
+原 9.1/9.2 的双轨、旧事件清单以及“历史 messages + 当前回合缓存”不再作为设计依据。当前代码仍有旧链路，不得将本文更新理解为接口已经升级。
 
-> 后端当前主要下发 `answer-delta` 流；`reasoning-delta` / `tool-call` / `answer` 事件经 SSE
-> 转发给前端驱动三个阶段（推理展开 → 工具卡 → 最终回答折叠）。
+### 9.2 新 Chat 流契约 v2（待实现）
 
-### 9.2 四期统一事件流（P1.9）
+完整字段与行为以 [方案 25](25-方案-Chat流式输出与前端展示统一.md) §5–§9 为准：
 
-统一事件信封 JSON（snake_case，每个事件必带）：
-
-```text
-session_id
-turn_id
-step_id
-seq          // 会话内单调递增；用于重连回放去重
-timestamp
-event_type
-data        // 各事件专属载荷，可为 null
-```
-
-支持的事件类型：
-
-```text
-session.created
-turn.started
-turn.completed
-reason.started
-reason.completed
-tool.started
-tool.completed
-observation.created
-approval.required
-approval.approved
-approval.rejected
-message.delta
-message.completed
-session.completed
-session.failed
-```
-
-数据面：`internal/sse` 提供 Marshal 与 Frame。平台只维护这一套原生事件契约，
-不定义第二套旧事件通道。所有出站 `params` / `result` / 回答负载在封装前统一经
-`store.RedactJSONPayload` 脱敏，Secret / kubeconfig / API Key 明文永不进入 SSE。
-
-`observation.created` 的命令类结果额外携带：
-
-```text
-command
-stdout
-stderr
-exitCode
-errorCode     // 如 RBAC_DENIED / SCOPE_DENIED / NOT_FOUND / TIMEOUT
-displayType   // terminal | table | kv | events | yaml | logs | text
-data          // 结构化数据；terminal 视图是 kubectl 的权威展示面
-```
-
-运行中会话重连时，服务端先发送历史快照，再补发当前回合缓存事件；前端按 `seq`
-去重。历史快照仍是已持久化消息的权威来源，缓存事件只补齐尚未落库的运行过程。
-
-`approval.required` 的结构化载荷新增：
-
-```text
-title / tool / operation / risk
-target{cluster, namespace, group, version, kind, name}
-changes[{path, operation, before, after, description}]
-checks[{name, status, message}]
-verification[]
-command
-options[]
-```
-
-`prompt` 继续保留给 CLI 和旧客户端回退；Web 新版审批卡以目标、变更、检查、
-验证和命令字段为主。HIGH/CRITICAL 的 `options` 不包含
-`yes_and_dont_ask_again`。
+- 原 `/api/v1/sessions*` 下新增规范 timeline；stream 明确 `protocol=2` 和 after 游标，支持一致快照与续传。
+- 事件目录为 `turn.status`、`message.started/delta/completed/failed`、`tool.updated`、`interaction.updated`、`notice.created`、`usage.updated`；按 session 持久 seq，SSE id 绑定 cursor。
+- 连接控制为 `stream.snapshot/reset_required/fatal`；心跳不推进游标。
+- message_id/part_id、tool_call_id、interaction_id 是稳定展示身份，禁止按 turn+role 或名称拼装历史。
+- send-message/答复/审批/取消增加幂等和必要版本核验，不改变原授权语义；旧客户端切换后要求升级，不并行广播两套契约。
+- 工具结果 command/stdout/stderr/exitCode/errorCode/displayType、审批 target/changes/checks/verification 等业务字段保留，装入规范对象；不再由两个出口分别维护。
+- 正文与控制状态可靠提交后发布；取消、断流、保存失败、日志过期与重启边界按方案 25 明确处理。
 
 ## 10. 平台依赖矩阵
 

@@ -399,70 +399,15 @@ ERROR
 
 ---
 
-# 8. SSE 事件模型
+# 8. Chat 流式输出与展示统一（旧 SSE 设计废弃整改）
 
-Web Chat 必须采用统一 SSE 事件协议。
+> 2026-11-16：原事件清单、按 turn+role 聚合、messages 历史拼装及旧终态契约被 ADR-055 / [方案 25](../02-架构与设计/25-方案-Chat流式输出与前端展示统一.md) 替代；本节为新目标，尚未实现。历史验收记录不等于新契约通过。
 
-至少支持：
+Web Chat 只消费一套协议：正文按 message_id/part_id 持续追加，允许多条过程发言；工具按 tool_call_id、交互按 interaction_id 原位更新。等待输入不等于完成，缺少 reasoning 不等于错误。不要求思考、工具、观察、报告为固定必经阶段。
 
-```text
-session.created
+实时、刷新、重连使用同一规范对象和同一状态归并；服务端安全处理、可靠保存后发布。持久游标支持补齐，超过范围回退一致快照，禁止静默丢控制事件。错误、保存失败、取消和未知执行结果必须对用户可见。
 
-turn.started
-turn.completed
-
-reason.started
-reason.completed
-
-tool.started
-tool.completed
-
-observation.created
-
-approval.required
-approval.approved
-approval.rejected
-
-message.delta
-message.completed
-
-session.completed
-session.failed
-```
-
-每个事件至少携带：
-
-```text
-session_id
-turn_id
-step_id
-timestamp
-event_type
-```
-
-Web 不允许自己猜测 Agent 状态。
-
-**页面展示必须以 Agent Runtime/SSE 实际事件为准。**
-
-平台只维护一套原生事件契约；服务端事件顺序、终态、字段语义和脱敏规则统一由本 PRD、
-SSE_EVENT 契约与 ADR-032 定义，不另建第二套事件通道。
-
-## 事件顺序与展示语义（强制）
-
-事件清单之外，以下四条是协议的一部分，任一侧实现都必须遵守（见 ADR-032 / D-22）：
-
-1. **分片不是展示单元**：`message.delta` 是传输分片，展示层按 turn 聚合，一个回合只有一块最终报告；
-   `index` 表示同一 role 内从 0 开始的分片序号，仅用于去重与排序，不得参与展示 key，JSON 也不得用
-   `omitempty` 把 0 隐藏掉。
-2. **终态必须最后**：顺序固定为 `message.delta…` → `message.completed`（携带权威全文）→
-   `session.completed` / `session.failed`。`turn.completed.output` 只作兜底，不单独成块；
-   终态之后到达的分片由前端忽略。
-3. **事件流统一脱敏**：写入 SSE 的内容（含增量）在封装前走与终态同一套脱敏策略。
-4. **思考面板语义**：`reason.started` 必须早于本轮 reasoning 增量；空思考面板不占位；
-   报告出现后折叠、用户可手动展开。
-
-违反上述任一条都会产生用户可见故障（报告重复、状态永久停留在"正在生成"、思考内容丢失），
-因此后端与前端各自必须有契约测试守住。
+前端时间线、交互卡、状态徽标、输入框、滚动和历史恢复均在本轮范围；保留 Go Runtime、安全审批和 Secret 专用通道。事件目录、接口、切换和逐场景验收唯一维护于方案 25 §6–§13，不再另列冲突清单。
 
 ---
 

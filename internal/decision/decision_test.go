@@ -1,11 +1,38 @@
 package decision
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestPersistAnswerBeforeWakeAndRetryFailure(t *testing.T) {
+	p, a, now := fixture(t)
+	want := errors.New("database unavailable")
+	if err := p.SubmitAfter(a, now, func() error { return want }); err != want {
+		t.Fatalf("error=%v", err)
+	}
+	select {
+	case <-p.Answers():
+		t.Fatal("failed commit woke the Agent")
+	default:
+	}
+	if err := p.SubmitAfter(a, now, func() error {
+		select {
+		case <-p.Answers():
+			t.Fatal("answer visible before commit")
+		default:
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-p.Answers(); got != a {
+		t.Fatalf("answer=%+v", got)
+	}
+}
 
 func fixture(t *testing.T) (*Pending, Answer, time.Time) {
 	t.Helper()

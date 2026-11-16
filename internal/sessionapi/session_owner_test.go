@@ -178,6 +178,9 @@ func streamFrame(t *testing.T, url, token string) (int, map[string]any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if !strings.Contains(url, "?") {
+		url += "?protocol=2"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +196,11 @@ func streamFrame(t *testing.T, url, token string) (int, map[string]any) {
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		line := strings.TrimPrefix(scanner.Text(), "data: ")
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "data: ")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -221,7 +228,7 @@ func foreignSurfaces(base, id string) []struct {
 		url    string
 		body   string
 	}{
-		{"历史/SSE", http.MethodGet, s("/stream"), ""},
+		{"规范历史", http.MethodGet, s("/timeline"), ""},
 		{"续用会话", http.MethodPost, base + "/api/v1/sessions", `{"id":"` + id + `"}`},
 		{"发消息", http.MethodPost, s("/send-message"), `{"query":"hijack attempt"}`},
 		{"审批", http.MethodPost, s("/approve"), `{"choice":"yes"}`},
@@ -320,7 +327,7 @@ func TestReadAllAdminCannotWriteOthersSessions(t *testing.T) {
 	if status != http.StatusOK || frame == nil {
 		t.Fatalf("read.all 读历史 = %d, want 200", status)
 	}
-	if frame["type"] != "history" || frame["sessionId"] != "s-owner" {
+	if frame["event_type"] != "stream.snapshot" || frame["session_id"] != "s-owner" {
 		t.Fatalf("历史快照帧异常: %+v", frame)
 	}
 	if _, body := call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-reader", ""); !strings.Contains(body, "s-other") {
@@ -328,7 +335,7 @@ func TestReadAllAdminCannotWriteOthersSessions(t *testing.T) {
 	}
 
 	for _, surface := range foreignSurfaces(srv.URL, "s-owner") {
-		if surface.name == "历史/SSE" || surface.name == "续用会话" {
+		if surface.name == "规范历史" || surface.name == "续用会话" {
 			continue
 		}
 		status, _ := call(t, surface.method, surface.url, "tok-reader", surface.body)

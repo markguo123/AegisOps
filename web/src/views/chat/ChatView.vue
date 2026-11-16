@@ -6,6 +6,7 @@ import { ChatDotRound, RefreshRight } from '@element-plus/icons-vue'
 
 import type { SessionSummary } from '@/api/sessions'
 import {
+  answerInteraction,
   approveRun,
   cancelRun,
   createSession,
@@ -15,10 +16,8 @@ import {
   renameSession,
   sendMessage,
 } from '@/api/sessions'
-import type { AgentTurnData } from '@/api/sse'
 import ConversationList from '@/components/chat/ConversationList.vue'
 import MessageTimeline from '@/components/chat/MessageTimeline.vue'
-import QuestionCard from '@/components/chat/QuestionCard.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
 import TokenUsageBadge from '@/components/chat/TokenUsageBadge.vue'
 import TechEmptyState from '@/components/TechEmptyState.vue'
@@ -26,7 +25,7 @@ import {useClusterAccess} from '@/composables/useClusterAccess'
 import { buildSessionMarkdown, markdownFileName } from '@/utils/exportMarkdown'
 import { useChatStream, type StreamStatus } from '@/composables/useChatStream'
 import { useAuthStore } from '@/stores/auth'
-import { addTokenUsage, sessionStateTone } from '@/utils/format'
+import { sessionStateTone } from '@/utils/format'
 import { canDecideApproval, hasPermission, PERM, permissionsOf } from '@/utils/permission'
 import type { Skill } from '@/api/types'
 
@@ -36,7 +35,6 @@ const sessions = ref<SessionSummary[]>([])
 const loading = ref(false)
 const activeId = ref<string | null>(sessionStorage.getItem(ACTIVE_SESSION_KEY))
 const stream = useChatStream()
-const questionRevision = computed(() => stream.events.value.filter(e => e.event_type === 'question.required' || e.event_type === 'question.resolved').length)
 
 const input = ref('')
 const sending = ref(false)
@@ -141,8 +139,7 @@ const showScopeWelcome = computed(() => {
   if (!activeSession.value || activeSession.value.messageCount > 0) {
     return false
   }
-  const historyCount = stream.history.value?.messages?.length ?? 0
-  return historyCount === 0 && stream.events.value.length === 0
+  return stream.turns.value.length === 0 && stream.items.value.length === 0
 })
 
 const scopeWelcome = computed(() => {
@@ -157,26 +154,8 @@ const canDecide = computed(() => canDecideApproval(auth.role) && activeSession.v
 /** P3.8.4 @ 技能引用权限：仅具备 skill.read 时开启提示与回填。 */
 const canUseSkills = computed(() => hasPermission(permissionsOf(auth.role), PERM.skillRead))
 
-/** P2.13 会话级 Token：历史快照（落库汇总）+ 本次连接内各轮增量，按回合去重。 */
-const sessionToken = computed(() => {
-  let total = addTokenUsage(stream.history.value?.token ?? null, null)
-  const seen = new Set<string>()
-  for (const event of stream.events.value) {
-    if (event.event_type !== 'turn.completed') {
-      continue
-    }
-    const turnId = event.turn_id ?? `idx:${seen.size}`
-    if (seen.has(turnId)) {
-      continue
-    }
-    seen.add(turnId)
-    const data = (event.data ?? {}) as AgentTurnData
-    if (data.token) {
-      total = addTokenUsage(total, data.token)
-    }
-  }
-  return total
-})
+/** 会话级 Token：规范 Turn 用量的累计（覆盖语义，不重复相加）。 */
+const sessionToken = computed(() => stream.token.value)
 
 const statusText = computed(() => {
   switch (stream.status.value) {
@@ -345,6 +324,14 @@ async function handleDelete(target: SessionSummary): Promise<void> {
   }
 }
 
+/** 请求幂等键：同一动作的网络重试复用同一个 turn，不创建第二轮。 */
+function newIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 async function handleSend(): Promise<void> {
   const raw = input.value.trim()
   if (!activeId.value || !raw || sending.value) {
@@ -355,11 +342,37 @@ async function handleSend(): Promise<void> {
   sending.value = true
   input.value = ''
   try {
-    await sendMessage(activeId.value, { query: cleaned || raw, skills: names })
+    await sendMessage(activeId.value, {
+      query: cleaned || raw,
+      skills: names,
+      idempotencyKey: newIdempotencyKey(),
+    })
   } catch (error) {
     sending.value = false
     ElMessage.error(error instanceof Error ? error.message : '发送失败')
   }
+}
+
+/** 结构化回答回传（问题卡）；选择只表达业务决策，不授予写权限。 */
+function handleAnswer(payload: {
+  interactionId: string
+  status: 'selected' | 'text' | 'skipped'
+  optionId?: string
+  text?: string
+}): void {
+  const turnId = stream.pending.value?.turn_id ?? ''
+  if (!activeId.value || !turnId) {
+    return
+  }
+  void answerInteraction(activeId.value, {
+    interactionId: payload.interactionId,
+    turnId,
+    status: payload.status,
+    optionId: payload.optionId,
+    text: payload.text,
+  }).catch((error) => {
+    ElMessage.error(error instanceof Error ? error.message : '提交回答失败')
+  })
 }
 
 /** 停止当前正在执行的会话运行。 */
@@ -378,7 +391,7 @@ function handleApprove(value: string,id?:string): void {
   if (!activeId.value) {
     return
   }
-  void approveRun(activeId.value, value,id).catch((error) => {
+  void approveRun(activeId.value, value,id, stream.pending.value?.revision).catch((error) => {
     ElMessage.error(error instanceof Error ? error.message : '审批回传失败')
   })
 }
@@ -388,7 +401,7 @@ function handleReject(id?:string): void {
   if (!activeId.value) {
     return
   }
-  void approveRun(activeId.value, 'no',id).catch((error) => {
+  void approveRun(activeId.value, 'no',id, stream.pending.value?.revision).catch((error) => {
     ElMessage.error(error instanceof Error ? error.message : '拒绝回传失败')
   })
 }
@@ -446,18 +459,26 @@ watch(
   { immediate: true },
 )
 
-// 回合/会话结束或失败时复位“运行中”态（token 统计由 sessionToken 计算属性驱动）。
+// 运行状态只由规范 Turn 状态驱动：出现终态即复位发送态并刷新列表。
 watch(
-  () => stream.events.value.length,
-  () => {
-    const events = stream.events.value
-    const last = events[events.length - 1]
-    if (last && ['session.completed', 'session.failed', 'turn.completed'].includes(last.event_type)) {
+  () => stream.running.value,
+  (running) => {
+    if (!running && sending.value) {
       sending.value = false
       void loadSessions()
     }
   },
-  { deep: false },
+)
+
+// protocol 升级（426）或 fatal：提示用户手动重新同步，不静默重试。
+watch(
+  () => stream.state.value.fatal,
+  (fatal) => {
+    if (fatal) {
+      sending.value = false
+      ElMessage.error(fatal.message || '输出未能可靠保存，请重新同步')
+    }
+  },
 )
 </script>
 
@@ -549,6 +570,10 @@ watch(
               </div>
             </header>
             <p v-if="stream.error.value" class="stream-error">{{ stream.error.value }}</p>
+            <div v-if="stream.state.value.fatal" class="stream-error" role="alert">
+              <span>{{ stream.state.value.fatal.message || '输出未能可靠保存，请重新同步' }}</span>
+              <el-button size="small" text type="danger" @click="stream.resync()">重新同步</el-button>
+            </div>
             <section v-if="showScopeWelcome && scopeWelcome" class="scope-welcome" aria-label="当前授权范围">
               <div class="scope-welcome-icon">AUTH</div>
               <div class="scope-welcome-copy">
@@ -560,14 +585,15 @@ watch(
               </div>
             </section>
             <MessageTimeline
-              :history="stream.history.value"
-              :events="stream.events.value"
+              :turns="stream.turns.value"
+              :items="stream.items.value"
               :can-decide="canDecide"
               :cluster-name="activeClusterName"
               empty-title="该会话暂无消息"
-              empty-hint="在下方输入框描述你的运维问题；Agent 会先思考、再调用工具核实现场"
+              empty-hint="在下方输入框描述你的运维问题；Agent 会先检查现场，再给出可复核的结论"
               @approve="handleApprove"
               @reject="handleReject"
+              @answer="handleAnswer"
             />
           </main>
         </template>
@@ -584,7 +610,6 @@ watch(
       </div>
 
       <footer class="chat-composer">
-<QuestionCard :session-id="activeId" :revision="questionRevision" :running="sending" />
         <ComposerBox
           ref="composerRef"
           v-model="input"

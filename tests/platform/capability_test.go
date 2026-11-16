@@ -415,7 +415,7 @@ func TestSessionOwnerIsolationOnRealStack(t *testing.T) {
 	}
 
 	surfaces := []struct{ name, method, path, body string }{
-		{"历史/SSE", http.MethodGet, sessions + "/" + owned.ID + "/stream", ""},
+		{"规范历史", http.MethodGet, sessions + "/" + owned.ID + "/timeline", ""},
 		{"续用会话", http.MethodPost, sessions, `{"id":"` + owned.ID + `"}`},
 		{"发消息", http.MethodPost, sessions + "/" + owned.ID + "/send-message", `{"query":"hi"}`},
 		{"审批", http.MethodPost, sessions + "/" + owned.ID + "/approve", `{"choice":"yes"}`},

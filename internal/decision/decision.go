@@ -88,6 +88,12 @@ func (p *Pending) Close() {
 }
 
 func (p *Pending) Submit(a Answer, now time.Time) error {
+	return p.SubmitAfter(a, now, nil)
+}
+
+// SubmitAfter validates and serializes answers with Close, then persists the
+// accepted decision before releasing it to the waiting Agent.
+func (p *Pending) SubmitAfter(a Answer, now time.Time, commit func() error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	q := p.question
@@ -115,6 +121,11 @@ func (p *Pending) Submit(a Answer, now time.Time) error {
 		}
 	default:
 		return ErrInvalid
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
 	}
 	p.closed = true
 	p.reply <- a

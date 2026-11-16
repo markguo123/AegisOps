@@ -1,22 +1,34 @@
 /**
- * P2.5 会话 SSE 流生命周期管理。
+ * Chat SSE v2 传输与生命周期（方案 25 §9/§10）。
  *
- * - 绑定会话：切换会话时先中止旧连接再开启新连接（AbortController 精确回收）；
- * - 断线重连：指数退避 + 抖动，重连成功以服务端历史快照为准重建时间线；
- * - 去重：历史快照是“断点”，每收到快照即清空实时事件列表，避免重连重复；
- * - 归一：实时帧统一为 AgentEvent 供 ChatView 消费（P2.6/P2.7 在此基础上渲染）。
+ * - 切换会话先中止旧连接并原子安装新会话快照；重连不清空已展示内容；
+ * - 显式携带游标续传，重复 seq 忽略，缺口触发重新同步；
+ * - 45s 无帧进入重连，指数退避；401/403/404/426 停止无效重试；
+ * - 展示状态只由 reducer 归并，组件不解析事件。
  */
 
-import { onUnmounted, ref } from 'vue'
-import type { AgentEvent, ChatStreamFrame, HistorySnapshot } from '@/api/sse'
-import { fetchChatStream } from '@/api/sse'
+import { computed, onUnmounted, ref } from 'vue'
 
-export type StreamStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
+import type { ChatFrame } from '@/api/chat'
+import { ChatStreamError, fetchChatStream } from '@/api/chat'
+import {
+  activeTurn,
+  applyChatEvent,
+  applyFatal,
+  applySnapshot,
+  emptyChatState,
+  pendingInteraction,
+  totalTokenUsage,
+  type ChatState,
+} from '@/chat/store'
 
-/** 重连退避：1s → 2s → 4s → 8s 封顶 + 最多 500ms 抖动。 */
+export type StreamStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed' | 'fatal'
+
+export const CHAT_IDLE_TIMEOUT_MS = 45_000
+
 function backoff(attempt: number): number {
-  const exp = Math.min(attempt - 1, 3)
-  return 1000 * 2 ** exp + Math.round(Math.random() * 500)
+  const exp = Math.min(attempt - 1, 4)
+  return Math.min(8_000, 1_000 * 2 ** exp) + Math.round(Math.random() * 400)
 }
 
 function delay(ms: number): Promise<void> {
@@ -29,93 +41,156 @@ export function useChatStream() {
   const error = ref('')
   const reconnectAttempt = ref(0)
   const lastFrameAt = ref('')
-  const history = ref<HistorySnapshot | null>(null)
-  const events = ref<AgentEvent[]>([])
+  const state = ref<ChatState>(emptyChatState())
+
+  const turns = computed(() =>
+    state.value.turnOrder
+      .map((id) => state.value.turns[id])
+      .filter((turn): turn is NonNullable<typeof turn> => Boolean(turn)),
+  )
+  const items = computed(() => state.value.items)
+  const active = computed(() => activeTurn(state.value))
+  const pending = computed(() => pendingInteraction(state.value))
+  const token = computed(() => totalTokenUsage(state.value))
+  const running = computed(() => active.value !== null)
 
   let controller: AbortController | null = null
-  let running = false
+  let generation = 0
+  let runningLoop = false
   let disposed = false
-  const seenEventSeq = new Set<number>()
+  let idleTimer: number | null = null
+  // 缺口触发的重新订阅（同一时刻只允许一个挂起请求）。
+  let resyncPending = false
 
   function reset(): void {
     status.value = 'idle'
     error.value = ''
     reconnectAttempt.value = 0
     lastFrameAt.value = ''
-    history.value = null
-    events.value = []
+    state.value = emptyChatState()
   }
 
-  function clear(): void {
-    running = false
-    controller?.abort()
-    controller = null
-    sessionId.value = null
-    reset()
-  }
-
-  function handleFrame(frame: ChatStreamFrame): void {
-    lastFrameAt.value = new Date().toISOString()
-    if (frame.kind === 'history') {
-      // 历史快照为会话重放的断点：重建历史并清空实时事件，规避重连重复。
-      history.value = frame.snapshot
-      events.value = []
-      seenEventSeq.clear()
-      status.value = 'open'
-      return
+  function armIdleTimer(id: string, gen: number): void {
+    if (idleTimer !== null) {
+      window.clearTimeout(idleTimer)
     }
-    if (frame.kind === 'event') {
-      if (typeof frame.event.seq === 'number') {
-        if (seenEventSeq.has(frame.event.seq)) {
-          return
-        }
-        seenEventSeq.add(frame.event.seq)
+    idleTimer = window.setTimeout(() => {
+      if (sessionId.value !== id || generation !== gen) {
+        return
       }
-      events.value.push(frame.event)
-      return
-    }
-    // legacy/unknown 帧暂不进入归一视图（progress/state 无统一事件对应），
-    // 后续 P2.6/P2.7 如需展示可在此扩展。
+      // 长时间没有任何帧：主动重连，服务端会按游标补齐。
+      void reconnect()
+    }, CHAT_IDLE_TIMEOUT_MS)
   }
 
-  async function runLoop(id: string): Promise<void> {
+  function clearIdleTimer(): void {
+    if (idleTimer !== null) {
+      window.clearTimeout(idleTimer)
+      idleTimer = null
+    }
+  }
+
+  function handleFrame(frame: ChatFrame, id: string, gen: number): void {
+    if (sessionId.value !== id || generation !== gen) {
+      return
+    }
+    lastFrameAt.value = new Date().toISOString()
+    switch (frame.kind) {
+      case 'snapshot':
+        state.value = applySnapshot(frame.snapshot)
+        return
+      case 'reset_required':
+        // 续传范围失效：服务端随后会发规范快照；这里清空游标等待安装。
+        state.value = { ...state.value, cursor: 0, needSync: false }
+        return
+      case 'fatal':
+        state.value = applyFatal(state.value, frame.code, frame.message)
+        status.value = 'fatal'
+        error.value = frame.message
+        return
+      case 'event': {
+        const result = applyChatEvent(state.value, frame.event)
+        state.value = result.state
+        if (result.needSync) {
+          // 缺口：中止当前连接并从最后已应用游标重新订阅（异步，避免在帧回调里重入）。
+          if (!resyncPending) {
+            resyncPending = true
+            queueMicrotask(() => {
+              void resync().finally(() => {
+                resyncPending = false
+              })
+            })
+          }
+        }
+        return
+      }
+      default:
+        return
+    }
+  }
+
+  async function runLoop(id: string, gen: number): Promise<void> {
     let attempt = 0
-    while (running && sessionId.value === id) {
+    while (runningLoop && sessionId.value === id && generation === gen) {
+      if (state.value.fatal) {
+        return
+      }
       controller = new AbortController()
-      events.value = []
+      const signal = controller.signal
+      armIdleTimer(id, gen)
       try {
-        await fetchChatStream(
-          id,
-          {
-            onOpen: () => {
-              status.value = 'open'
-              error.value = ''
-            },
-            onFrame: handleFrame,
+        await fetchChatStream(id, {
+          after: state.value.cursor,
+          signal,
+          onOpen: () => {
+            status.value = 'open'
+            error.value = ''
           },
-          controller.signal,
-        )
-        if (sessionId.value !== id) {
+          onFrame: (frame) => handleFrame(frame, id, gen),
+          onActivity: () => {
+            if (generation === gen && sessionId.value === id) armIdleTimer(id, gen)
+          },
+        })
+        if (sessionId.value !== id || generation !== gen || signal.aborted) {
           return
         }
-        if (controller.signal.aborted) {
-          return
-        }
-        // 流被服务端关闭（如进程重启/网络抖动）：进入重连退避。
+        // 服务端正常关闭连接（进程重启/网络）：带游标重连。
         attempt += 1
         reconnectAttempt.value = attempt
         status.value = 'reconnecting'
-        error.value = '连接中断，正在自动重连'
+        error.value = '连接中断，正在自动重连；已展示内容会保留'
         await delay(backoff(attempt))
       } catch (err) {
-        if (disposed || sessionId.value !== id || controller.signal.aborted) {
+        if (disposed || sessionId.value !== id || generation !== gen) {
           return
+        }
+        if (signal.aborted) {
+          return
+        }
+        if (err instanceof ChatStreamError) {
+          if (err.status === 401) {
+            status.value = 'closed'
+            error.value = '登录已失效，请重新登录'
+            return
+          }
+          if (err.status === 403 || err.status === 404) {
+            status.value = 'closed'
+            error.value = '会话不可访问或已删除'
+            return
+          }
+          if (err.status === 426) {
+            status.value = 'closed'
+            error.value = '客户端版本过旧，请刷新页面以升级到 Chat 协议 v2'
+            return
+          }
         }
         attempt += 1
         reconnectAttempt.value = attempt
         status.value = 'reconnecting'
         error.value = err instanceof Error ? err.message : '连接失败，正在自动重连'
         await delay(backoff(attempt))
+      } finally {
+        if (generation === gen) clearIdleTimer()
       }
     }
     if (status.value === 'reconnecting') {
@@ -124,34 +199,57 @@ export function useChatStream() {
   }
 
   async function connect(id: string): Promise<void> {
-    clear()
+    clearIdleTimer()
+    runningLoop = false
+    resyncPending = false
+    controller?.abort()
+    controller = null
+    generation += 1
+    const gen = generation
     sessionId.value = id
+    reset()
     status.value = 'connecting'
-    running = true
-    await runLoop(id)
+    runningLoop = true
+    await runLoop(id, gen)
   }
 
-  /** 手动重连：中止当前连接并用同一会话回到历史快照 + 重新订阅。 */
+  /** 手动重连：保留当前展示内容与游标，重新订阅。 */
   async function reconnect(): Promise<void> {
     const id = sessionId.value
     if (!id) {
       return
     }
-    status.value = 'connecting'
-    reconnectAttempt.value = 0
     controller?.abort()
     controller = null
-    running = true
-    await runLoop(id)
+    runningLoop = false
+    resyncPending = false
+    generation += 1
+    const gen = generation
+    status.value = 'connecting'
+    reconnectAttempt.value = 0
+    error.value = ''
+    runningLoop = true
+    await runLoop(id, gen)
+  }
+
+  /** 主动重取规范快照（fatal 后由用户触发）。 */
+  async function resync(): Promise<void> {
+    state.value = { ...state.value, cursor: 0, fatal: null, needSync: false }
+    await reconnect()
   }
 
   function stop(): void {
-    clear()
+    runningLoop = false
+    controller?.abort()
+    controller = null
+    clearIdleTimer()
+    reset()
+    sessionId.value = null
   }
 
   onUnmounted(() => {
     disposed = true
-    clear()
+    stop()
   })
 
   return {
@@ -160,10 +258,16 @@ export function useChatStream() {
     error,
     reconnectAttempt,
     lastFrameAt,
-    history,
-    events,
+    state,
+    turns,
+    items,
+    active,
+    pending,
+    token,
+    running,
     connect,
     reconnect,
+    resync,
     stop,
   }
 }

@@ -76,7 +76,7 @@ func TestStreamDisablesProxyBuffering(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/sessions/s1/stream", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/sessions/s1/stream?protocol=2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

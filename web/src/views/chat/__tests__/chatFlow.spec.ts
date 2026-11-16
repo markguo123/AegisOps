@@ -7,14 +7,16 @@ import { TOKEN_KEY, USER_KEY } from '@/api/request'
 import ChatView from '@/views/chat/ChatView.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
 import ConversationList from '@/components/chat/ConversationList.vue'
+import type { ChatSnapshot } from '@/api/chat'
 
 /**
- * P2.12 E2E 冒烟（前端全链路，后端以 fetch 打桩）：
- * 登录态 → 会话列表 → 选择会话并订阅 SSE → 发送 → 审批卡回传 → 停止。
- * 真实集群端到端由 P6.7 覆盖，本用例保证前端契约与交互不断链。
+ * 前端全链路冒烟（协议 v2，后端以 fetch 打桩）：
+ * 登录态 → 会话列表 → 选择会话并订阅 v2 流 → 发送 → 审批/问题卡回传 → 停止。
  */
 
-const SESSION = {ownerId:'u1',clusterId:'c1',
+const SESSION = {
+  ownerId: 'u1',
+  clusterId: 'c1',
   id: 's1',
   name: '诊断 default 命名空间部署',
   state: 'running',
@@ -27,22 +29,41 @@ const SESSION = {ownerId:'u1',clusterId:'c1',
 interface Call {
   url: string
   body: unknown
+  headers?: HeadersInit
 }
 
 let calls: Call[] = []
 
-function sseStream(frames: unknown[]): Response {
+function snapshot(cursor = 1, usage = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 }): ChatSnapshot {
+  return {
+    protocol_version: 2,
+    session_id: 's1',
+    cursor,
+    replay_floor: 0,
+    turns: [
+      {
+        turn_id: 't0',
+        session_id: 's1',
+        input: '诊断 default 命名空间部署',
+        status: 'done',
+        usage,
+        revision: cursor,
+      },
+    ],
+    items: [],
+  }
+}
+
+function sseStream(frames: unknown[], initial: ChatSnapshot = snapshot()): Response {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       controller.enqueue(
         encoder.encode(
-          `data: ${JSON.stringify({
-            type: 'history',
-            sessionId: 's1',
-            state: 'running',
-            messages: [],
-            token: SESSION.token,
+          `id: s1:${initial.cursor}\nevent: stream.snapshot\ndata: ${JSON.stringify({
+            event_type: 'stream.snapshot',
+            session_id: 's1',
+            data: initial,
           })}\n\n`,
         ),
       )
@@ -67,19 +88,38 @@ function installFetch(
     canDestroy: false,
   },
   accessClusters?: unknown[],
+  initial?: ChatSnapshot,
 ): void {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = String(input)
       const body = init.body ? JSON.parse(String(init.body)) : null
-      calls.push({ url, body })
+      calls.push({ url, body, headers: init.headers })
       if (url === '/api/v1/skills' && (init.method ?? 'GET') === 'GET') {
         return new Response(JSON.stringify({ data: skills }), { status: 200 })
       }
       if (url === '/api/v1/auth/access') {
         return new Response(
-          JSON.stringify({ request_id: 'r', timestamp: new Date().toISOString(), data: accessClusters ?? [{id:"c1",name:"prod",access:{rules:[{scopeType:"namespace",namespaces:(scope as {namespaces:string[]}).namespaces,actions:["read"]}]}}] }),
+          JSON.stringify({
+            request_id: 'r',
+            timestamp: new Date().toISOString(),
+            data: accessClusters ?? [
+              {
+                id: 'c1',
+                name: 'prod',
+                access: {
+                  rules: [
+                    {
+                      scopeType: 'namespace',
+                      namespaces: (scope as { namespaces: string[] }).namespaces,
+                      actions: ['read'],
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
           { status: 200 },
         )
       }
@@ -89,13 +129,15 @@ function installFetch(
       if (url === '/api/v1/sessions' && init.method === 'POST') {
         return new Response(JSON.stringify(SESSION), { status: 200 })
       }
-      if (url.endsWith('/stream')) {
-        return sseStream(frames)
+      if (url.includes('/stream')) {
+        return sseStream(frames, initial ?? snapshot())
       }
       if (url.endsWith('/send-message')) {
-        return new Response(JSON.stringify({ sessionId: 's1' }), { status: 202 })
+        return new Response(JSON.stringify({ sessionId: 's1', turnId: 't1', protocolVersion: 2 }), {
+          status: 202,
+        })
       }
-      if (url.endsWith('/approve') || url.endsWith('/cancel')) {
+      if (url.endsWith('/approve') || url.endsWith('/cancel') || url.endsWith('/question')) {
         return new Response(JSON.stringify({ sessionId: 's1' }), { status: 200 })
       }
       return new Response('{}', { status: 200 })
@@ -112,13 +154,14 @@ async function mountChat(frames: unknown[] = []) {
   const wrapper = mount(ChatView, { attachTo: document.body })
   await vi.waitFor(() => expect(wrapper.text()).toContain(SESSION.name))
   await wrapper.find('.session-item').trigger('click')
+  await vi.waitFor(() => expect(wrapper.find('textarea').exists()).toBe(true))
   await vi.waitFor(() => expect(wrapper.text()).toContain('Token 用量'))
   return wrapper
 }
 
 enableAutoUnmount(afterEach)
 
-describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
+describe('ChatView 全链路冒烟（协议 v2）', () => {
   beforeEach(() => {
     calls = []
     localStorage.clear()
@@ -130,11 +173,16 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
 
   it('工作台新建参数只消费一次，重新挂载不重复创建', async () => {
     installFetch([])
-    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/chat', component: ChatView }] })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/chat', component: ChatView }],
+    })
     await router.push('/chat?cluster=c1&new=1')
     await router.isReady()
     const first = mount(ChatView, { global: { plugins: [router] } })
-    await vi.waitFor(() => expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body).length).toBe(1))
+    await vi.waitFor(() =>
+      expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body).length).toBe(1),
+    )
     expect(router.currentRoute.value.query.new).toBeUndefined()
     first.unmount()
     mount(ChatView, { global: { plugins: [router] } })
@@ -151,13 +199,21 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     await vi.waitFor(() => expect(wrapper.find('.session-item').exists()).toBe(true))
     wrapper.getComponent(ConversationList).vm.$emit('create')
     await vi.waitFor(() => expect(document.body.textContent).toContain('选择问诊集群'))
-    const option = [...document.querySelectorAll<HTMLButtonElement>('.cluster-dialog-option')].find(el => el.textContent?.includes('验收云'))
+    const option = [...document.querySelectorAll<HTMLButtonElement>('.cluster-dialog-option')].find(
+      (el) => el.textContent?.includes('验收云'),
+    )
     expect(option).toBeTruthy()
     option!.click()
-    await vi.waitFor(() => expect(calls.some(c => c.url === '/api/v1/sessions' && (c.body as {clusterId?: string})?.clusterId === 'c2')).toBe(true))
+    await vi.waitFor(() =>
+      expect(
+        calls.some(
+          (c) => c.url === '/api/v1/sessions' && (c.body as { clusterId?: string })?.clusterId === 'c2',
+        ),
+      ).toBe(true),
+    )
   })
 
-  it('加载会话列表并展示会话级 Token（刷新/重开仍可读）', async () => {
+  it('加载会话列表并从规范快照展示会话级 Token', async () => {
     const wrapper = await mountChat()
     expect(wrapper.text()).toContain('2 条')
     expect(wrapper.text()).toContain('18')
@@ -166,7 +222,7 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
 
   it('新会话展示服务端授权范围，明确 namespace 与集群级资源边界', async () => {
     const emptySession = { ...SESSION, id: 'empty', name: '新会话', messageCount: 0, token: null }
-    installFetch([], [], [emptySession])
+    installFetch([], [], [emptySession], undefined, undefined, snapshot(0, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }))
     const wrapper = mount(ChatView, { attachTo: document.body })
     await vi.waitFor(() => expect(wrapper.find('.session-item').exists()).toBe(true))
     await wrapper.find('.session-item').trigger('click')
@@ -175,44 +231,120 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     expect(wrapper.text()).toContain('集群对象与命名空间分别授权')
   })
 
-  it('选择会话后订阅 SSE：发送进入 Turn，审批卡回传选择值', async () => {
+  it('v2 流渲染审批卡，发送与审批回传字段正确', async () => {
     const wrapper = await mountChat([
       {
-        event_type: 'turn.started',
+        protocol_version: 2,
+        session_id: 's1',
         turn_id: 't1',
-        data: { input: '修复它' },
+        event_type: 'turn.status',
+        seq: 2,
+        timestamp: new Date().toISOString(),
+        data: { turn_id: 't1', status: 'running', input: '修复它', activity: 'checking' },
       },
       {
-        event_type: 'approval.required',
+        protocol_version: 2,
+        session_id: 's1',
         turn_id: 't1',
+        event_type: 'interaction.updated',
+        seq: 3,
+        timestamp: new Date().toISOString(),
         data: {
-          id:'once',prompt: '确认执行 dry-run 后的 apply？',
-          options: [{ label: '确认并执行', value: 'approve' }],
-          tool: 'create_resource',
-          risk: 'HIGH',
+          interaction: {
+            interaction_id: 'int-once',
+            turn_id: 't1',
+            kind: 'approval',
+            status: 'pending',
+            title: '审批请求',
+            prompt: '确认执行 dry-run 后的 apply？',
+            options: [{ label: '确认执行', value: 'yes' }],
+            tool: 'create_resource',
+            risk: 'HIGH',
+            item_order: 3,
+            revision: 3,
+          },
         },
       },
     ])
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('审批请求'))
 
-    // 发送：输入 → 点击发送按钮
     await wrapper.find('textarea').setValue('修复它')
     const send = wrapper.findAll('button').find((btn) => btn.text() === '发送')!
     await send.trigger('click')
     await vi.waitFor(() => expect(postCallsSuffix('/send-message')).toHaveLength(1))
     expect(postCallsSuffix('/send-message')[0].body).toEqual({ query: '修复它' })
+    const headers = new Headers(postCallsSuffix('/send-message')[0].headers)
+    expect(headers.get('Idempotency-Key')).toBeTruthy()
 
-    // 审批回传
-    const approve = wrapper.findAll('button').find((btn) => btn.text() === '确认并执行')!
+    const approve = wrapper.findAll('button').find((btn) => btn.text().includes('确认执行'))!
     await approve.trigger('click')
     await vi.waitFor(() => expect(postCallsSuffix('/approve')).toHaveLength(1))
-    expect(postCallsSuffix('/approve')[0].body).toEqual({choice:'approve',approvalId:'once'})
+    expect(postCallsSuffix('/approve')[0].body).toEqual({
+      choice: 'yes',
+      approvalId: 'int-once',
+      expectedRevision: 3,
+    })
   })
 
-  it('SSE 驱动运行态：turn.completed 后回到可发送，停止按钮回传 cancel', async () => {
+  it('v2 流渲染结构化问题卡，提交走 question 端点', async () => {
     const wrapper = await mountChat([
-      { event_type: 'turn.started', turn_id: 't2', data: { input: '检查集群' } },
+      {
+        protocol_version: 2,
+        session_id: 's1',
+        turn_id: 't1',
+        event_type: 'turn.status',
+        seq: 2,
+        timestamp: new Date().toISOString(),
+        data: { turn_id: 't1', status: 'waiting', wait_reason: 'question', input: '检查 nginx' },
+      },
+      {
+        protocol_version: 2,
+        session_id: 's1',
+        turn_id: 't1',
+        event_type: 'interaction.updated',
+        seq: 3,
+        timestamp: new Date().toISOString(),
+        data: {
+          interaction: {
+            interaction_id: 'q1',
+            turn_id: 't1',
+            kind: 'question',
+            status: 'pending',
+            prompt: '保留 PVC 还是切换默认页？',
+            options: [{ label: '保留 PVC 补齐内容', value: 'keep' }],
+            item_order: 3,
+            revision: 3,
+          },
+        },
+      },
+    ])
+    await vi.waitFor(() => expect(wrapper.text()).toContain('保留 PVC 补齐内容'))
+    expect(wrapper.text()).toContain('等待你选择')
+
+    await wrapper.get('.question-option input').setValue(true)
+    await wrapper.findAll('.question-actions button')[1].trigger('click')
+    await vi.waitFor(() => expect(postCallsSuffix('/question')).toHaveLength(1))
+    expect(postCallsSuffix('/question')[0].body).toMatchObject({
+      id: 'q1',
+      session_id: 's1',
+      turn_id: 't1',
+      status: 'selected',
+      option_id: 'keep',
+    })
+  })
+
+  it('运行中的 Turn 驱动停止按钮，回传 cancel', async () => {
+    const wrapper = await mountChat([
+      {
+        protocol_version: 2,
+        session_id: 's1',
+        turn_id: 't2',
+        event_type: 'turn.status',
+        seq: 2,
+        timestamp: new Date().toISOString(),
+        data: { turn_id: 't2', status: 'running', input: '检查集群', activity: 'generating' },
+      },
     ])
     await vi.waitFor(() => expect(wrapper.text()).toContain('检查集群'))
 
@@ -221,19 +353,26 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
     await send.trigger('click')
     await vi.waitFor(() => expect(postCallsSuffix('/send-message')).toHaveLength(1))
 
-    // 运行中：发送按钮变为停止
     const stop = wrapper.findAll('button').find((btn) => btn.text().includes('停止'))!
     await stop.trigger('click')
     await vi.waitFor(() => expect(postCallsSuffix('/cancel')).toHaveLength(1))
   })
 
-  it('会话级 Token 随 turn.completed 的 usage 累加', async () => {
+  it('会话级 Token 随 turn.status 的累计用量更新', async () => {
     const wrapper = await mountChat([
-      { event_type: 'turn.started', turn_id: 't3', data: { input: '再查一次' } },
       {
-        event_type: 'turn.completed',
+        protocol_version: 2,
+        session_id: 's1',
         turn_id: 't3',
-        data: { output: '完成', token: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } },
+        event_type: 'turn.status',
+        seq: 2,
+        timestamp: new Date().toISOString(),
+        data: {
+          turn_id: 't3',
+          status: 'done',
+          input: '再查一次',
+          usage: { prompt_tokens: 16, completion_tokens: 12, total_tokens: 28 },
+        },
       },
     ])
     await vi.waitFor(() => expect(wrapper.text()).toContain('28'))
@@ -258,7 +397,7 @@ describe('ChatView 全链路冒烟（P2.10/P2.11/P2.13）', () => {
       createdAt: '',
       updatedAt: '',
     }
-    installFetch([{ event_type: 'turn.started', turn_id: 't4', data: { input: '看下 default' } }], [skill])
+    installFetch([], [skill])
     const wrapper = mount(ChatView, { attachTo: document.body })
     await vi.waitFor(() => expect(wrapper.text()).toContain(SESSION.name))
     await wrapper.find('.session-item').trigger('click')

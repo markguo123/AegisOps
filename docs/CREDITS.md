@@ -1,5 +1,14 @@
 # 借鉴来源登记
 
+## kagent Chat 输出与交互（方案 25 / ADR-055）
+
+- 来源：kagent，Apache-2.0；本地核查提交 `e3624635`（完整提交哈希以该次核查记录为准，不宣称随上游更新）。
+- 复用方式：只借鉴消息/交互的**设计与纯数据转换语义**，不引入 ADK Runner、A2A Executor/TaskStore、CRD/Controller 或 React 页面；Go/Vue 实现在本项目内独立完成。
+- `go/adk/pkg/a2a/executor.go`：借鉴 partial 与完整消息区分、工具内容按调用 ID 关联、`input-required` 不等于 completed；对应实现为 `internal/sse/contract.go`（`Message.Status/Purpose`、`ToolCall.ToolCallID`、`Interaction.Status`）与 `internal/agent/flow.go`。
+- `ui/src/lib/messageHandlers.ts`、`chatSessionGuard.ts`：借鉴增量归并、已答交互回看、动作前核对当前交互、历史/实时稳定 ID；对应实现为 `web/src/chat/store.ts`（纯 reducer：重复 seq 忽略、缺口要求重同步、同 ID upsert）。
+- `go/adk/pkg/tools/ask_user.go`、`AskUserDisplay.tsx`：借鉴结构化问题（选项 + 影响 + 自由输入/跳过）与回答后继续；对应实现为 `internal/agent/question.go`、`internal/sessionapi/question.go`、`web/src/components/chat/QuestionInteraction.vue`。未复制 Google ToolConfirmation 依赖，回答仍然不构成执行授权。
+- HolmesGPT `holmes/core/tool_calling_llm.py`、`holmes/utils/stream.py`：借鉴过程说明与最终答案分离、按工具调用 ID 发开始/结果、统一错误收尾；对应实现为 Agent 每个模型调用一条 Message、`message.failed` + `notice.created`。未引入 Python 依赖或整段历史随终态反复下发。
+
 ## HolmesGPT（P10）
 
 - 来源：HolmesGPT，Apache-2.0。

@@ -122,20 +122,25 @@ export async function pinSession(
   )
 }
 
-/** 发起一轮 Chat（webui `POST /api/v1/sessions/{id}/send-message`），SSE 流随后推送事件。
- * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。 */
+/** 发起一轮 Chat（`POST /api/v1/sessions/{id}/send-message`），SSE 流随后推送事件。
+ * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。
+ * `idempotencyKey` 用于网络重试时复用同一个 turn，不创建第二轮。 */
 export async function sendMessage(
   id: string,
-  payload: { query: string; skills?: string[] },
-): Promise<{ sessionId: string }> {
+  payload: { query: string; skills?: string[]; idempotencyKey?: string },
+): Promise<{ sessionId: string; turnId?: string; protocolVersion?: number; duplicate?: boolean }> {
   const body: Record<string, unknown> = { query: payload.query }
   // P3.8.4：显式 @skill 指定的名称只在非空时随请求提交，后端强校验。
   if (payload.skills && payload.skills.length > 0) {
     body.skills = payload.skills
   }
-  return sessionFetch<{ sessionId: string }>(
+  const headers: HeadersInit = {}
+  if (payload.idempotencyKey) {
+    ;(headers as Record<string, string>)['Idempotency-Key'] = payload.idempotencyKey
+  }
+  return sessionFetch<{ sessionId: string; turnId?: string; protocolVersion?: number; duplicate?: boolean }>(
     `/api/v1/sessions/${encodeURIComponent(id)}/send-message`,
-    { method: 'POST', body: JSON.stringify(body) },
+    { method: 'POST', body: JSON.stringify(body), headers },
   )
 }
 
@@ -147,10 +152,10 @@ export async function cancelRun(id: string): Promise<{ sessionId: string }> {
 }
 
 /** 回传审批选择（webui `POST /api/v1/sessions/{id}/approve`）。choice 不写回响应体。 */
-export async function approveRun(id: string, choice: string, approvalId?:string): Promise<{ sessionId: string }> {
+export async function approveRun(id: string, choice: string, approvalId?:string, expectedRevision?: number): Promise<{ sessionId: string }> {
   return sessionFetch<{ sessionId: string }>(
     `/api/v1/sessions/${encodeURIComponent(id)}/approve`,
-    { method: 'POST', body: JSON.stringify({ choice,approvalId }) },
+    { method: 'POST', body: JSON.stringify({ choice,approvalId, expectedRevision }) },
   )
 }
 
@@ -160,6 +165,7 @@ export async function deleteSession(id: string): Promise<{ deleted: string }> {
   })
 }
 
+/** 历史工具结果中的问题记录（只读回放，不再用于轮询）。 */
 export interface UserQuestion {
   id: string
   session_id: string
@@ -168,12 +174,21 @@ export interface UserQuestion {
   options: { id: string; label: string; impact: string; recommended?: boolean }[]
   expires_at: string
 }
-export function getQuestion(id: string): Promise<UserQuestion | null> {
-  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(id)}/question`)
-}
-export function answerQuestion(q: UserQuestion, status: string, option: string, text: string): Promise<unknown> {
-  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(q.session_id)}/question`, {
-    method: 'POST', body: JSON.stringify({ id: q.id, session_id: q.session_id, turn_id: q.turn_id, status,
-      option_id: status === 'selected' ? option : undefined, text: status === 'text' ? text : undefined }),
+
+/** 从规范 Interaction 提交结构化回答（问题卡与审批卡走各自既有端点）。 */
+export function answerInteraction(
+  sessionId: string,
+  payload: { interactionId: string; turnId: string; status: string; optionId?: string; text?: string },
+): Promise<unknown> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/question`, {
+    method: 'POST',
+    body: JSON.stringify({
+      id: payload.interactionId,
+      session_id: sessionId,
+      turn_id: payload.turnId,
+      status: payload.status,
+      option_id: payload.optionId,
+      text: payload.text,
+    }),
   })
 }

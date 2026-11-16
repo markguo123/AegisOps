@@ -76,7 +76,14 @@ func (s *Server) handleQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, decision.ErrStale)
 		return
 	}
-	if err := p.Submit(a, time.Now()); err != nil {
+	if err := p.SubmitAfter(a, time.Now(), func() error {
+		if committer, ok := s.chat.(interface {
+			CommitQuestion(context.Context, decision.Answer) error
+		}); ok {
+			return committer.CommitQuestion(r.Context(), a)
+		}
+		return nil
+	}); err != nil {
 		code := 409
 		if err == decision.ErrInvalid {
 			code = 400
