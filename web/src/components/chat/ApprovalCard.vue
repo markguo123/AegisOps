@@ -146,7 +146,7 @@ const clusterText = computed(() => {
 })
 
 function optionLabel(option: { label: string; value: string }): string {
-  if (option.value === 'yes') return '确认执行'
+  if (option.value === 'yes') return props.approval.operation === 'secret.read' ? '同意读取' : '确认执行'
   if (option.value === 'yes_and_dont_ask_again') return '本次会话不再询问'
   return option.label || option.value
 }
@@ -219,7 +219,7 @@ function reject(): void {
       </el-tag>
     </div>
 
-    <p v-if="showLegacyPrompt && approval.prompt" class="approval-prompt">{{ approval.prompt }}</p>
+    <p v-if="(showLegacyPrompt || approval.operation === 'secret.read') && approval.prompt" class="approval-prompt">{{ approval.prompt }}</p>
 
     <div v-if="targetText" class="approval-target">
       <span class="approval-section-label">目标资源</span>

@@ -382,3 +382,10 @@ POST   /api/v1/sessions/{id}/cancel        // own 或 admin
 - 实现方不得 import 定义方（kubernetes 不得 import scanner）。
 - `model` 不 import 任何内部包；`session` 不得反向依赖 `llm`（`TokenUsage` 同构复制）。
 - Web UI 与 CLI、Server 复用同一 `service.ChatService`，不依赖长驻 Agent。
+
+
+## Secret 明文即时查看（2026-11-16）
+
+`POST /api/v1/sessions/{id}/secret/reveal` 接收 namespace、name、keys（1–5 个）。用户主动点击显示后独立请求，使用当前登录身份与 CSRF 防护，重新校验会话、目标集群、namespace 授权和 Kubernetes RBAC。namespace 资源 read 授权包含 Secret 读取；平台 Admin 拥有全部已接入集群范围资格，仍受接入凭据的 RBAC 约束。返回 values，每项为 value/encoding（utf8 或 base64）；每 key 最大 16KiB、合计最大 32KiB。响应 `Cache-Control: no-store, private`，禁止写入聊天 SSE、历史与审计正文。
+
+400 为参数错误，403 为授权或集群读取被拒，413 为超出显示上限，503 为连接或审计不可用。审计成功后才返回明文，审计仅保存目标、keys、身份与状态。前端隐藏、会话切换、失焦或 60 秒后清除。Agent 的 get_secret_value 仍是独立的逐次真人确认流程，同意后复核权限执行；旧 auto 配置不再免除确认。

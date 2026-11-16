@@ -38,6 +38,9 @@ func (a *Agent) newApprovalInteraction(plan tools.ApprovalPlan, toolCallID strin
 		Summary: plan.Summary, Command: plan.Command,
 		Verification: append([]string(nil), plan.Verification...),
 	}
+	if plan.Operation == "secret.read" {
+		in.Prompt = "是否同意读取此 Secret 的指定 key 用于本轮诊断？值可能发送给当前配置的模型服务商；聊天历史和审计不保存明文。"
+	}
 	if plan.Target != (tools.ApprovalTarget{}) {
 		in.Target = &sse.Target{
 			Cluster: plan.Target.Cluster, Namespace: plan.Target.Namespace,

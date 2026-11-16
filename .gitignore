@@ -27,3 +27,4 @@ deploy/kubectl/*
 dist-install/
 
 .dshcheck/
+.plannning/

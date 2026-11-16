@@ -308,6 +308,7 @@ const uiTurns = computed<TurnUiData[]>(() => {
     }
     return {
       key: turn.turn_id,
+      sessionId: turn.session_id,
       seq: index + 1,
       input: turn.input ?? '',
       status: statusOf(turn),

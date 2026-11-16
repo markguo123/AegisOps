@@ -80,9 +80,12 @@ func TestPlatformSecretInfoUsesOrdinaryRead(t *testing.T) {
 			t.Fatalf("%s allowed=%t err=%v", tc.input, tc.allowed, err)
 		}
 	}
-	// 同一身份没有 secret.read，明文读取必须被拒绝。
+	// namespace read 赋予范围内 Secret 读取资格；真人确认由 Agent 强制执行。
 	err := scope.Check("get_secret_value", json.RawMessage(`{"namespace":"team","name":"db","keys":["password"],"reason":"diagnose"}`))
-	if err == nil {
-		t.Fatal("只有 read 权限时不得读取 Secret 明文")
+	if err != nil {
+		t.Fatalf("授权 namespace 内应允许发起 Secret 读取: %v", err)
+	}
+	if scope.Check("get_secret_value", json.RawMessage(`{"namespace":"other","name":"db","keys":["password"],"reason":"diagnose"}`)) == nil {
+		t.Fatal("范围外 Secret 不得读取")
 	}
 }

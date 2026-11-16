@@ -156,13 +156,9 @@ type SecretConfig struct {
 	// plus structured, per-key diagnostic reads after explicit approval).
 	// "read_write" is intentionally rejected because it is too broad.
 	Access string `mapstructure:"access"`
-	// ReadApproval controls the consent model of read_on_demand reads:
-	// "always" (default) requires a human approver for every call;
-	// "auto" is an explicit administrator authorization for in-scope on-demand
-	// reads within the existing user/task/cluster permissions, without a
-	// per-call prompt. It still requires secret.read, target binding, and all
-	// the redaction/model-only rules; it implies the external model provider
-	// may see the requested plaintext.
+	// ReadApproval retains the legacy configuration field. Agent reads always
+	// require per-call human consent; the old auto value is treated as always.
+	// Dedicated authorized UI reveal uses a separate non-persistent response.
 	ReadApproval string `mapstructure:"read_approval"`
 }
 

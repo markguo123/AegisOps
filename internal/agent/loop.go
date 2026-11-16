@@ -921,6 +921,9 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	}})
 	a.audit(ctx, audit.ActionToolCallRequest, map[string]any{"name": call.Name, "arguments": safeArgsView})
 	if err := a.scopeCheck(ctx, call); err != nil {
+		if call.Name == "get_secret_value" {
+			a.flowNotice(ctx, sse.NoticeWarning, "SECRET_ACCESS_DENIED", "你没有权限读取该 namespace 下的 Secret，请联系管理员授权。")
+		}
 		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{
 			"name": call.Name, "reason": "scope_denied", "detail": err.Error(),
 		})
@@ -985,6 +988,13 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		return tools.ResultError("tool call denied by approval policy")
 	}
 	if decision == approval.DecisionRequireApproval {
+		secretRead := call.Name == "get_secret_value"
+		if secretRead && a.Approver == nil {
+			return tools.ResultError("读取 Secret 需要用户明确同意，当前没有可用的确认通道")
+		}
+		if secretRead {
+			batchApproved = false
+		}
 		key := declineKey(call.Name, safeCallArgs)
 		// 先查拒绝计数 ≥ 上限？是 → 不再打扰用户，直接返回"硬拦截 + 替代方案提示"，LLM 必须收敛到新方案。
 		if a.Session.Declined(key) >= maxDeclinesBeforeBlock {
@@ -996,7 +1006,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		if batchApproved {
 			// 批量审批已预授权，跳过个体审批。
 			a.audit(ctx, audit.ActionApprovalSkipped, map[string]any{"name": call.Name, "batch": true})
-		} else if a.Approver != nil && !a.Session.Approved(key) {
+		} else if a.Approver != nil && (secretRead || !a.Session.Approved(key)) {
 			a.audit(ctx, audit.ActionApprovalRequested, map[string]any{"name": call.Name, "risk": t.Risk(call.Arguments)})
 			prompt := fmt.Sprintf("将执行以下操作（风险等级：%s）：", t.Risk(call.Arguments))
 			if d, ok := t.(tools.CommandDescriber); ok {
@@ -1014,7 +1024,6 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			// 统一 Interaction：审批卡与问题卡同源展示，答复只代表展示状态，
 			// 写权限仍由原审批门禁决定。
 			interaction := a.newApprovalInteraction(plan, call.ID)
-			a.flowInteraction(ctx, interaction)
 			// P1.8: 审批 Step（挂起到等待用户确认）。
 			approvalStep := a.beginStep(ctx, session.StepApproval, call.Name, "")
 			a.waitStep(ctx, approvalStep)
@@ -1035,7 +1044,14 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 					{Label: "拒绝", Value: ChoiceNo},
 				}
 			}
+			for _, option := range approvalOptions {
+				interaction.Options = append(interaction.Options, sse.ChoiceOption{Label: option.Label, Value: option.Value})
+			}
+			a.flowInteraction(ctx, interaction)
 			choice, err := a.confirmApproval(ctx, prompt, approvalOptions, plan, call.ID, interaction.InteractionID)
+			if secretRead && choice != ChoiceYes && choice != ChoiceNo && err == nil {
+				choice = ChoiceNo
+			}
 			// 审批返回后（无论结果）本轮继续运行，等待态必须显式结束。
 			a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
 			if err != nil {

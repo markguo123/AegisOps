@@ -234,6 +234,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/send-message", s.handleSendMessage)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/secret/reveal", s.handleRevealSecret)
 	return mux
 }
 

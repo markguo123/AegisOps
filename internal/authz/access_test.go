@@ -43,7 +43,8 @@ func TestResourceGrantsPreserveNamespaceAndClusterBoundaries(t *testing.T) {
 		{"explicit stage grant", "stage", "orders", false, ActionDestroy, true},
 		{"no implicit node", "prod", "", true, ActionRead, false},
 		{"no empty cluster", "", "orders", false, ActionRead, false},
-		{"no implicit secret", "prod", "orders", false, ActionSecretRead, false},
+		{"namespace read includes secret", "prod", "orders", false, ActionSecretRead, true},
+		{"secret outside scope denied", "prod", "other", false, ActionSecretRead, false},
 		{"no exec", "prod", "testing", false, ActionExec, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

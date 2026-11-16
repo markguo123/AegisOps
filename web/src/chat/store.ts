@@ -176,6 +176,7 @@ export function applyChatEvent(state: ChatState, event: ChatEvent): ApplyResult 
       const status = (data.status as ChatTurn['status']) ?? undefined
       next = touchTurn(next, String(data.turn_id ?? turnID), {
         status,
+        session_id: String(data.session_id ?? event.session_id ?? ''),
         wait_reason: (data.wait_reason as ChatTurn['wait_reason']) ?? undefined,
         activity: (data.activity as ChatTurn['activity']) ?? undefined,
         input: typeof data.input === 'string' ? data.input : undefined,

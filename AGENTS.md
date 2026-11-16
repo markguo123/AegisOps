@@ -1,3 +1,7 @@
+> **2026-11-16 Secret 当前生效口径**
+> namespace 资源 read 授权包含该范围 Secret 读取资格；纯报告权限不产生 namespace 授权。Admin 拥有全部已接入集群范围的读取资格，仍受 Kubernetes RBAC 约束。Agent 每次读取具体 Secret/key 前必须明确询问用户，用户同意后重新校验权限再读取；越权直接提示无权限，不发起审批。`auto` 旧配置兼容接收，但不再免除确认，优先遵守本段。
+> Agent 的 ModelOnly 明文只用于当前轮模型请求；聊天 SSE、历史、报告、持久化和审计仍脱敏。授权用户点击“显示明文”通过独立 POST secret/reveal 接口重新鉴权后即时查看；专用响应允许明文，禁止缓存，前端仅内存保存、60 秒或窗口失焦时清除。该接口是旧“UI 永不回显”条款的明确例外。以下与本段冲突的 always/auto 或 UI 禁止展示说明属于旧口径，以本段为准。
+
 # AegisOps Development Rules
 
 ## Project
@@ -104,28 +108,24 @@ troubleshooting and operations, subject to the following rules:
 
 ## LLM Safety
 
-Secret 内容默认不进入 LLM。仅当 `agent.secret.access=read_on_demand` 时，Agent
-可对已确认与故障相关的具体 Secret key 发起 `get_secret_value`。读取审批由
-`agent.secret.read_approval` 控制（方案 24 §4）：
+Secret 默认不进入 LLM。namespace 资源 read 授权包含该范围内的 Secret
+读取资格；没有该 namespace 授权不得读取，也不得通过询问用户绕过授权。
+Admin 拥有全部已接入集群的读取资格，实际操作仍受 Kubernetes RBAC 约束。
 
-- `always`（缺省）：每次读取都必须经过真人审批，`--skip-permissions`、
-  `require_approval=false` 与普通授权缓存都不得绕过。
-- `auto`：管理员显式授权，在现有用户、任务与集群权限范围内按需读取，不逐次弹窗；
-  每次仍必须完成 secret.read、目标绑定、配置与 RBAC 校验，并走同一个 ModelOnly
-  通道。它仍然是敏感读取（独立审批决策、独立审计），不能改写成普通只读，也不能
-  由上述自动化开关替代。
-- `auto` 表示允许外部模型接收按需读取的明文；该授权不改变平台角色与 Kubernetes
-  RBAC。
+Agent 仅在 agent.secret.access=read_on_demand 时按具体 Secret/key 发起诊断读取。
+每次读取必须明确询问用户，经真人同意后复核当前权限、目标绑定与凭据再执行。
+always 为默认；旧 auto 配置兼容接收但同样要求逐次确认。--skip-permissions、
+require_approval=false、普通授权缓存与批量授权均不能替代此次同意。
 
-审批后的 Secret 明文只允许进入当前一轮模型请求，用于本次诊断。明文永不进入
-evidence、UI/SSE、会话文件、平台数据库、审计文件、最终回答或后续轮次；所有非模型
-出口必须执行精确值脱敏并只保留 namespace/name/key、长度和 SHA-256 指纹。调用
-外部模型意味着模型提供方可见该值，部署方必须自行确认这一数据处理边界。
+读取结果通过 ModelOnly 仅进入当前轮模型请求，外部模型服务商可能看见该值。
+明文不得进入后续模型历史、聊天 SSE、Evidence、报告、数据库与审计。
+非模型出口继续执行精确值脱敏，仅保留目标与安全元数据。
 
-Secret 元数据/键级采集仍通过 internal/scanner/reader → internal/kubernetes 只读门面
-（工具 `get_secret_info`），仅暴露名称、类型、键名和 immutable；巡检与 Evidence
-不读取内容值。元数据查询使用普通 read 权限，不要求 secret.read，也不依赖
-`access=read_on_demand`。
+授权用户主动点击“显示明文”可通过独立 secret/reveal 接口即时查看。
+该专用接口每次校验身份、会话范围、集群、namespace 和 RBAC，审计成功才返回。
+响应禁止缓存；值仅在浏览器内存显示，隐藏、切换、失焦或超时后清除。
+这项专用响应允许明文，聊天 SSE 和所有持久化出口仍保持脱敏。
+Secret 元数据查询使用普通 read 权限；--raw 与直接 kubectl Secret 读取继续禁止。
 
 Sensitive information must be redacted before LLM requests, session files and
 audit files, except for the explicit approval-gated current-turn Secret
@@ -206,12 +206,24 @@ those in Phase 2 beyond the reserved interfaces.
 
 ## LLM Safety
 
-Secret 内容默认不进入 LLM。`read_on_demand` 模式下只允许通过 `get_secret_value`
-按 key 读取；审批由 `agent.secret.read_approval` 控制：`always`（缺省）逐次真人
-审批，`auto` 为管理员显式授权、在现有权限范围内免逐次审批（仍是敏感读取，独立
-决策与审计）。值仅用于当前轮模型推理，不得进入 evidence、UI/SSE、会话、
-数据库、审计、最终回答或后续轮次。平台外部模型提供方可见审批后的值，部署方必须
-确认该边界。`--raw` 与直接 kubectl Secret 访问始终禁止。
+Secret 默认不进入 LLM。namespace 资源 read 授权包含该范围内的 Secret
+读取资格；没有该 namespace 授权不得读取，也不得通过询问用户绕过授权。
+Admin 拥有全部已接入集群的读取资格，实际操作仍受 Kubernetes RBAC 约束。
+
+Agent 仅在 agent.secret.access=read_on_demand 时按具体 Secret/key 发起诊断读取。
+每次读取必须明确询问用户，经真人同意后复核当前权限、目标绑定与凭据再执行。
+always 为默认；旧 auto 配置兼容接收但同样要求逐次确认。--skip-permissions、
+require_approval=false、普通授权缓存与批量授权均不能替代此次同意。
+
+读取结果通过 ModelOnly 仅进入当前轮模型请求，外部模型服务商可能看见该值。
+明文不得进入后续模型历史、聊天 SSE、Evidence、报告、数据库与审计。
+非模型出口继续执行精确值脱敏，仅保留目标与安全元数据。
+
+授权用户主动点击“显示明文”可通过独立 secret/reveal 接口即时查看。
+该专用接口每次校验身份、会话范围、集群、namespace 和 RBAC，审计成功才返回。
+响应禁止缓存；值仅在浏览器内存显示，隐藏、切换、失焦或超时后清除。
+这项专用响应允许明文，聊天 SSE 和所有持久化出口仍保持脱敏。
+Secret 元数据查询使用普通 read 权限；--raw 与直接 kubectl Secret 读取继续禁止。
 
 Sensitive information must be redacted before LLM requests, except for the
 explicit approval-gated current-turn Secret diagnostic channel.

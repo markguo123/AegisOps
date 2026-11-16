@@ -192,3 +192,10 @@ export function answerInteraction(
     }),
   })
 }
+
+/** Values are ephemeral and must never be written to the Chat store. */
+export function revealSecret(sessionId: string, target: { namespace: string; name: string; keys: string[] }, signal: AbortSignal): Promise<{ values: Record<string, { value: string; encoding: string }> }> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/secret/reveal`, {
+    method: 'POST', body: JSON.stringify(target), signal, cache: 'no-store',
+  })
+}

@@ -679,6 +679,7 @@ async function handleRevokeGrant(target: AuthzGrant): Promise<void> {
         <el-form-item label="资源范围"><el-select v-model="grantForm.scopeType" @change="grantForm.permissions=['read']"><el-option label="命名空间内的资源" value="namespace"/><el-option label="集群级对象（不含命名空间内的资源）" value="cluster"/></el-select></el-form-item>
         <el-form-item v-if="grantForm.scopeType==='namespace'" label="命名空间"><el-input v-model="grantForm.namespacesText" placeholder="多个名称用逗号分隔；* 包含现在和未来全部命名空间" /></el-form-item>
         <el-form-item label="常用授权"><el-button v-for="(label,n) in ['只读诊断','普通变更','允许删除']" :key="label" @click="grantForm.permissions=['read',...(grantForm.scopeType==='namespace'?['logs']:[]),...(['operate','destroy'].slice(0,n))]">{{label}}</el-button></el-form-item>
+        <p v-if="grantForm.scopeType === 'namespace'" class="form-hint">namespace 的 read 授权包含 Secret 读取资格；Agent 每次读取仍须用户确认。</p>
         <el-form-item label="允许的动作"><el-select v-model="grantForm.permissions" multiple><el-option v-for="a in (grantForm.scopeType==='cluster'?['read','operate','destroy','shell']:['read','logs','operate','destroy','exec','secret.read'])" :key="a" :value="a" :label="a"/></el-select></el-form-item>
         <el-form-item label="有效期至（可选）">
           <el-date-picker

@@ -99,12 +99,12 @@ func TestSecretReadApprovalModes(t *testing.T) {
 	if !ok {
 		t.Fatal("auto 模式仍应注册 get_secret_value")
 	}
-	if mandatory, _ := autoTool.(tools.MandatoryHumanApproval); mandatory == nil || mandatory.RequiresHumanApproval(nil) {
-		t.Fatal("auto 模式不应要求逐次真人审批")
+	if mandatory, _ := autoTool.(tools.MandatoryHumanApproval); mandatory == nil || !mandatory.RequiresHumanApproval(nil) {
+		t.Fatal("兼容 auto 配置仍必须逐次确认")
 	}
 	sensitive, _ := autoTool.(tools.SensitiveReadAware)
-	if sensitive == nil || !sensitive.SensitiveReadAuto(nil) {
-		t.Fatal("auto 模式必须给出显式的敏感读取授权决策")
+	if sensitive == nil || sensitive.SensitiveReadAuto(nil) {
+		t.Fatal("兼容 auto 配置不能绕过用户确认")
 	}
 	if autoTool.IsReadOnly(nil) {
 		t.Fatal("auto 模式仍是敏感读取，不能改成普通只读")

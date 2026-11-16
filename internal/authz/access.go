@@ -74,6 +74,9 @@ func (a EffectiveAccess) Check(t Target) error {
 		}
 		for _, action := range r.Actions {
 			actions[action] = true
+			if r.ScopeType == ScopeNamespace && action == ActionRead {
+				actions[ActionSecretRead] = true
+			}
 		}
 	}
 	for _, action := range requiredActions(t.Actions) {

@@ -59,6 +59,7 @@ export type TurnStatus =
   | 'canceled'
 
 export interface TurnUiData {
+  sessionId?: string
   key: string
   seq: number
   input: string

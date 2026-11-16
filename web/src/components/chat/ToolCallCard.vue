@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { ArrowDown, CopyDocument, WarningFilled } from '@element-plus/icons-vue'
 
+import SecretReveal from './SecretReveal.vue'
 import QuestionRecord from './QuestionRecord.vue'
 import MarkdownView from './MarkdownView.vue'
 import YamlBlock from './render/YamlBlock.vue'
@@ -53,6 +54,7 @@ export interface ToolUiData {
 
 const props = withDefaults(
   defineProps<{
+    sessionId?: string
     tool: ToolUiData
     /** 完成并成功后默认展开（对齐三期行为）。 */
     autoOpen?: boolean
@@ -339,6 +341,7 @@ function toggle(): void {
       <el-icon class="toolcard-caret" :class="{ open: expanded }"><ArrowDown /></el-icon>
     </button>
 
+    <SecretReveal v-if="sessionId && tool.name === 'get_secret_value' && tool.status === 'done'" :session-id="sessionId" :params="tool.params" />
     <!-- create_resource：提交的 manifest + dry-run→apply 两段式状态 -->
     <div
       v-if="expanded && tool.createResource && tool.createResource.manifest"

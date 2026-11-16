@@ -542,7 +542,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	reg := tools.NewRegistry()
 	if err := k8stools.RegisterAllWithOptions(reg, reader, k8stools.RegisterOptions{
 		SecretAccess:       cfg.Agent.Secret.Access,
-		SecretReadApproval: cfg.Agent.Secret.ReadApproval,
+		SecretReadApproval: config.SecretReadApprovalAlways,
 	}); err != nil {
 		return nil, err
 	}

@@ -62,15 +62,8 @@ type RegisterOptions struct {
 	// SecretAccess 对应 agent.secret.access；只有 read_on_demand 注册
 	// get_secret_value，off/create_only 均不暴露读取工具。
 	SecretAccess string
-	// SecretReadApproval 对应 agent.secret.read_approval：always（默认，
-	// 每次读取都要真人审批）或 auto（管理员显式授权，在现有用户/任务/集群权限
-	// 范围内免逐次审批）。只影响审批决策，不改变 ModelOnly 通道与脱敏规则。
+	// SecretReadApproval 保留旧配置接口；所有模式现在均要求逐次用户确认。
 	SecretReadApproval string
-}
-
-// secretReadAuto 判断是否为显式配置的敏感读取自动放行。
-func secretReadAuto(readApproval string) bool {
-	return strings.EqualFold(strings.TrimSpace(readApproval), "auto")
 }
 
 // newNodeUsageTool 在 reader 支持 metrics 时启用节点资源用量工具。
@@ -96,7 +89,6 @@ func RegisterAllWithOptions(reg *tools.Registry, r Reader, opts RegisterOptions)
 		if secretReader, ok := r.(SecretValuesReader); ok {
 			all = append(all, &secretValueTool{
 				reader: secretReader,
-				auto:   secretReadAuto(opts.SecretReadApproval),
 			})
 		}
 	}

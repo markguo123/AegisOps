@@ -217,6 +217,7 @@ function itemAnchor(item: { data: { key: string } }): string {
             :id="itemAnchor(item)"
             class="turn-item"
             :tool="item.data"
+            :session-id="turn.sessionId"
             :auto-open="false"
             :report-done="reportDone"
             :collapse-all="collapseAllSignal"
