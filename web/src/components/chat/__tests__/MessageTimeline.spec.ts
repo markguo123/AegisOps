@@ -99,7 +99,7 @@ describe('MessageTimeline（规范对象渲染）', () => {
     expect(wrapper.findAll('.turn')).toHaveLength(1)
     expect(wrapper.text()).toContain('体检 default 命名空间')
     expect(wrapper.findAll('.report-block')).toHaveLength(1)
-    expect(wrapper.text()).toContain('最终回答')
+    expect(wrapper.text()).toContain('诊断回复')
     expect(wrapper.get('.md-body').text().split('发现 3 个异常项')).toHaveLength(2)
   })
 
@@ -110,9 +110,9 @@ describe('MessageTimeline（规范对象渲染）', () => {
         { type: 'message', item_order: 2, message: message({ message_id: 'm2', purpose: 'final' }) },
       ),
     })
-    expect(wrapper.text()).toContain('过程说明')
+    expect(wrapper.text()).toContain('分析过程')
     expect(wrapper.text()).toContain('先检查探针与 PVC 挂载。')
-    expect(wrapper.text()).toContain('最终回答')
+    expect(wrapper.text()).toContain('诊断回复')
   })
 
   it('工具对象按 tool_call_id 只渲染一张卡，并保留同源摘要/形态/耗时', () => {
@@ -225,7 +225,7 @@ describe('MessageTimeline（规范对象渲染）', () => {
         { type: 'message', item_order: 4, message: message({ message_id: 'm2' }) },
       ),
     })
-    const kinds = wrapper.findAll('.turn-items > *').map((el) => {
+    const kinds = wrapper.findAll('.turn-items .reasoning, .turn-items .toolcard, .turn-items .report-block').map((el) => {
       const cls = el.classes()
       if (cls.includes('reasoning')) return 'reasoning'
       if (cls.includes('toolcard')) return 'tool'

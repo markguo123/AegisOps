@@ -83,7 +83,7 @@ watch(
   () => props.tool.status,
   (status) => {
     if (status !== 'running' && !manual.value) {
-      expanded.value = true
+      expanded.value = status === 'error' || status === 'unknown' || (props.autoOpen && !props.reportDone)
     }
   },
   { immediate: true },
@@ -93,10 +93,11 @@ watch(
 watch(
   () => props.reportDone,
   (done) => {
-    if (done && !manual.value) {
+    if (done && !manual.value && props.tool.status !== 'error' && props.tool.status !== 'unknown') {
       expanded.value = false
     }
   },
+  { immediate: true },
 )
 
 watch(
@@ -118,6 +119,16 @@ watch(
     }
   },
 )
+
+const displayName = computed(() => {
+  const names: Record<string, string> = {
+    get_pods: '检查 Pod 状态', get_pod: '查看 Pod 详情', get_logs: '读取容器日志',
+    get_resources: '查询资源', get_statefulset: '查看 StatefulSet',
+    get_secret_info: '检查 Secret 元数据', read_tool_result: '读取检查结果',
+    kubectl: '执行集群命令', get_events: '查看集群事件',
+  }
+  return names[props.tool.name] ?? props.tool.name
+})
 
 const riskTag = computed<'danger' | 'warning' | 'info' | 'primary'>(() => {
   const risk = props.tool.risk?.toUpperCase() ?? ''
@@ -307,10 +318,7 @@ function toggle(): void {
   <article class="toolcard" :class="tool.status">
     <button type="button" class="toolcard-head" @click="toggle">
       <span class="toolcard-dot" :class="tool.status"></span>
-      <span v-if="tool.shortName && tool.shortName !== tool.name" class="toolcard-short">{{
-        tool.shortName
-      }}</span>
-      <span class="toolcard-title">{{ tool.name }}</span>
+      <span class="toolcard-title" :title="tool.name">{{ displayName }}</span>
       <!-- P7.4：头部概览优先展示后端摘要（如 "成功 · 12 pods · 320ms"），命令降级为 tooltip -->
       <span v-if="tool.summary" class="toolcard-cmd toolcard-summary" :title="tool.command || tool.summary">
         {{ tool.summary }}

@@ -357,7 +357,7 @@ function resumeFollow(): void {
 }
 
 watch(
-  () => [props.turns.length, props.items.length, props.items[props.items.length - 1]?.item_order],
+  () => [props.turns, props.items],
   () => scrollToBottom(),
 )
 

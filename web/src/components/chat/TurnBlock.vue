@@ -2,8 +2,9 @@
 import { computed, ref } from 'vue'
 import { ArrowDown, WarningFilled } from '@element-plus/icons-vue'
 
-import type { TurnUiData } from './turn'
+import type { TurnItem, TurnUiData } from './turn'
 import { formatDuration } from './turn'
+import ProcessGroup from './ProcessGroup.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
@@ -125,10 +126,22 @@ const tokenTotal = computed(() => {
 })
 
 const reportDone = computed(() =>
-  props.turn.items.some((item) => item.type === 'report' && item.data.done),
+  props.turn.items.some((item) => item.type === 'report' && item.data.purpose === 'final' && item.data.done),
 )
 
-const hasToolCards = computed(() => props.turn.items.some((item) => item.type === 'tool'))
+const groups = computed(() => {
+  const result: Array<{ key: string; process: boolean; items: TurnItem[] }> = []
+  for (const item of props.turn.items) {
+    const process = item.type === 'tool' || item.type === 'reasoning' ||
+      (item.type === 'report' && item.data.purpose !== 'final')
+    const previous = result[result.length - 1]
+    if (process && previous?.process) previous.items.push(item)
+    else result.push({ key: item.data.key, process, items: [item] })
+  }
+  return result
+})
+
+
 
 function timeLabel(value?: string): string {
   if (!value) return ''
@@ -174,23 +187,22 @@ function itemAnchor(item: { data: { key: string } }): string {
         <p class="question-text">{{ turn.input }}</p>
       </article>
 
-      <div v-if="hasToolCards" class="turn-tools">
-        <button type="button" class="turn-tools-btn" @click="expandAllSignal += 1">
-          展开全部
-        </button>
-        <button type="button" class="turn-tools-btn" @click="collapseAllSignal += 1">
-          折叠全部
-        </button>
-      </div>
-
       <div v-if="turn.error" class="turn-error">
         <el-icon><WarningFilled /></el-icon>
         <span>{{ turn.error }}</span>
       </div>
 
       <div class="turn-items">
+        <component
+          :is="group.process ? ProcessGroup : 'div'"
+          v-for="group in groups"
+          :key="group.key"
+          :items="group.process ? group.items : undefined"
+          :completed="turn.status === 'completed' && reportDone"
+          :failed="turn.status === 'failed' || turn.status === 'canceled'"
+        >
         <template
-          v-for="item in turn.items"
+          v-for="item in group.items"
           :key="item.type === 'reasoning' || item.type === 'report' ? item.data.key : item.data.key"
         >
           <ReasoningPanel
@@ -205,6 +217,7 @@ function itemAnchor(item: { data: { key: string } }): string {
             :id="itemAnchor(item)"
             class="turn-item"
             :tool="item.data"
+            :auto-open="false"
             :report-done="reportDone"
             :collapse-all="collapseAllSignal"
             :expand-all="expandAllSignal"
@@ -235,21 +248,30 @@ function itemAnchor(item: { data: { key: string } }): string {
             v-else-if="item.type === 'report'"
             :id="itemAnchor(item)"
             class="turn-item report-block"
-            :class="{ streaming: item.data.streaming }"
+            :class="{ streaming: item.data.streaming, commentary: item.data.purpose !== 'final' }"
           >
             <div class="report-head">
-              <span class="report-label">{{ item.data.purpose === 'final' ? '最终回答' : '过程说明' }}</span>
+              <span class="report-label">{{ item.data.purpose === 'final' ? '诊断回复' : '分析' }}</span>
               <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
             </div>
             <MarkdownView :text="item.data.text" />
           </article>
         </template>
+        </component>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
+.report-block.commentary {
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  color: var(--app-muted);
+}
+.report-block.commentary .report-head { display: none; }
+
 .turn {
   /* 对齐原型：回合本身是透明的时间线分组（卡片感由内部工具卡/报告块提供） */
   display: flex;
