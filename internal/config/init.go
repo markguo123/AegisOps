@@ -80,6 +80,13 @@ report:
   format: markdown            # markdown | json | yaml
 agent:
   session_dir: "~/.aegisops/sessions"  # 会话落盘（容器内 e.g. /data/sessions）
+  exec_pod:                       # 静态执行上限；每次 exec 仍需真人确认
+    enabled: true
+    timeout_seconds: 15
+    max_timeout_seconds: 30
+    max_output_bytes: 65536
+    max_concurrent_per_instance: 8
+    max_concurrent_per_user: 2
   audit_dir: "~/.aegisops/audit"       # 审计落盘（容器内 e.g. /data/audit）
   audit_file_copy: true              # 会话审计 jsonl 副本：审计事实源是平台库 audit_events，
                                      # 置 false 只写库、不再产生文件副本（P8.0）
@@ -144,6 +151,13 @@ report:
 
 agent:
   max_iterations: 15          # Agent 往返上限
+  exec_pod:
+    enabled: true
+    timeout_seconds: 15
+    max_timeout_seconds: 30
+    max_output_bytes: 65536
+    max_concurrent_per_instance: 8
+    max_concurrent_per_user: 2
   max_tool_calls: 20          # 单轮工具调用上限
   timeout: 5m                 # Agent 单次会话超时
   tool_calling: native        # native | shim | auto（auto 先 native，不支持时降级 shim）

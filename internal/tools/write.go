@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 )
@@ -191,7 +192,7 @@ func (t *kubectlTool) Execute(ctx context.Context, input json.RawMessage) (ToolR
 				Truncated: true,
 			}, nil
 		}
-		return ResultError("kubectl: " + msg), nil
+		return ExecutionError(err), nil
 	}
 	return ToolResult{
 		Text: extractKubectlSummary(res),
@@ -228,6 +229,9 @@ func (t *kubectlTool) RequiresHumanApproval(input json.RawMessage) bool {
 	args, err := ParseArgs(input, "command")
 	if err != nil {
 		return false
+	}
+	if _, matched, _ := cmdplan.ParsePodExec(args["command"]); matched {
+		return true
 	}
 	return approval.ParseCommandTarget(args["command"]).Operation == "exec"
 }

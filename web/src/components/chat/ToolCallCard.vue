@@ -156,6 +156,14 @@ const durationText = computed(() => {
 })
 
 const errorText = computed(() => {
+  const executionErrors: Record<string, string> = {
+    POLICY_DENIED: '该操作不符合执行安全策略，请使用支持的诊断方式',
+    TARGET_ISOLATION_DENIED: '该命令无法保证当前集群目标隔离',
+    EXECUTION_BUSY: '诊断执行通道繁忙，请稍后重试',
+    UNSUPPORTED: '当前执行通道不支持该命令或参数',
+    TOOL_UNAVAILABLE: '执行或确认通道当前不可用',
+  }
+  if (props.tool.errorCode && executionErrors[props.tool.errorCode]) return executionErrors[props.tool.errorCode]
   if (props.tool.errorCode === 'RBAC_DENIED') {
     return '当前集群执行身份没有该操作权限（RBAC 拒绝）'
   }

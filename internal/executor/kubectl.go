@@ -67,7 +67,7 @@ const exitShellDisabled = 126
 // shellDisabledHint 是关闭态的可指导文案（D-33/ADR-044 v1.1）。首行会被工具层摘要
 // 取走（tools.extractKubectlSummary），所以第一句必须自带结论与替代动作。
 const shellDisabledHint = "shell 通道已由平台配置关闭（platform.exec.shell_enabled=false）：该实例不提供 bash，" +
-	"含管道 |、串联 &&/;、重定向 >、命令替换 $() 或 heredoc 的命令一律不执行。\n" +
+	"无法编译为安全受控执行计划的 Shell 命令不执行；已验证只读的管道与条件组合仍可使用。\n" +
 	"请改用单条不含 shell 语法的 kubectl 命令（例如 kubectl get pods -A -o json），" +
 	"过滤、统计交给结构化只读工具（scan_cluster / get_pod / get_deployment 等）。\n" +
 	"确实需要 shell 排障能力时，请让管理员改用默认交付镜像（内置 bash 与 kubectl）" +
@@ -92,6 +92,12 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 			"Secret 元数据（名称/类型/键名）请用 get_secret_info（普通读取权限）；" +
 			"确需查看明文时用 get_secret_value（按 key、审批或配置授权、仅当前轮模型可见）。" +
 			"敏感数据不进入 LLM 上下文")
+	}
+	if req, matched, err := cmdplan.ParsePodExec(command); matched {
+		if err != nil {
+			return Result{Command: command}, err
+		}
+		return r.ExecPod(ctx, req)
 	}
 	// 目标前置校验（P12.2）：每次执行前重验用户授权、集群存在性与凭据版本。
 	// 撤权或凭据轮换后，旧命令与旧批准在真正起进程前失效，不再依赖看护周期。

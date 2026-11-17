@@ -136,6 +136,9 @@ func Analyze(command string) Analysis {
 	if len(command) > 4096 {
 		return Analysis{Reason: "命令超过 4096 字节上限"}
 	}
+	if a, ok := analyzeAuthCanI(command); ok {
+		return a
+	}
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.KeepComments(false))
 	file, err := parser.Parse(strings.NewReader(command), "")
 	if err != nil {

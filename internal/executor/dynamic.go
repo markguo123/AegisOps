@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -46,6 +47,10 @@ func (r *Runner) channel() (*writeChannel, error) {
 
 // newWriteChannel 用 discovery 缓存构造 dynamic client 与 RESTMapper。
 func newWriteChannel(rc *rest.Config) (*writeChannel, error) {
+	rc = rest.CopyConfig(rc)
+	if rc.Timeout <= 0 || rc.Timeout > 10*time.Second {
+		rc.Timeout = 10 * time.Second
+	}
 	dc, err := discovery.NewDiscoveryClientForConfig(rc)
 	if err != nil {
 		return nil, fmt.Errorf("构造 discovery 客户端: %w", err)

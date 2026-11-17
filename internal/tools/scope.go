@@ -17,14 +17,16 @@ import (
 // AccessScope 是当前 Agent 运行可访问的 Kubernetes 资源范围。
 // 它是执行前门禁，不是提示词约束。
 type AccessScope struct {
-	Policy        *authz.EffectiveAccess                      `json:"policy,omitempty"`
-	Refresh       func(context.Context) (*AccessScope, error) `json:"-"`
-	ClusterID     string                                      `json:"clusterId,omitempty"`
-	Namespaces    []string                                    `json:"namespaces"`
-	ClusterScoped bool                                        `json:"clusterScoped"`
-	IsAdmin       bool                                        `json:"isAdmin"`
-	CanWrite      bool                                        `json:"canWrite"`
-	CanDestroy    bool                                        `json:"canDestroy"`
+	ResolveResource func(context.Context, string) (string, string, bool, error) `json:"-"`
+	RequestContext  context.Context                                             `json:"-"`
+	Policy          *authz.EffectiveAccess                                      `json:"policy,omitempty"`
+	Refresh         func(context.Context) (*AccessScope, error)                 `json:"-"`
+	ClusterID       string                                                      `json:"clusterId,omitempty"`
+	Namespaces      []string                                                    `json:"namespaces"`
+	ClusterScoped   bool                                                        `json:"clusterScoped"`
+	IsAdmin         bool                                                        `json:"isAdmin"`
+	CanWrite        bool                                                        `json:"canWrite"`
+	CanDestroy      bool                                                        `json:"canDestroy"`
 }
 
 var (
@@ -129,6 +131,21 @@ func (s AccessScope) Prompt() string {
 
 // Check 在执行工具前校验资源作用域。error 文本是给模型与用户的稳定拒绝原因。
 func (s AccessScope) Check(toolName string, input json.RawMessage) error {
+	if toolName == "exec_pod" {
+		r, err := cmdplan.DecodePodExec(input)
+		if err != nil {
+			return err
+		}
+		if s.Policy == nil {
+			if s.IsAdmin || s.ClusterScoped {
+				return nil
+			}
+			if !s.CanWrite {
+				return s.deny("exec 写权限")
+			}
+			return s.checkNamespace(r.Namespace)
+		}
+	}
 	if s.Policy != nil {
 		return s.policyCheck(toolName, input)
 	}
@@ -226,6 +243,18 @@ func (s AccessScope) checkManifest(manifest string) error {
 }
 
 func (s AccessScope) checkKubectl(command string) error {
+	if r, matched, err := cmdplan.ParsePodExec(command); matched {
+		if err != nil {
+			return err
+		}
+		if s.Policy != nil {
+			return s.commandPolicy(command)
+		}
+		if !s.CanWrite {
+			return s.deny("exec 写权限")
+		}
+		return s.checkNamespace(r.Namespace)
+	}
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return s.deny("可校验资源作用域的 kubectl 命令")
@@ -301,6 +330,12 @@ func (s AccessScope) checkKubectl(command string) error {
 // 逐调用校验：仍只允许显式 namespace、禁止集群级资源与跨 namespace 查询。
 // 这里不改变既有授权边界，只是把"含管道就整体拒绝"换成"每条查询分别检查"。
 func (s AccessScope) checkReadCall(call cmdplan.Call) error {
+	if call.Verb == "version" || call.Verb == "api-resources" {
+		if len(s.Namespaces) > 0 {
+			return nil
+		}
+		return s.deny("集群元信息读取资格")
+	}
 	kind := strings.ToLower(call.Kind)
 	if clusterKinds[kind] {
 		return s.deny("集群级资源读取权限")

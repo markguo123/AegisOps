@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -16,6 +17,11 @@ import (
 // PrepareExecution captures high-risk targets before confirmation and checks
 // UID/resourceVersion again immediately before dispatch.
 func (t *kubectlTool) PrepareExecution(ctx context.Context, input json.RawMessage, scope *AccessScope) (func(context.Context) error, error) {
+	if args, err := ParseArgs(input, "command"); err == nil {
+		if _, matched, _ := cmdplan.ParsePodExec(args["command"]); matched {
+			return nil, nil
+		}
+	}
 	if t.Risk(input) != model.RiskHigh && t.Risk(input) != model.RiskCritical {
 		return nil, nil
 	}

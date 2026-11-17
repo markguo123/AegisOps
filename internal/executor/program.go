@@ -68,6 +68,9 @@ func (r *Runner) childEnv() []string {
 		if childEnvDenylist[key] || key == "KUBECONFIG" {
 			continue
 		}
+		if r.targetBound {
+			continue
+		} // Never inherit another target's ambient cloud identity.
 		for _, prefix := range childEnvPrefixAllowlist {
 			if strings.HasPrefix(key, prefix) {
 				env = append(env, entry)

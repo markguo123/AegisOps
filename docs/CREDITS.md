@@ -28,3 +28,11 @@
 - 直接复制 description 的前两句到 internal/agent/prompts/user_question_guidance.txt；完整许可见同目录 DSH-LICENSE。复制内容随仓库保存，不在运行时下载。
 - 工具调用后等待答案、选项影响说明、自由输入与跳过、输入区问题卡为设计借鉴。Go 协议与 Vue 组件按本项目独立实现；没有复制 Cordis 运行时、定时继续和跨进程恢复代码。
 - AegisOps 的提问不授权写操作，未决状态阻止当前运行继续工具调用。
+
+## Holmes Kubernetes Remediation（Exec/Shell，2026-11-17）
+
+- 来源：https://github.com/robusta-dev/holmes-mcp-integrations/tree/master/servers/kubernetes-remediation 。查阅的 kubernetes_remediation.py 文件 blob SHA：dca7a200d88ff018634969caf55d50321db0236f；此值是文件对象 SHA，不是仓库提交号。
+- run_preapproved_kubectl_exec_command → internal/tools/pod_exec.go、internal/cmdplan/pod_exec.go：借鉴结构化目标与远端 argv、服务端构造调用及诊断目录。按 AegisOps 规则保留所有 exec 逐次真人批准。
+- preapproved_exec_argv_reason、validate_read_path、_resolve_symlink_in_container → Go 诊断参数与路径门禁：参考环境泄露、敏感路径、符号链接与解析失败拒绝；本期不提供文件内容读取。
+- 上游 test_kubernetes_remediation.py 的风险类别用于设计 Go 负向测试；测试代码独立编写，不宣称直接移植或运行了上游 Python 测试。
+- 未复制上游 Python 源码，未引入 MCP 服务、宽权限服务账号、自动批准、诊断镜像或 Python 运行时。client-go remotecommand 复用项目锁定 v0.36.3 的官方实现。

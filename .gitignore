@@ -9,6 +9,7 @@ coverage.out
 .DS_Store
 aegisops-test.yaml
 aegisops-v4.yaml
+local-test/
 
 # 旧品牌本地测试配置与产物：仅本地存在，避免误提交
 k8s-ai-test.yaml

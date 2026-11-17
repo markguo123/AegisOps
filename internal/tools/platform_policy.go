@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-var errUnproven = errors.New("SCOPE_DENIED: cannot prove the complete target; use an explicit supported resource and namespace")
+var errUnproven = errors.New("UNSUPPORTED: cannot prove the complete target; use an explicit supported resource and namespace")
 
 func (s AccessScope) policyCheck(name string, input json.RawMessage) error {
 	if localTools[name] {
@@ -30,6 +30,12 @@ func (s AccessScope) policyCheck(name string, input json.RawMessage) error {
 	cluster := clusterOnlyTools[name]
 	action := authz.ActionRead
 	switch {
+	case name == "exec_pod":
+		r, err := cmdplan.DecodePodExec(input)
+		if err != nil {
+			return err
+		}
+		return s.Policy.Check(authz.Target{ClusterID: s.Policy.ClusterID, Namespace: r.Namespace, Resource: "/pods", Name: r.Pod, Actions: []string{authz.ActionExec}})
 	case name == "kubectl":
 		return s.commandPolicy(stringArg(args, "command"))
 	case name == "create_resource":
@@ -70,6 +76,12 @@ func (s AccessScope) target(ns string, cluster bool, act string) error {
 var resourceName = regexp.MustCompile("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 func (s AccessScope) commandPolicy(cmd string) error {
+	if r, matched, err := cmdplan.ParsePodExec(cmd); matched {
+		if err != nil {
+			return err
+		}
+		return s.Policy.Check(authz.Target{ClusterID: s.Policy.ClusterID, Namespace: r.Namespace, Resource: "/pods", Name: r.Pod, Actions: []string{authz.ActionExec}})
+	}
 	analysis := approval.AnalyzeCommand(cmd)
 	if analysis.Plan.ProvablyReadOnly {
 		// 可证明只读的组合：每条 kubectl 调用分别校验目标与所需 read/logs 权限。
@@ -106,6 +118,9 @@ func (s AccessScope) readCallPolicy(call cmdplan.Call) error {
 		ns = "*"
 	}
 	kind := strings.ToLower(call.Kind)
+	if call.Verb == "version" || call.Verb == "api-resources" {
+		return s.Policy.CheckMetadata()
+	}
 	if kind == "" {
 		return errUnproven
 	}
@@ -127,7 +142,20 @@ func (s AccessScope) readCallPolicy(call cmdplan.Call) error {
 		g, res, ok = "", "nodes", true
 	}
 	if !ok {
-		return errUnproven
+		if s.ResolveResource == nil || s.RequestContext == nil {
+			return fmt.Errorf("UNSUPPORTED: RESOURCE_PROFILE_UNSUPPORTED: resource %s is not in the platform catalog", kind)
+		}
+		var resolvedCluster bool
+		var err error
+		g, res, resolvedCluster, err = s.ResolveResource(s.RequestContext, kind)
+		if err != nil {
+			return err
+		}
+		profileCluster, supported := authz.ProfileResource(g, res, act)
+		if !supported || profileCluster != resolvedCluster || res == "secrets" {
+			return fmt.Errorf("UNSUPPORTED: RESOURCE_PROFILE_UNSUPPORTED: %s/%s", g, res)
+		}
+		ok = true
 	}
 	cluster, ok := authz.ProfileResource(g, res, act)
 	if !ok || res == "secrets" {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
 	"github.com/k8s-ai/k8s-ai/internal/audit"
+	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -772,7 +773,7 @@ func (a *Agent) approvalDecisionDetail(t tools.Tool, args json.RawMessage) appro
 		}
 		return d
 	}
-	if g := a.matchedGrant(t, args); g != nil {
+	if g := a.matchedGrant(t, args); g != nil && !in.RequireHuman && !in.Shell {
 		d.decision = approval.DecisionAuto
 		d.grant = g
 		d.matchReason = "matched_grant"
@@ -927,7 +928,18 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		a.audit(ctx, audit.ActionApprovalDenied, map[string]any{
 			"name": call.Name, "reason": "scope_denied", "detail": err.Error(),
 		})
-		return tools.ResultErrorWithCode(tools.ErrorScopeDenied, err.Error())
+		return tools.ExecutionError(err)
+	}
+	if preparer, ok := t.(tools.ExecutionContextPreparer); ok {
+		var err error
+		actor := a.TurnUserID
+		if actor == "" {
+			actor = a.Session.UserID
+		}
+		ctx, err = preparer.PrepareExecutionContext(ctx, call.Arguments, actor, a.Session.ID)
+		if err != nil {
+			return tools.ExecutionError(err)
+		}
 	}
 	var validateVersion func(context.Context) error
 	if a.AccessScope != nil && a.AccessScope.Policy != nil {
@@ -987,12 +999,17 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		}
 		return tools.ResultError("tool call denied by approval policy")
 	}
+	humanConfirmed := false
 	if decision == approval.DecisionRequireApproval {
 		secretRead := call.Name == "get_secret_value"
-		if secretRead && a.Approver == nil {
-			return tools.ResultError("读取 Secret 需要用户明确同意，当前没有可用的确认通道")
+		mandatoryHuman := secretRead || a.toolHasShell(t, call.Arguments)
+		if mandatory, ok := t.(tools.MandatoryHumanApproval); ok {
+			mandatoryHuman = mandatoryHuman || mandatory.RequiresHumanApproval(call.Arguments)
 		}
-		if secretRead {
+		if a.Approver == nil {
+			return tools.ResultErrorWithCode(tools.ErrorToolUnavailable, "APPROVER_UNAVAILABLE: 此操作需要真人确认，当前没有可用的确认通道")
+		}
+		if mandatoryHuman {
 			batchApproved = false
 		}
 		key := declineKey(call.Name, safeCallArgs)
@@ -1006,7 +1023,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		if batchApproved {
 			// 批量审批已预授权，跳过个体审批。
 			a.audit(ctx, audit.ActionApprovalSkipped, map[string]any{"name": call.Name, "batch": true})
-		} else if a.Approver != nil && (secretRead || !a.Session.Approved(key)) {
+		} else if mandatoryHuman || !a.Session.Approved(key) {
 			a.audit(ctx, audit.ActionApprovalRequested, map[string]any{"name": call.Name, "risk": t.Risk(call.Arguments)})
 			prompt := fmt.Sprintf("将执行以下操作（风险等级：%s）：", t.Risk(call.Arguments))
 			if d, ok := t.(tools.CommandDescriber); ok {
@@ -1021,6 +1038,22 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			}
 			prompt += "\n\n是否执行？"
 			plan := a.approvalPlan(t, call, detail, clusterAccessChecked)
+			if planner, ok := t.(tools.PreparedApprovalPlanner); ok {
+				resolved := planner.PreparedApproval(ctx, call.Arguments)
+				resolved.Tool = plan.Tool
+				resolved.Risk = plan.Risk
+				resolved.Target.Cluster = plan.Target.Cluster
+				if len(resolved.Checks) == 0 {
+					resolved.Checks = plan.Checks
+				} else {
+					for _, check := range plan.Checks {
+						if check.Name != "集群 RBAC" {
+							resolved.Checks = append(resolved.Checks, check)
+						}
+					}
+				}
+				plan = a.safeApprovalPlan(resolved)
+			}
 			// 统一 Interaction：审批卡与问题卡同源展示，答复只代表展示状态，
 			// 写权限仍由原审批门禁决定。
 			interaction := a.newApprovalInteraction(plan, call.ID)
@@ -1032,7 +1065,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 				{Label: "是，本次会话不再询问", Value: ChoiceYesNoAskAgain},
 				{Label: "否", Value: ChoiceNo},
 			}
-			if approval.GrantEligibleRisk(t.Risk(call.Arguments)) {
+			if !mandatoryHuman && approval.GrantEligibleRisk(t.Risk(call.Arguments)) {
 				approvalOptions = []UserChoiceOption{
 					{Label: "确认执行", Value: ChoiceYes},
 					{Label: "本次会话不再询问", Value: ChoiceYesNoAskAgain},
@@ -1049,7 +1082,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			}
 			a.flowInteraction(ctx, interaction)
 			choice, err := a.confirmApproval(ctx, prompt, approvalOptions, plan, call.ID, interaction.InteractionID)
-			if secretRead && choice != ChoiceYes && choice != ChoiceNo && err == nil {
+			if mandatoryHuman && choice != ChoiceYes && choice != ChoiceNo && err == nil {
 				choice = ChoiceNo
 			}
 			// 审批返回后（无论结果）本轮继续运行，等待态必须显式结束。
@@ -1083,6 +1116,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 				}
 				a.audit(ctx, audit.ActionApprovalGranted, grantAudit)
 			case ChoiceYes:
+				humanConfirmed = true
 				a.completeStep(ctx, approvalStep, true, "approved")
 				a.audit(ctx, audit.ActionApprovalGranted, map[string]any{"name": call.Name, "choice": choice})
 			default:
@@ -1112,6 +1146,16 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 			return tools.ResultError(err.Error())
 		}
 	}
+	if preparer, ok := t.(tools.ExecutionContextPreparer); ok {
+		if mandatory, ok := t.(tools.MandatoryHumanApproval); ok && mandatory.RequiresHumanApproval(call.Arguments) && !humanConfirmed {
+			return tools.ResultErrorWithCode(tools.ErrorToolUnavailable, "APPROVER_UNAVAILABLE: current call requires explicit human confirmation")
+		}
+		var err error
+		execCtx, err = preparer.AuthorizeExecutionContext(execCtx, call.Arguments)
+		if err != nil {
+			return tools.ExecutionError(err)
+		}
+	}
 	a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
 	tr, err := t.Execute(execCtx, call.Arguments)
 	if err != nil {
@@ -1125,11 +1169,23 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	}
 	a.recordSensitiveValues(tr.SensitiveValues)
 	hasErr := !tools.Present(tr).Ok
-	a.audit(ctx, audit.ActionToolCallResponse, map[string]any{
+	responseAudit := map[string]any{
 		// readonly/risk 让四期审计能把非只读工具响应归类为 RESOURCE_MUTATION（P1.11）。
 		"name": call.Name, "truncated": tr.Truncated, "error": hasErr,
 		"readonly": t.IsReadOnly(call.Arguments), "risk": string(t.Risk(call.Arguments)),
-	})
+	}
+	if result, ok := tr.Data.(executor.Result); ok && result.ExecutionLocation == "pod" {
+		responseAudit["execution_location"] = result.ExecutionLocation
+		responseAudit["diagnostic_rule"] = result.DiagnosticRule
+		responseAudit["plan_fingerprint"] = result.PlanFingerprint
+		responseAudit["duration_ms"] = result.DurationMs
+		responseAudit["exit_code"] = result.ExitCode
+		responseAudit["timed_out"] = result.TimedOut
+		responseAudit["remote_termination_confirmed"] = result.RemoteTerminationConfirmed
+		responseAudit["target"] = result.PodTarget
+		responseAudit["cluster_id"] = a.Session.Cluster
+	}
+	a.audit(ctx, audit.ActionToolCallResponse, responseAudit)
 	if touches := tools.SecretTouchesFromData(tr.Data); len(touches) > 0 {
 		// 三期 R4.6：审计只记 key/长度/SHA-256/来源，明文值从不落盘。
 		a.audit(ctx, audit.ActionSecretTouched, map[string]any{
@@ -1219,7 +1275,10 @@ func (a *Agent) scopeCheck(ctx context.Context, call llm.ToolCall) error {
 			}
 		}
 	}
-	return scope.Check(call.Name, call.Arguments)
+	checked := *scope
+	checked.ResolveResource = a.AccessScope.ResolveResource
+	checked.RequestContext = ctx
+	return checked.Check(call.Name, call.Arguments)
 }
 
 // collectSecretValues 在审批通过后、工具执行前逐个索取 $ASK 的 Secret 明文值（三期 R4.5）。

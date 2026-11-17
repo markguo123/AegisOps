@@ -120,10 +120,20 @@ type AgentConfig struct {
 	// platform audit table (P8.0). The platform DB is the source of truth; the
 	// file is an optional copy. Default true keeps existing deployments intact,
 	// and CLI mode (no platform store) always writes it.
-	AuditFileCopy bool         `mapstructure:"audit_file_copy"`
-	DisabledTools []string     `mapstructure:"disabled_tools"`
-	Create        CreateConfig `mapstructure:"create"`
-	Secret        SecretConfig `mapstructure:"secret"`
+	AuditFileCopy bool          `mapstructure:"audit_file_copy"`
+	DisabledTools []string      `mapstructure:"disabled_tools"`
+	Create        CreateConfig  `mapstructure:"create"`
+	Secret        SecretConfig  `mapstructure:"secret"`
+	ExecPod       ExecPodConfig `mapstructure:"exec_pod"`
+}
+
+type ExecPodConfig struct {
+	Enabled                  bool `mapstructure:"enabled"`
+	TimeoutSeconds           int  `mapstructure:"timeout_seconds"`
+	MaxTimeoutSeconds        int  `mapstructure:"max_timeout_seconds"`
+	MaxOutputBytes           int  `mapstructure:"max_output_bytes"`
+	MaxConcurrentPerInstance int  `mapstructure:"max_concurrent_per_instance"`
+	MaxConcurrentPerUser     int  `mapstructure:"max_concurrent_per_user"`
 }
 
 // CreateConfig controls the Phase 3 resource-creation capability
@@ -430,6 +440,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.create.max_manifest_bytes", 8*1024)
 	v.SetDefault("agent.secret.access", "read_on_demand")
 	v.SetDefault("agent.secret.read_approval", SecretReadApprovalAlways)
+	v.SetDefault("agent.exec_pod.enabled", true)
+	v.SetDefault("agent.exec_pod.timeout_seconds", 15)
+	v.SetDefault("agent.exec_pod.max_timeout_seconds", 30)
+	v.SetDefault("agent.exec_pod.max_output_bytes", 65536)
+	v.SetDefault("agent.exec_pod.max_concurrent_per_instance", 8)
+	v.SetDefault("agent.exec_pod.max_concurrent_per_user", 2)
 
 	v.SetDefault("webui.addr", "127.0.0.1:8081")
 
@@ -645,6 +661,10 @@ func (c *Config) Validate() error {
 	}
 	if err := validateSecretAccess(c.Agent.Secret.Access); err != nil {
 		return err
+	}
+	e := c.Agent.ExecPod
+	if e.TimeoutSeconds < 1 || e.TimeoutSeconds > e.MaxTimeoutSeconds || e.MaxTimeoutSeconds > 30 || e.MaxOutputBytes < 1024 || e.MaxOutputBytes > 65536 || e.MaxConcurrentPerInstance < 1 || e.MaxConcurrentPerInstance > 8 || e.MaxConcurrentPerUser < 1 || e.MaxConcurrentPerUser > 2 || e.MaxConcurrentPerUser > e.MaxConcurrentPerInstance {
+		return fmt.Errorf("agent.exec_pod: invalid timeout, output or concurrency limits")
 	}
 	if err := validateSecretReadApproval(c.Agent.Secret.Access, c.Agent.Secret.ReadApproval); err != nil {
 		return err

@@ -31,6 +31,9 @@ const (
 	ErrorToolUnavailable    = "TOOL_UNAVAILABLE"
 	ErrorToolFailed         = "TOOL_ERROR"
 	ErrorScopeDenied        = "SCOPE_DENIED"
+	ErrorPolicyDenied       = "POLICY_DENIED"
+	ErrorTargetIsolation    = "TARGET_ISOLATION_DENIED"
+	ErrorExecutionBusy      = "EXECUTION_BUSY"
 )
 
 // ToolPresentation 是 Agent、SSE 和前端共用的结果呈现/状态模型。
@@ -172,6 +175,17 @@ func applyExecutorPresentation(p *ToolPresentation, result executor.Result) {
 }
 
 func classifyToolError(message string) string {
+	for _, code := range []string{ErrorPolicyDenied, ErrorTargetIsolation, ErrorExecutionBusy, ErrorScopeDenied, ErrorRBACDenied, ErrorToolUnavailable, ErrorInvalidArgument, ErrorUnsupported, ErrorConflict, ErrorTimeout} {
+		if strings.HasPrefix(message, code+":") {
+			return code
+		}
+	}
+	if strings.Contains(message, "ACTION_DENIED:") {
+		return ErrorScopeDenied
+	}
+	if strings.Contains(message, executor.ErrTargetIsolation.Error()) {
+		return ErrorTargetIsolation
+	}
 	lower := strings.ToLower(strings.TrimSpace(message))
 	switch {
 	case lower == "":
@@ -202,7 +216,7 @@ func classifyToolError(message string) string {
 }
 
 func statusForErrorCode(code string) string {
-	if code == ErrorRBACDenied || code == ErrorAuthentication || code == ErrorScopeDenied {
+	if code == ErrorRBACDenied || code == ErrorAuthentication || code == ErrorScopeDenied || code == ErrorPolicyDenied || code == ErrorTargetIsolation {
 		return ToolStatusDenied
 	}
 	return ToolStatusError

@@ -16,20 +16,36 @@ import (
 
 // Result 是一次命令执行的结果。
 type Result struct {
-	Command       string `json:"command"`
-	Stdout        string `json:"stdout,omitempty"`
-	Stderr        string `json:"stderr,omitempty"`
-	ExitCode      int    `json:"exitCode"`
-	Truncated     bool   `json:"truncated,omitempty"`
-	StreamTimeout bool   `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
+	PodTarget                  *PodExecTarget `json:"podTarget,omitempty"`
+	ExecutionLocation          string         `json:"executionLocation,omitempty"`
+	DiagnosticRule             string         `json:"diagnosticRule,omitempty"`
+	TimedOut                   bool           `json:"timedOut,omitempty"`
+	RemoteTerminationConfirmed bool           `json:"remoteTerminationConfirmed"`
+	PlanFingerprint            string         `json:"planFingerprint,omitempty"`
+	DurationMs                 int64          `json:"durationMs,omitempty"`
+	Command                    string         `json:"command"`
+	Stdout                     string         `json:"stdout,omitempty"`
+	Stderr                     string         `json:"stderr,omitempty"`
+	ExitCode                   int            `json:"exitCode"`
+	Truncated                  bool           `json:"truncated,omitempty"`
+	StreamTimeout              bool           `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
 	// NoMatch 表示只读组合里的过滤阶段没有匹配（如 grep 退出码 1 且无输出）：
 	// 这是"没有匹配结果"，不是集群故障，不能被当成查询失败。
 	NoMatch      bool           `json:"noMatch,omitempty"`
 	Verification map[string]any `json:"verification,omitempty"` // 写操作执行后的状态核对
 }
 
+type PodExecTarget struct {
+	Namespace   string `json:"namespace"`
+	Pod         string `json:"pod"`
+	PodUID      string `json:"podUID"`
+	Container   string `json:"container"`
+	ContainerID string `json:"containerID"`
+}
+
 // Options 是执行器装配参数。
 type Options struct {
+	ExecPod *ExecPodOptions
 	// KubectlBin kubectl 二进制路径；空 = PATH 查找 "kubectl"。
 	KubectlBin string
 	// Kubeconfig 传给 kubectl 子进程的 KUBECONFIG 环境变量；

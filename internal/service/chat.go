@@ -425,6 +425,7 @@ func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 		return nil, err
 	}
 	return executor.NewRunner(executor.Options{
+		ExecPod:    &executor.ExecPodOptions{Enabled: cfg.Agent.ExecPod.Enabled, TimeoutSeconds: cfg.Agent.ExecPod.TimeoutSeconds, MaxTimeoutSeconds: cfg.Agent.ExecPod.MaxTimeoutSeconds, MaxOutputBytes: cfg.Agent.ExecPod.MaxOutputBytes, MaxConcurrentPerInstance: cfg.Agent.ExecPod.MaxConcurrentPerInstance, MaxConcurrentPerUser: cfg.Agent.ExecPod.MaxConcurrentPerUser},
 		KubectlBin: bin,
 		Kubeconfig: cfg.Kubernetes.Kubeconfig,
 		MaxBytes:   cfg.Agent.CmdMaxBytes,
@@ -566,6 +567,13 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 			return nil, err
 		}
 	}
+	if cfg.Agent.ExecPod.Enabled {
+		if runner, ok := writeRunner.(tools.PodExecRunner); ok {
+			if err := reg.Register(tools.NewPodExecTool(runner)); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// 三期创建通道（R3）：结构化 create_resource，注册在 disabled_tools 之前，
 	// 这样 agent.disabled_tools 里写 create_resource 就能摘掉它。
 	// liveReg 复用于 create_resource 的 Skill registry 与 procedural 意图检索，
@@ -590,6 +598,11 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	}
 	for _, name := range cfg.Agent.DisabledTools {
 		reg.Remove(strings.TrimSpace(name))
+		if strings.TrimSpace(name) == "exec_pod" {
+			if disabler, ok := writeRunner.(interface{ DisablePodExec() }); ok {
+				disabler.DisablePodExec()
+			}
+		}
 	}
 	events := make(chan ChatEvent, 64)
 	pol := approval.Policy{
@@ -643,6 +656,15 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	}
 	for _, h := range skillHits {
 		events <- ChatEvent{Type: ChatEventProgress, Text: fmt.Sprintf("已注入 Skill：%s（%s）", h.name, h.mode)}
+	}
+	if req.AccessScope != nil {
+		if resolver, ok := writeRunner.(interface {
+			ResolveCommandResource(context.Context, string) (string, string, bool, error)
+		}); ok {
+			bound := *req.AccessScope
+			bound.ResolveResource = resolver.ResolveCommandResource
+			req.AccessScope = &bound
+		}
 	}
 	ag := agent.New(agent.Options{
 		LLM:            client,

@@ -22,7 +22,7 @@ func (a EffectiveAccess) CheckRequest(r *http.Request) error {
 	}
 	if !info.IsResourceRequest {
 		if r.Method == "GET" && (r.URL.Path == "/version" || info.APIPrefix == "api" || info.APIPrefix == "apis" || r.URL.Path == "/apis" || r.URL.Path == "/api") {
-			return nil
+			return a.CheckMetadata()
 		}
 		return denied
 	}
@@ -43,6 +43,11 @@ func (a EffectiveAccess) CheckRequest(r *http.Request) error {
 		return denied
 	}
 	switch info.Subresource {
+	case "exec":
+		if info.Resource != "pods" || info.Name == "" || r.Method != "POST" {
+			return denied
+		}
+		act = ActionExec
 	case "":
 	case "scale":
 		if info.APIGroup != "apps" {
@@ -67,7 +72,17 @@ func (a EffectiveAccess) CheckRequest(r *http.Request) error {
 	if ns == "" {
 		ns = "*"
 	}
-	return a.Check(Target{Resource: info.APIGroup + "/" + info.Resource, Subresource: info.Subresource, ClusterID: a.ClusterID, ClusterScoped: cl, Namespace: ns, Actions: []string{act}})
+	return a.Check(Target{Name: info.Name, Resource: info.APIGroup + "/" + info.Resource, Subresource: info.Subresource, ClusterID: a.ClusterID, ClusterScoped: cl, Namespace: ns, Actions: []string{act}})
+}
+
+// CheckMetadata grants only discovery/version access, never resource contents.
+func (a EffectiveAccess) CheckMetadata() error {
+	for _, rule := range a.Rules {
+		if validAccessRule(rule) && len(rule.Actions) > 0 {
+			return nil
+		}
+	}
+	return errors.New("SCOPE_DENIED: cluster metadata requires a resource grant")
 }
 func ProfileResource(group, res, action string) (bool, bool) {
 	key := res
