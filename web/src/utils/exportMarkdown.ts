@@ -18,8 +18,20 @@ export interface ExportSessionMeta {
 
 function toolLine(message: ChatMessage): string[] {
   const status = message.ok === false ? '失败' : '成功'
-  const summary = (message.content ?? '').trim().split('\n')[0].slice(0, 200)
-  return [`## 工具调用 · ${message.name ?? 'tool'}`, '', `- 状态：${status}`, summary ? `- 摘要：${summary}` : '', '']
+  const content = (message.content ?? '').replace(/<\/?untrusted_k8s_data\b[^>]*>/g, '').trim()
+  const summary = (message.summary || content).trim().split('\n')[0].slice(0, 500)
+  const lines = [`## 工具调用 · ${message.name ?? 'tool'}`, '', `- 状态：${status}`, `- 时间：${message.timestamp}`, summary ? `- 摘要：${summary}` : '']
+  if (message.errorCode) lines.push(`- 错误码：${message.errorCode}`)
+  if (message.durationMs !== undefined) lines.push(`- 耗时：${message.durationMs}ms`)
+  if (message.risk) lines.push(`- 风险：${message.risk}`)
+  // Dedicated persisted terminal fields share the backend's redacted contract.
+  // Never serialize arbitrary arguments/data or ModelOnly properties.
+  for (const [label, value] of [['命令', message.command], ['输出', message.stdout], ['错误输出', message.stderr]] as const) {
+    if (value) lines.push('', `### ${label}`, '', ...value.split('\n').map(line => `    ${line}`))
+  }
+  if (message.exitCode !== undefined) lines.push('', `- 退出码：${message.exitCode}`)
+  if (content && !message.stdout && content !== summary) lines.push('', ...content.split('\n').map(line => `    ${line}`))
+  return [...lines, '']
 }
 
 export function buildSessionMarkdown(messages: ChatMessage[], meta: ExportSessionMeta): string {

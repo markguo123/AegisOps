@@ -41,6 +41,11 @@ export interface ChatMessage {
   displayType?: string
   durationMs?: number
   risk?: string
+  command?: string
+  stdout?: string
+  stderr?: string
+  exitCode?: number
+  errorCode?: string
   content: string
   timestamp: string
 }
