@@ -1,557 +1,304 @@
-# Agent Exec 与 Shell 执行能力设计方案
+# 工具能力、统一授权与 Kubernetes 执行边界设计
 
-版本：v1.0
+版本：v2.1
 
 日期：2026-11-17
 
-状态：已评审；代码与本地验证完成，真机验收待执行
+状态：已实施，真实集群验收待完成
 
-适用范围：AegisOps Kubernetes Agent 的命令解析、Pod 执行、授权审批、执行隔离及结果处理。
+## 1. 目标与范围
 
-## 1. 设计目标
+本方案统一工具能力声明、平台授权、人工审批与实际执行的职责，解决命令能力与授权耦合导致的覆盖不完整、模型试错和多入口策略不一致。
 
-建立统一、可解释、可验证的 Agent 执行策略，在保持多租户授权、集群目标绑定和敏感数据保护的基础上，提供常用 Kubernetes 深度诊断能力。
+本版完整替代原方案 26。已有 exec_pod 的逐次确认、单次许可、目标绑定、敏感数据与执行限制作为兼容约束保留；其授权接入统一请求边界。
 
-本方案实现以下目标：
+目标：
 
-1. 通过结构化 `exec_pod` 工具执行业务容器内的非交互诊断命令。
-2. 统一结构化 exec 与 `kubectl exec` 的目标解析、权限校验、诊断规则和审批行为。
-3. 保持可证明只读的 kubectl 命令组合自动执行，避免因 Shell 表面语法要求额外授权。
-4. 将资源授权、命令支持范围、操作风险、人工审批和执行环境能力分开判断。
-5. 所有执行入口遵循同一安全边界，审批不可绕过授权、目标隔离或敏感数据策略。
-6. 保持现有 Agent Runtime 和 client-go 架构，为后续宿主机执行和独立脚本执行保留明确扩展边界。
+1. 用户与集群、namespace、资源、动作的权限规则只由统一 Authorizer 判定。
+2. 工具提供能力和操作事实，不包含用户角色或 namespace 授权逻辑。
+3. 所有 Kubernetes 请求经过不可绕过的公共执行边界，包括 client-go、kubectl 子进程和 Pod exec。
+4. 保留有限只读自动执行、写操作审批和敏感操作强制确认，不把未知命令当成用户越权。
+5. 支持通用 kubectl 能力，不为每条命令增加工具或授权分支，不要求把所有命令转换成自定义 patch。
 
-## 2. 范围与规范关系
+本期不增加通用服务端 Shell、脚本 Sandbox、SSH 或临时诊断 Pod，不改写扫描、规则、诊断和报告业务。
 
-### 2.1 本期范围
+## 2. 架构原则
 
-- 新增 `exec_pod` 工具及对应 Executor 执行能力。
-- 扩展常用容器诊断命令与参数支持。
-- 收敛 `kubectl exec` 到与结构化工具相同的执行策略。
-- 统一命令分析结果及授权、审批、执行之间的传递契约。
-- 补齐普通工具审批不可用时的拒绝路径。
-- 对齐 Kubernetes 只读命令在解析层、授权层和执行层的支持范围。
-- 完善错误分类、审批展示、输出处理、审计及验证。
-
-### 2.2 本期不交付
-
-- Pod exec 自动批准、批量批准和会话免审。
-- 任意容器文件内容读取、任意容器内解释器或脚本执行。
-- 通用服务端 Shell、Python 或用户脚本执行环境。
-- 临时诊断 Pod、节点侧 Agent、SSH 宿主机执行工具。
-- 每任务独立 Sandbox、Sandbox 调度系统或 Agent Runtime 服务拆分。
-
-上述扩展不影响本期接口的完整性，不为其增加空实现或对用户暴露不可用开关。
-
-### 2.3 规范优先级
-
-本期继续遵守 `AGENTS.md`：所有非交互 Pod exec 均须逐次真人批准；`--skip-permissions`、`require_approval=false`、会话授权缓存和批量授权均不能免除此次批准。
-
-Secret 遵循 2026-11-16 生效规则：namespace read 授权包含范围内 Secret 读取资格，但每次具体 Secret/key 读取仍须明确询问用户，并在同意后重验权限。明文只通过既有专用通道处理。
-
-本方案延续方案 22 的 TargetBound、多集群与凭据版本校验，以及方案 24 的只读命令组合。与历史文档中按 Shell 符号决定权限的描述不一致时，以本方案定义的完整命令语义判断为准；不改变现行 exec 与 Secret 强制确认规则。
-
-## 3. 能力模型
-
-### 3.1 执行位置与执行方式
-
-执行位置描述程序实际运行的边界，执行方式描述如何调用程序，两者分别记录。
-
-| 能力 | 实际执行位置 | 执行方式 | 本期处理 |
-|---|---|---|---|
-| Kubernetes 结构化读取与变更 | Kubernetes API | client-go | 保留 |
-| 单条 kubectl | 平台侧 kubectl 客户端 | 固定二进制 argv | 保留并统一策略 |
-| kubectl 查询与文本过滤组合 | 平台侧受控子进程 | 受控 argv 执行图 | 保留 |
-| 业务 Pod 内诊断 | 目标 Pod 的指定容器 | Kubernetes exec，远端 argv | 新增结构化入口 |
-| 平台侧真实 Bash | 平台侧操作系统 | Shell 解释器 | 平台 TargetBound 模式不开放 |
-
-`kubectl exec ... -- ls /app` 在平台侧启动 kubectl，但诊断程序在业务容器内运行。平台侧 argv 进程隔离不能限制该远端程序在业务容器中的权限。
-
-### 3.2 决策模型
-
-复用既有 `AUTO`、`REQUIRE_APPROVAL`、`DENY` 决策，不新增并行的审批体系。
-
-| 条件 | 决策 | 说明 |
+| 层次 | 职责 | 禁止事项 |
 |---|---|---|
-| 已授权、目标明确、属于可证明只读 Kubernetes 查询或受控组合 | AUTO | 每个调用分别授权 |
-| 已授权、目标明确、属于支持的 Pod 诊断规则 | REQUIRE_APPROVAL | 每次真人批准 |
-| 已授权、目标明确、属于既有允许的 Kubernetes 变更 | 沿用既有审批策略 | 自动化例外仅限原有普通变更 |
-| 缺少资源授权、明确 RBAC 拒绝、违反硬限制或目标隔离 | DENY | 不发起审批 |
-| 命令语义不受支持，无法构造可靠执行计划 | DENY | 返回能力不支持及替代方式 |
-| 需要审批但没有可用确认通道 | DENY | 不执行、不自动降级 |
+| 工具能力层 | 描述操作、解析输入、调用公共执行服务、解释结果 | 判断角色权限、读取授权表、自行启动越过公共边界的客户端或子进程 |
+| 统一授权层 | 根据可信身份、绑定目标与操作事实判定权限，管理授权版本和失效 | 按工具名称实现权限分支，把人工同意当作授权 |
+| 公共执行层 | 强制授权、策略与审批约束，控制目标、凭据、请求和资源开销 | 允许调用者取得可绕过边界的宽权限凭据 |
+| Kubernetes RBAC | 对真实请求与实际身份做最终裁决 | 被平台批准或模型判断覆盖 |
 
-不在诊断规则内，表示尚未满足支持条件；不等于用户越权。只有在目标、动作、数据访问和执行方式均可确定时，命令才具备进入审批的资格。
+工具必须提供准确目标，不能以“只声明能力”为由省略 namespace 或资源。提供目标事实与判定是否有权是两种职责；前者由可信适配代码完成，后者只属于 Authorizer。
 
-### 3.3 风险与敏感性
+授权、能力支持、安全策略、审批和环境就绪分别给出结论。任何批准都不能覆盖授权拒绝、目标隔离、Secret 契约或执行硬限制。
 
-风险等级用于描述操作影响；数据敏感性用于描述读取内容。两者不能相互替代，也不能单独决定授权。
+## 3. 现状与整改边界
 
-- `IsReadOnly` 继续表示是否属于可证明只读的自动执行集合。本期 `exec_pod` 始终返回 false。
-- `exec_pod` 的基础执行能力维持 HIGH，审批原因补充具体诊断行为与剩余风险。
-- 诊断命令不宣称“绝对只读”：目标容器中的同名程序可能被替换，其行为不能仅凭名称证明。
-- 不因风险显示为 LOW/MEDIUM 就免除强制真人批准。
+实现复用 authz.Service、EffectiveAccess.Check、BoundRun 和 client-go 请求守卫，不另建第二套权限系统。以下为本版整改前的结构问题。
 
-## 4. 总体架构与处理流程
+需要整改的结构：
 
-```mermaid
-flowchart TD
-    A[Agent 工具调用] --> B[工具参数规范化]
-    B --> C[共享命令分析与执行计划]
-    C --> D[硬限制与能力检查]
-    D --> E[平台资源授权]
-    E --> F[目标解析与 RBAC 预检]
-    F --> G[审批策略]
-    G --> H[真人批准或自动执行资格]
-    H --> I[权限、目标、凭据与对象身份重验]
-    I --> J[Executor 执行]
-    J --> K[限流截断、脱敏与结果分类]
-    K --> L[Agent / SSE / 会话 / 审计]
-```
+- AccessScope/policyCheck 按工具名维护资源映射，新增工具需要修改中央分支。
+- argvPolicy 使用有限 kubectl 子命令解析承担权限目标提取，导致执行器认识 set、label、annotate 等动词，而平台路径拒绝。
+- client-go 经过 HTTP 请求守卫，kubectl 子进程直接使用目标 kubeconfig，无法复用该请求守卫。
+- 工具描述、Prompt、风险表与实际通道能力分别维护，声明与可执行范围不一致。
 
-任一步骤拒绝均停止当前调用，返回结构化原因。单个调用失败不终止整个 Agent Loop。
+不删除身份认证、用户管理、OIDC 和多集群接入方案。这些方案的用户与凭据模型继续有效。方案 20 中“每次重新核权”在本方案中明确为使用当前有效授权上下文完成执行匹配，不要求每次读取完整授权表；方案 22 的目标绑定与方案 24 的受控组合继续保留。
 
-### 4.1 模块职责
+## 4. 核心契约
 
-| 模块 | 职责 |
+### 4.1 CapabilityDescriptor
+
+能力描述包含能力 ID、资源域、输入 Schema、目标解析器引用、允许的执行通道和输出数据类别。它不包含用户、角色和授权列表。
+
+资源域区分 Kubernetes、平台本地结果与未来宿主机资源。新增资源域需要一次域级适配；同一域内新增工具不增加新的授权算法。
+
+多个资源读取工具复用同一资源目标解析模式。复合诊断通过执行过程产生多条资源请求，不假设一个工具只访问一个资源。
+
+### 4.2 OperationFacts
+
+受信代码生成以下事实：
+
+- 资源域、动作、资源标识、子资源及名称。
+- namespace 或集群级 scope；未指定不默认解释为全部 namespace。
+- 确定的输入和操作摘要；必要时为多目标集合。
+- 是否可证明只读、数据敏感性、是否有未知行为。
+
+工具可以从参数解析 namespace，但集群与执行身份由公共运行上下文注入。模型提交的 cluster、user、approved、动作声明均不能替代服务端事实。
+
+对于通用 kubectl，命令分析用于能力提示、风险与审批预览，不要求解析器完整复刻所有 kubectl 子命令。实际资源授权以真实 API 请求为准；计划不能精确预测的请求仍必须满足绑定运行的授权边界。
+
+### 4.3 AuthorizationContext
+
+认证层创建用户身份；公共运行服务创建授权上下文，至少包含：
+
+- 当前执行用户，而非仅会话所有者。
+- 绑定集群及凭据版本。
+- 有效资源范围、动作与授权版本。
+- 会话/运行标识、失效状态、有效期及关联取消信号。
+
+工具只能使用不透明执行句柄，不取得平台数据库凭据、集群 token 或原始宽权限 kubeconfig。
+
+### 4.4 Authorizer
+
+逻辑接口为 Authorize(context, subject, target, action)。实现复用现有 authz 内核，并将资源目录、scope 与动作约束收敛到该内核。
+
+Authorizer 不接受工具名作为权限规则依据。get_pod、kubectl get、扫描内部查询访问相同资源时应得到一致结论。
+
+资源发现只确定 GVR 与 scope，不产生授权。CRD 是否进入允许目录、集群级资源是否可读由统一资源策略决定，不按工具分别维护。
+
+## 5. 登录、授权版本与执行检查
+
+### 5.1 登录的作用
+
+登录确定身份与当时的权限视图，不是为未来所有操作签发永久通行证。具体目标在执行时才出现，必须判断是否落在有效范围内。
+
+平台会话不得把权限冻结到退出登录为止；停用账号、撤权和凭据轮换应使旧上下文失效。
+
+### 5.2 检查与缓存
+
+- 执行前必须使用有效授权上下文匹配真实操作，不重新要求用户登录或弹确认框。
+- 权限缓存按用户、集群和授权版本组织；版本变化使相关上下文和决定缓存失效。
+- 单实例在授权变更持久化成功后使本进程相关缓存失效，并通知活跃运行取消。对外报告变更成功前须完成本实例失效处理。
+- 运行创建、审批恢复和凭据变更时重新取得有效上下文。
+- 请求之间可复用同一有效上下文，不要求每个 API 请求都查询完整授权表。
+- 多实例共享失效广播与一致性机制不在本期实现；当前单实例部署边界必须保持明确，不能宣称本机缓存失效已支持多实例。
+
+已经被 API Server 接受的请求无法通过撤权保证回滚；失效后禁止新请求并取消可取消的流。不得承诺撤权是远端事务撤销。
+
+### 5.3 预检与最终检查
+
+提前预检服务于交互体验：对能够明确目标的操作，在发起审批前拒绝确定越权。它不是所有工具必须重复实现的接口。
+
+最终检查由公共执行通道强制完成。预检结果可在身份、目标、权限版本和计划均未变化时复用；审批等待后必须确认这些条件仍有效。
+
+两处检查共用 Authorizer 和上下文，不维护两套规则。Kubernetes SAR 是辅助预检，真实 API 请求的 RBAC 仍为最终边界。
+
+## 6. 所有执行通道的统一强制边界
+
+### 6.1 client-go
+
+公共客户端工厂提供绑定运行的客户端，禁止工具自行从全局配置构造另一个客户端。
+
+统一 transport 在每个实际请求前：
+
+1. 验证运行、授权版本和绑定目标仍有效。
+2. 将请求解析为 GVR、scope、名称、子资源与实际动作。
+3. 调用统一 Authorizer。
+4. 检查请求是否符合当前执行许可和安全策略。
+5. 使用绑定凭据发送请求，由 Kubernetes RBAC 最终裁决。
+
+需要请求内容检查的通用变更在公共策略层解析有上限的请求体；不以仅检查 URL 代替 Secret、危险字段和既有 Code Guard 规则。
+
+### 6.2 kubectl
+
+平台 kubectl 统一通过进程内、运行绑定的 Kubernetes API 访问代理接入上述 Authorizer。代理作为公共执行通道的一部分，不新增独立部署服务。
+
+- Executor 启动 kubectl 时仅提供指向代理的临时客户端配置和短期通道凭证。
+- 真实集群凭据留在服务端代理，不进入子进程环境或临时 kubeconfig。
+- 通道凭证绑定运行、用户、集群、授权版本、执行许可及有效期；关闭运行即失效。不能仅凭来自 localhost 信任请求。
+- 代理上游地址固定为绑定集群；拒绝重定向和任意目标转发，不作为通用 HTTP/CONNECT 代理。
+- 每条上游请求解析为实际资源动作并进入同一 Authorizer。
+- 代理强制校验执行许可，不能把“已经批准某个命令”扩展为该运行的任意写权限。
+- 禁止模型覆盖 server/context/kubeconfig/token/身份等参数，禁止插件及可注入本地程序的参数。
+- 不提供平台文件、任意 URL 清单和通用外连入口。需要清单的操作继续经既有结构化对象校验路径。
+
+临时配置不包含上游凭据；通道凭证仍按敏感值处理，禁止进入模型、日志、会话与审计。代理连接失败或鉴权失败不得回退直连真实集群。
+
+API discovery、错误返回、超时和连接复用需要保持 Kubernetes 客户端兼容性；本期代理仅开放已验收的普通 Kubernetes API 请求。升级流、特殊内容类型或尚未验证的协议明确返回执行通道不支持，不静默透传。
+
+### 6.3 Pod exec
+
+exec_pod 保持有限诊断与逐次真人确认，使用公共绑定 client-go 的 pods/exec 通道，不经过普通 kubectl 代理升级流。
+
+远端 argv、Pod UID、容器身份、敏感挂载、超时和输出限制继续校验。Pod 内程序不受平台 API 代理约束，因此仍禁止任意解释器、文件内容读取和自行调用远端 Kubernetes 客户端。
+
+kubectl exec 的兼容写法规范化后进入同一 exec_pod 执行能力，不另建权限路径。
+
+### 6.4 其他入口
+
+CLI、Web、扫描、诊断子调用、Skill 和后续 MCP 接入复用公共运行服务。平台请求不得通过 CLI 兼容路径关闭授权。
+
+独立本地 CLI 没有平台登录身份时，显式采用本地凭据与 Kubernetes RBAC 模式，不伪装成平台用户，不接受平台会话复用该模式绕过资源授权。
+
+外部工具若在自身服务器使用宽权限凭据，平台不能仅凭其 Schema 声称请求级授权已覆盖；必须通过受控连接器、受限身份或可验证的远端授权契约接入，否则不注册为平台执行能力。
+
+## 7. 安全策略与人工审批
+
+安全策略判断执行方式与数据风险，不判断用户角色或 namespace 归属。
+
+| 结论 | 条件 |
 |---|---|
-| `internal/cmdplan` | AST/argv 分析、受支持命令语义、目标描述和受控执行图；不查询用户授权 |
-| `internal/tools` | 工具 Schema、输入校验、上下文绑定、执行计划适配、结果封装 |
-| `internal/authz` | 用户在集群、namespace、资源与动作上的资格判断 |
-| `internal/approval` | 风险、硬门禁和是否需要确认的确定性决策 |
-| `internal/agent` | 挂起与恢复审批、执行前重验、错误反馈和工具调度 |
-| `internal/executor` | kubectl、受控子进程、Pod exec 和既有 Kubernetes 变更的唯一执行边界 |
-| `internal/cluster` / service 装配层 | 会话集群、目标客户端、凭据版本和运行时绑定 |
-| Web UI / SSE / Audit | 复用现有交互和结果契约，展示已脱敏信息 |
+| AUTO | 可证明只读，且统一授权通过 |
+| REQUIRE_APPROVAL | 支持的执行方式、合法目标与授权范围，存在写入或需确认的风险 |
+| DENY | 无权、硬限制、目标隔离失败、通道不支持或无法安全承载 |
 
-不将平台授权或 Kubernetes 凭据解析引入 `cmdplan`；不在工具层直接启动进程或建立远端 exec 流。
+未知命令不自动执行，也不直接标为无权限。能在受控通道可靠承载的普通 Kubernetes 写命令可以进入审批，无须加入一条专门的工具或 namespace 授权规则。
 
-### 4.2 共享分析与执行计划
+人工批准绑定实际调用、规范化命令/对象、执行身份、集群、许可边界与有效版本；不可替换命令后复用批准。执行层只接受服务端生成的许可，不相信模型文本。
 
-扩展既有命令分析结果，使三个入口——`exec_pod`、单条 kubectl、受控命令组合——能够表达相同语义。
+所有 Pod exec 和具体 Secret/key 仍逐次真人确认，不接受自动化开关、批量批准和会话缓存替代。平台通用 kubectl 的非只读调用逐次真人确认，不接受 skip-permissions 或会话批准缓存；结构化普通变更与独立 CLI 保留既有显式自动化例外，但不能覆盖授权与硬限制。
 
-执行计划至少包含：
+真实 Shell、任意脚本和无法保证目标的命令继续拒绝。允许通用 kubectl 不等于允许任意程序。
 
-| 字段 | 含义 |
+## 8. 通用 kubectl 能力与模型契约
+
+### 8.1 set image 类问题的处理
+
+以镜像更新为例，模型可表达合法的 kubectl set image；平台不为它新增工具，也不要求模型先转换 JSON patch。
+
+命令进入统一 argv 通道，安全策略决定是否可承载和是否需要批准。批准后真实 get/patch 等 API 请求分别进入 Authorizer。操作权限由实际资源和动作决定，不依赖平台是否专门认识 set image。
+
+复杂命令的精确变更预览可以逐步增强，但不能把缺少专门美化解析器等同于无资源权限。没有可信字段级预览时明确展示原命令、绑定目标、允许范围和未知影响，不伪造 before/after。
+
+### 8.2 能力说明
+
+工具 Schema 与 Prompt 从实际通道能力及策略配置生成说明，区分：
+
+- 当前可用的资源级工具和通用命令通道。
+- 可自动执行的有限集合。
+- 可以审批执行的集合及通道限制。
+- 硬禁止与当前环境不可用能力。
+
+不能宣称支持任意 Shell，也不以“写操作都可以”代替真实边界。能力声明不承诺当前用户拥有权限，更不承诺真实集群 RBAC 一定允许。
+
+### 8.3 恢复与验证
+
+能力不支持时返回稳定原因和可用替代，不让模型反复猜测参数。权限不足时停止同义重试；执行结果未知时不得再次写入。
+
+变更完成后使用资源级通用读取验证目标状态，限制无信息增益的重复轮询，并及时结束当前任务。就绪状态不能被表述为已经证明变更期间全程无中断。
+
+## 9. 错误、展示与导出
+
+沿用现有结果契约，稳定区分：INVALID_ARGUMENT、UNSUPPORTED、SCOPE_DENIED、RBAC_DENIED、POLICY_DENIED、TARGET_ISOLATION_DENIED、TOOL_UNAVAILABLE、CONFLICT、EXECUTION_BUSY、TIMEOUT 和 TOOL_ERROR。
+
+每个错误包含失败层、稳定 reason、可恢复性及安全替代提示。无法解析命令不能返回“当前用户没有 namespace 权限”。
+
+聊天导出复用后端已脱敏的持久化字段，包含工具名称、命令、结果摘要、错误码、终端输出、耗时和时间。任意 arguments/data 不直接序列化，审批交互的独立审计保留在审批与审计系统；导出不是审计原始记录的替代。不得只导出 untrusted_k8s_data 定界标签。模型、SSE、历史、导出和审计继续使用统一安全表示，禁止泄漏 Secret 明文或执行凭证。
+
+## 10. 复用与迁移
+
+直接复用：现有 authz 内核、身份认证、多集群 BoundRun、RequestCheck transport、cmdplan AST/argv 执行图、审批交互、exec_pod、Secret 专用通道与 ToolResult/SSE。
+
+借鉴 HolmesGPT 的通用命令入口及“自动允许资格不等于全部支持范围”的分流；不采用前缀列表承担多租户授权。借鉴 kagent 的资源级通用工具和统一审批挂钩；不引入其 Python 运行时或按领域堆 Agent。
+
+迁移步骤：
+
+1. 固化 Authorizer、授权上下文、资源动作与执行许可契约，补齐跨入口一致性测试。
+2. 结构化工具通过能力声明与公共客户端接入；移除按工具名判定授权的中央 switch。
+3. 建设运行绑定的进程内 API 代理，打通 kubectl 请求级授权；通过隔离与失败关闭测试。
+4. 验证后替换 kubectl 旧授权目标白名单；保留命令安全、输入与执行通道限制。
+5. 收敛 Schema/Prompt/错误/导出；覆盖高频和未知普通写命令，无须逐条新增授权分支。
+
+代理未完成前不得先删除旧门禁或开放宽权限直连。切换期间所有判定仍调用同一 Authorizer，不以新旧策略任一允许作为放行条件。
+
+## 11. 验收标准
+
+- 新增同域资源工具仅需能力/目标声明和业务实现，不修改 Authorizer 的用户权限规则或工具名称分支。
+- 相同资源动作从结构化工具、扫描、kubectl 与其他平台入口发起，得到一致授权结果。
+- set image、label、annotate 等普通操作不因为缺少独立授权解析分支而失败；各操作仍执行真实请求级检查和审批。
+- 读权限不能通过原始 REST、patch、set、插件、目标覆盖或自声明动作扩大为写权限。
+- 直接访问代理必须提供有效运行凭证；凭证重放、过期、跨运行、跨用户、越界写入、上游重定向与直连回退均拒绝。
+- 撤权、停用、凭据轮换和审批后目标变化使旧运行或批准失效；不要求所有用户重新登录才生效。
+- 单个工具内部访问多个资源时，每条实际请求都受到约束；跨 namespace 列表和集群级资源不能隐式放行。
+- Secret、exec、Code Guard、超时、输出限制和审计脱敏回归全部通过。
+- 通用命令请求、错误、审批、结果可从导出文件完整复盘，不包含敏感原值。
+- 旧接口、权限数据与授权管理页面兼容；无需批量重授用户权限。
+- go test ./...、go vet ./...、前端检查和相关集成测试通过后进入真实集群验收；本地通过不代表多集群隔离已完成真机验证。
+
+## 12. 薄 Kubernetes Gateway 的实现与服务边界
+
+### 12.1 模块职责
+
+`internal/k8sgateway` 是公共 Kubernetes 访问边界，包含请求授权适配、kubectl 访问代理与通道安全策略。它不承载 Agent 循环、模型调用、用户管理、授权规则管理或审批 UI。
+
+| 模块 | 实现职责 |
 |---|---|
-| planVersion / policyVersion | 计划结构版本及诊断策略版本 |
-| sourceTool | 原始工具入口 |
-| executionLocation / executionMode | 执行位置与 argv、受控执行图等方式 |
-| boundClusterID / credentialVersion | 服务端绑定目标及凭据版本 |
-| targets | 每个调用的 namespace、GVR、名称、动作；Pod 执行额外记录 Pod UID 与容器身份 |
-| argv / program | 精确远端 argv 或受控执行图 |
-| diagnosticRule | 匹配的诊断规则及规则版本 |
-| risk / sensitivity / requireHuman | 风险、数据敏感性与强制确认要求 |
-| timeout / maxOutputBytes | 服务端裁剪后的执行限制 |
-| fingerprint | 对规范化执行语义计算的摘要 |
+| tools.CapabilityProvider / OperationDescriber | 声明资源域、资源动作与目标事实；不读取用户授权表 |
+| tools.Registry.Authorize | 根据已注册工具的声明生成事实，委托统一 Authorizer；未声明的工具失败关闭 |
+| service.BoundRun | 可信用户、逻辑集群、会话范围和凭据版本绑定，提供有效授权上下文 |
+| k8sgateway.AccessContext | client-go 与 kubectl 共用的实际请求授权及访问决策审计入口 |
+| authz.EffectiveAccess | 统一资源目录、scope、namespace、集群与动作判定 |
+| k8sgateway.Gateway | 执行通道租约接口；当前为进程内实现 |
+| executor.Runner | 单次执行许可、子进程生命周期、受控 argv 和临时客户端配置 |
 
-请求文本是输入，执行计划是校验后的内部值。计划由服务端构造，模型不得提交 `approved`、集群凭据、执行身份或策略覆盖字段。
+平台 Agent 使用注册表声明路径；AccessScope.Check/policyCheck 的旧工具名称适配仅为旧调用兼容保留，不用于已绑定平台 Agent 的授权。新工具不能依赖该兼容映射。
 
-fingerprint 覆盖集群、namespace、Pod UID、容器、argv、策略版本及执行限制，不包含明文凭据。计划变化后原批准失效。执行前允许重新分析输入进行一致性校验，不允许重新解析成不同语义后沿用旧批准。
+### 12.2 请求链路
 
-需要真人批准的执行计划必须同时具备服务端生成的单次执行许可，许可绑定本调用的身份、目标与 fingerprint。工具不能仅凭客户端参数或上下文中的任意布尔值认定已批准。Agent 消费真实审批结果后通过受信内部调用链向 Executor 传递许可；Executor 在建立 exec 流之前验证许可存在、未失效且与实际请求一致。直接调用工具 Execute、CLI 路径或其他内部入口也不能绕过该条件。许可仅在当前运行时维护，复用既有审批事件记录，不新增通用令牌服务或持久化授权表。
+结构化工具：工具声明预检 → 审批（需要时）→ 公共 client-go transport → AccessContext → EffectiveAccess.CheckRequest → 绑定集群 API Server → Kubernetes RBAC。
 
-不建立新的通用插件框架；上述字段整合进现有分析和执行请求类型，按当前包依赖保持单向引用。
+kubectl：通道与参数校验 → 单次批准 → Executor 创建 Gateway 租约 → 子进程使用临时 kubeconfig → Gateway 通道与请求策略 → 同一 AccessContext → 同一 EffectiveAccess.CheckRequest → 固定上游 API Server → Kubernetes RBAC。
 
-## 5. exec_pod 工具
+代理与上游 client-go transport 可能触达同一入口。内部请求收据绑定入口实例、方法、路径、查询和授权版本，只对该次进程内请求复用授权结果，避免双重判定和双重审计。收据不可由 HTTP 请求头伪造，授权版本变化立即使其失效。
 
-### 5.1 输入契约
+### 12.3 租约与请求限制
 
-工具名：`exec_pod`。
+Gateway.Open 接受 TargetID、ExecutionID 和只读执行约束，不接受集群凭据。TargetID 在平台中为逻辑集群 ID，ExecutionID 每次生成。当前绑定解析器持有真实 rest.Config，租约仅返回本地端点、随机通道 token 和 Close。
 
-```json
-{
-  "namespace": "test-complex",
-  "pod": "app-backend-b664b9766-45c2z",
-  "container": "backend",
-  "argv": ["ls", "-l", "/usr/share/nginx/html"],
-  "timeout_seconds": 15
-}
-```
+执行许可绑定 Runner、原始命令摘要与本次 context，仅能批准一次、消费一次；修改命令、缺少批准、跨执行器和重放均拒绝。临时 token 在同一活跃租约内用于 kubectl 的多次正常 API 请求，不能把“单次许可”误解为只能发送一个 HTTP 请求。关闭或取消租约会停服、取消在途请求并清理临时 kubeconfig。
 
-| 参数 | 类型 | 必填 | 约束 |
-|---|---|---|---|
-| namespace | string | 是 | 明确名称；不支持 `*` 和跨 namespace 选择器 |
-| pod | string | 是 | 单个 Pod 名称；不支持 Deployment、标签选择器或通配符 |
-| container | string | 条件必填 | 单个运行中普通容器可推导；多个普通容器时必须指定 |
-| argv | string[] | 是 | 非空，首项为支持的诊断程序名；不接受完整 Shell 字符串 |
-| timeout_seconds | integer | 否 | 默认 15 秒，范围 1—30 秒；同时受任务剩余时限约束 |
+只读租约拒绝实际变更。普通变更允许经过审批和授权的 PATCH、PUT、DELETE；POST 创建继续使用 create_resource 的对象校验、dry-run 和 proposal。SelfSubjectAccessReview 仅允许查询当前平台授权范围的资源动作。Secret、exec、attach、portforward、proxy 和升级协议不能通过普通代理访问。
 
-服务端拒绝未知参数、空字节、控制字符、过长参数及超量 argv。规范化请求总大小上限 8 KiB，argv 最多 64 项，单项最多 2 KiB；超限返回 INVALID_ARGUMENT。
+通用变更体必须是有大小上限的 JSON；涉及安全上下文、宿主机共享、特权能力、ServiceAccount 和卷等字段时拒绝。该检查是保守安全门，不等价于完整集群准入控制；真实准入策略与 Kubernetes RBAC 继续生效。普通命令审批显示完整命令与实际请求检查状态，不伪造逐字段 diff，也不保证具有结构化变更的 resourceVersion 预条件；需要精确并发保护的变更使用结构化通道。
 
-工具不提供 cluster、context、server、kubeconfig、token、用户身份、环境变量、工作目录、stdin、TTY 或提权参数。
+### 12.4 授权更新与审计
 
-### 5.2 目标解析
+授权和用户状态更新触发进程级版本失效信号。BoundRun 复用最长 30 秒的授权表快照，版本变化立即重载；账号状态和凭据版本仍在访问时校验，授权有效期由 Authorizer 校验。运行监听失效信号和周期看护并取消失效运行。
 
-1. 从当前会话取得已绑定集群，不允许模型选择执行集群。
-2. 先校验 namespace 范围与 exec 动作资格，再使用绑定客户端读取指定 Pod。
-3. 确定 Pod UID、容器名称、containerID、重启计数和当前运行状态。
-4. 多容器未指定、容器未运行、Pod 正在删除时不执行；分别返回明确错误。
-5. 本期仅支持运行中的普通业务容器，不支持 init container、ephemeral container 或通过工作负载自动选择 Pod。
-6. 对 privileged、hostPID、hostIPC、hostNetwork 或 hostPath 挂载的 Pod，拒绝本期通用诊断入口，返回 `POLICY_DENIED/POD_ISOLATION_UNSUPPORTED`。
+审计事件 k8s.access 记录用户、绑定集群、HTTP 方法、路径、授权结论与鉴权耗时，不记录查询参数、请求体、响应体、头或 token。它代表访问决策，不代表资源变更成功；最终操作结果由工具执行审计记录。审计写入失败禁止发送请求。
 
-最后一项是执行环境门禁，不是用户授权结论；管理员身份和人工批准均不覆盖该门禁。已有结构化 Kubernetes API 诊断仍可使用。
+### 12.5 后续拆分契约
 
-### 5.3 诊断规则目录
+Gateway 与 RequestAuthorizer 为服务边界；当前不增加网络 RPC 或新 Deployment。未来可将 Gateway 实现替换为远端连接器，Executor 继续使用租约，不向 Agent 下发真实集群凭据。
 
-规则使用明确程序名、参数语法及数值边界，不使用命令前缀或自由正则作为唯一校验。
+拆分时必须补齐服务身份认证、执行记录存储、服务端校验 ExecutionID/TargetID/批准范围、共享授权失效、租约过期及取消传播。远端服务不能信任调用者自行填写的 ReadOnly 或目标身份。当前进程级失效机制不构成多实例一致性保证，服务拆分前必须实现跨实例失效机制。
 
-| 程序 | 本期允许形式 | 限制 |
-|---|---|---|
-| hostname | 无参数 | 不允许修改主机名的参数 |
-| uptime | 无参数 | 不接受扩展参数 |
-| id | 无参数 | 不查询指定用户；结果按普通诊断数据处理 |
-| pwd | 无参数 | 仅目录路径，不自动关联文件读取 |
-| ls | `[-a] [-l] [-h] [--] PATH` | 必须一个绝对路径；不支持递归、通配符和多目标 |
-| stat | `[-L] [--] PATH` | 单一绝对路径；不支持格式字符串；`-L` 时实际目标必须通过路径规则 |
-| df | `[-h 或 -k] [--] [PATH]` | 最多一个路径；不接受任意其他参数 |
-| du | `-s [-h 或 -k] [--] PATH` | 单路径；受 15 秒默认超时约束；不递归输出目录列表 |
-| ps | 无参数，或 `-e -o pid,ppid,comm` | 无参数由服务端规范化为有限字段形式；不允许 args、command、环境变量或任意格式 |
-| ss | `-s`、`-lnt`、`-lnu` | 不允许 kill、process、过滤表达式和其他参数 |
-| netstat | `-lnt`、`-lnu` | 不允许进程参数、扩展过滤和其他参数 |
+## 13. 本地验证与真实集群验收边界
 
-规则不承诺所有业务镜像都具备对应程序与选项。缺少程序或 BusyBox/procps 参数不兼容时返回明确结果，Agent 可选择另一个已支持规则，不自动回退 `sh -c`、安装软件或下载二进制。
+新增专项验证覆盖实际 GET/PATCH 授权、跨 namespace/集群级资源拒绝、Secret/exec 专用通道隔离、上游凭据注入与身份头清理、只读限制、通道凭证校验、单次许可与重放拒绝、临时配置清理、授权收据与版本失效、审计故障失败关闭，以及新名称工具仅凭能力声明接入统一 Authorizer。
 
-不允许绝对路径程序、相对路径程序、BusyBox 多调用包装器、`env`、`printenv`、`cat`、`find`、`curl`、`wget`、`awk`、`sed`、`xargs`、`sh/bash`、Python/Perl/Node、包管理器及任意脚本。本期未知程序返回 `UNSUPPORTED/EXEC_COMMAND_UNSUPPORTED`，不伪装为权限不足。
-
-诊断目录可以扩展，但每次扩展必须同时提交参数语义、数据风险、资源开销与对应测试；不向普通用户开放任意命令免审配置。
-
-### 5.4 路径规则
-
-目录与属性查询要求：
-
-- 使用绝对路径，规范化重复分隔符和 `.`；拒绝 `..` 路径分量、控制字符与通配符。
-- 拒绝凭据目录及伪文件系统：`/var/run/secrets`、`/run/secrets`、`/var/secrets`、`/etc/secrets`、`/vault/secrets`、`/proc`、`/sys`、`/dev` 及其子目录。
-- 结合 Pod spec 拒绝 Secret volume、projected Secret、serviceAccountToken、CSI Secret 类挂载及其 subPath 目标。不能确定挂载敏感性时不进入路径诊断。
-- 拒绝 `.kube`、`.ssh`、`.aws`、云凭据目录及明确的凭据文件路径。
-- `ls` 不提供跟随链接的参数；可能遍历链接的路径操作必须先在容器内解析实际路径，再对实际路径复核规则。解析失败则拒绝，不回退到仅检查字面路径。
-- 内部路径解析作为同一次批准计划的一部分，只用于校验目标，不能读取内容或扩大目录范围。
-
-路径检查不被描述为恶意容器下的原子文件系统隔离：远端程序及文件系统均不由平台完全控制。本期能力限于人工批准的目录和属性诊断，不提供文件内容读取，因此不以路径检查替代 Secret 内容读取契约。
-
-## 6. 授权与 Kubernetes RBAC
-
-### 6.1 平台授权
-
-`exec_pod` 与兼容 `kubectl exec` 均使用现有 `ActionExec`。
-
-- 资源目标为绑定集群、明确 namespace、具体 Pod。
-- 沿用现有 exec 所需的 read、operate、exec 权限依赖，不修改现有授权数据模型。
-- 不要求 `ActionShell`、集群级 destroy 或全 namespace 授权。
-- 纯报告权限不产生 exec 或 namespace 授权。
-- Admin 仍受诊断规则、强制审批、目标隔离和 Kubernetes RBAC 约束。
-
-平台授权失败时立即返回，不读取诊断内容、不发起审批。Pod 元数据查询仅发生在已授权 namespace 内。
-
-### 6.2 RBAC 预检与最终校验
-
-审批前对实际绑定执行身份检查：
-
-- `get pods`：读取当前 Pod 与容器身份。
-- `create pods/exec`：建立 exec 连接；若选用传输实际要求其他动词，应按该传输补充检查。
-
-预检明确拒绝时返回 RBAC_DENIED。预检网络错误或审查接口不可用时标记 `unknown`，不得显示已通过；允许后续在真人批准后由真实 API 请求作最终授权判断。预检未知不改变平台权限与强制确认要求。
-
-实际 exec 请求必须由绑定客户端使用当前凭据发起，Kubernetes API 的 RBAC 判定始终是最终边界。取消本地命令不等于远端程序必然已结束，相关处理见第 10 节。
-
-### 6.3 审批后重验
-
-批准后、建立 exec 流前重新检查：
-
-1. 用户仍有效，平台授权仍成立。
-2. 会话绑定集群仍有效，凭据版本未变化。
-3. Pod UID、容器名称、containerID 与批准计划一致，容器仍运行。
-4. Pod 安全属性、敏感挂载和路径条件仍符合规则。
-5. argv、策略版本、超时与输出上限未变化。
-
-Pod 被重建、容器重启、凭据轮换或策略变化时使原计划失效，停止当前调用。Agent 必须取得新计划并重新批准，不自动追随同名对象。
-
-Kubernetes exec 接口不提供与上述所有状态检查合并的原子事务，因此仍存在检查与连接之间的短暂竞态。不得宣称 Pod UID 重验等同于原子 UID 前置条件。
-
-## 7. 审批契约
-
-### 7.1 强制逐次确认
-
-`exec_pod` 实现既有 MandatoryHumanApproval 能力，始终返回 true。兼容入口的 exec 具有相同要求。
-
-Agent 必须在任何工具执行前完成以下统一检查：当决策为 REQUIRE_APPROVAL，且不存在本调用的有效批准时，确认通道不可用即返回 `TOOL_UNAVAILABLE/APPROVER_UNAVAILABLE`。不能记录为 ApprovalSkipped 后继续。
-
-exec 不进入批量审批、不产生会话 Grant，不展示“本次会话不再询问”。旧会话 Approved 记录不能满足本次 exec 确认。用户拒绝后按现有拒绝计数机制收敛，不得换成 kubectl 入口重复索取同一授权。
-
-### 7.2 审批展示
-
-审批卡至少包含：
-
-- 集群显示名、namespace、Pod 和容器。
-- 规范化后的实际 argv，按安全转义展示，仅供阅读。
-- 诊断目的、基础风险、数据类型及规则说明。
-- 平台授权、RBAC 预检、目标绑定和策略检查结果。
-- 超时时间、输出上限。
-- “确认执行”和“拒绝”两个选项。
-
-批准绑定 toolCallID、interactionID 与 fingerprint，单次消费。不能接受模型文本中的“用户已同意”，不能用上一轮对话中的笼统意图替代审批结果。
-
-### 7.3 执行终态
-
-批准不代表执行成功。交互状态与执行状态分别维护；用户应能区分已拒绝、批准后过期、执行失败、执行超时和执行成功。
-
-## 8. kubectl 与命令组合策略
-
-### 8.1 kubectl exec 兼容入口
-
-`kubectl exec POD -n NS [-c CONTAINER] -- PROGRAM ARGS...` 解析为与 `exec_pod` 相同的请求。
-
-- 要求明确 `--` 和远端程序。
-- 全局参数按 kubectl 语法识别，不依赖固定 `argv[1]` 位置；重复或冲突 namespace/container 参数拒绝。
-- `--` 之后全部作为远端 argv 数据处理，不允许被再次解释为本地 Shell。
-- 拒绝 `-i/-t/--stdin/--tty`、工作负载目标、标签选择器及隐式默认 namespace。
-- `kubectl exec … -- sh -c …` 返回策略拒绝，不转为服务端 Bash。
-- 兼容入口与结构化入口共享规则、审批指纹和错误原因，不允许入口切换扩大能力。
-
-### 8.2 可证明只读的命令组合
-
-延续现有 AST 分析与受控执行图：支持符合规则的 `|`、`;`、换行、`&&` 和 `||`。所有分支均须静态校验，每条 Kubernetes 查询单独授权。
-
-过滤器仅处理前一阶段 stdin，按既有验证参数表支持 grep、head、tail、sort、uniq、wc、cut、tr 和受限 jq。拒绝额外文件、解释器、环境赋值、动态展开、替换、重定向、后台任务和其他不受支持构造。
-
-已证明安全的组合不要求 ActionShell，不依赖 `platform.exec.shell_enabled`，不传给 Bash 重新解释。保留条件执行与退出码语义；查询失败不得被后续过滤成功覆盖，grep 无匹配返回无匹配结果。
-
-本期不允许将 Pod exec 混入自动执行组合。需要“exec 后过滤”时，先执行并批准单次 exec，随后由模型或既有安全结果处理完成分析，不引入新的本地文件或 Shell 通道。
-
-### 8.3 只读能力一致性
-
-| 命令类型 | 授权映射 |
-|---|---|
-| get/describe/top/explain 等资源查询 | 按规范化资源与 scope 校验 read；不支持或隐含额外读取的形式拒绝 |
-| logs | 具体 Pod 的 read/logs |
-| events | 明确 namespace 或经授权的集群范围 |
-| rollout history/status | 对应 Deployment/StatefulSet/DaemonSet 的 read；其内部所需关联资源读取也受授权限制 |
-| version | 本地客户端信息无需资源授权；连接 API Server 的版本读取使用绑定集群的元信息读取资格 |
-| api-resources | 绑定集群的 API discovery 读取资格，不扩大任何实际资源读取权限 |
-| auth can-i | 新增受限语法，只查询当前执行身份对明确资源、动作和 namespace 的资格；不支持 impersonation 或 `--list` |
-| CRD 实例查询 | 使用绑定集群 discovery/RESTMapper 得到 GVR 和 scope，随后检查平台资源授权与真实 RBAC |
-
-集群元信息读取资格由“用户对该集群至少持有一条有效资源授权”推导；纯报告权限不满足该条件。只开放版本与 discovery，不继承为 node、集群资源或 namespace 通配读取。
-
-动态发现只能确定资源身份和 scope，不能产生授权。现有 ResourceProfile 未包含的 CRD 默认返回 UNSUPPORTED/RESOURCE_PROFILE_UNSUPPORTED；需通过单独评审的资源配置变更加入支持，不能仅凭“namespace 已授权”放行任意新 CRD。discovery 按集群及凭据版本缓存，缓存失效不回退静态猜测。
-
-### 8.4 真实 Shell
-
-平台 TargetBound 模式继续拒绝不能编译为受控执行计划的真实 Shell，即使用户批准或 `shell_enabled=true` 也不执行。
-
-`shell_enabled` 只描述解释器通道配置，不授予资源权限，不覆盖 TargetBound，也不控制已证明安全的受控组合。
-
-本地 CLI 的既有真实 Shell 兼容路径保持交互式真人审批、硬限制与 deny_ops 约束。本方案不将其开放为平台多租户能力，不降低其既有权限要求。该路径也必须应用统一的审批缺失拒绝逻辑。
-
-可明确转换的 manifest heredoc 优先转为结构化 `create_resource` 等既有入口，完成完整对象校验与审批；不通过开启 Bash 绕过 TargetBound。
-
-## 9. 敏感数据保护
-
-Pod exec 不是 Secret 读取通道，不提供以下能力：
-
-- 环境变量、进程完整命令行、服务账号 token 和凭据文件读取。
-- 任意文件内容读取或通过解释器、编码、压缩程序间接输出文件。
-- 读取 Secret 挂载、投射卷或宿主机文件。
-- 使用远端 kubectl、curl 等访问 API 或将内容发送到其他目标。
-
-需要具体 Kubernetes Secret/key 时使用 `get_secret_value`；逐次明确确认、权限重验、ModelOnly、非模型出口脱敏及独立 secret/reveal 规则均保持不变。
-
-目录名、进程名和端点信息也可能包含敏感数据。所有工具结果复用现有通用脱敏和已知值精确脱敏；截断边界不得破坏脱敏匹配。审计不记录原始 stdout/stderr。
-
-通用脱敏不能保证识别任意未知密码，因此不将其作为开放任意文件读取或任意解释器的依据。容器输出始终作为不可信数据进入模型，不能驱动新的授权或执行决策。
-
-## 10. Executor 与资源控制
-
-### 10.1 Pod exec 实现
-
-在 `internal/executor` 增加 `ExecPod(ctx, request)` 能力，使用绑定 RESTConfig、client-go remotecommand 和明确 argv 建立非交互流；优先复用项目锁定版本已支持的传输能力，不以新增功能为由强制升级依赖。
-
-stdin、TTY 固定为 false，stdout/stderr 分别捕获。工具层不接触凭据明文、不拼接 Shell、不直接执行 client-go exec。
-
-兼容 `kubectl exec` 规范化后也进入此能力，避免使用两套远端执行实现。
-
-### 10.2 默认限制
-
-| 项目 | 本期规则 |
-|---|---|
-| 单次 exec 超时 | 默认 15 秒，最大 30 秒 |
-| 任务取消 | 立即取消流与本地等待 |
-| stdout + stderr 总捕获量 | 共享 64 KiB 上限；超限丢弃后续数据，返回 truncated |
-| 同会话 exec 并发 | 1；不并行启动多条 exec |
-| 平台侧 exec 并发 | 默认全实例 8、单用户 2；超额快速返回 EXECUTION_BUSY，不无限排队 |
-| 自动重试 | 无；失败后由 Agent 根据错误决定下一步 |
-
-执行期限从批准后开始，审批等待不消耗命令执行时限；等待期间任务取消或会话过期应撤销未消费批准。
-
-关闭 exec 流并不保证任意远端进程被杀死。依靠受支持命令的非后台、有限参数和时间约束控制影响；超时结果标记 `remoteTerminationConfirmed=false`，禁止自动再次启动同一诊断。不能为了清理而自动追加 kill 或修改业务容器。
-
-### 10.3 平台侧子进程
-
-kubectl 与过滤程序只在 Executor 启动，使用受控二进制路径和最小环境。不得继承平台数据库、加密主密钥、管理员密码或模型密钥。
-
-目标会话不得从平台全局云凭据前缀中自动继承其他集群身份。需要云认证插件时，只从绑定目标的服务端受信配置提供必要环境；无法构造目标专属环境时返回执行环境不可用。
-
-允许的 kubeconfig 认证插件来自服务端集群接入配置，不来自模型输入。插件路径、环境与可访问凭据属于受信管理面，不以最小环境变量冒充完整操作系统沙箱。
-
-## 11. 结果、错误与 Agent 行为
-
-### 11.1 结果契约
-
-复用 ToolResult、Executor Result 和统一展示契约，增加必要的结构化元数据：执行位置、目标摘要、匹配规则、耗时、退出码、超时、截断、脱敏和远端终止确认状态。
-
-ModelOnly 不用于普通 exec。安全摘要可进入 SSE、会话和模型；敏感原值与凭据不得进入这些结果字段。
-
-### 11.2 错误分类
-
-优先复用现有 ErrorCode，新增稳定 reason 表达细分原因。ActionDenied 不另建一套 UI 主错误码。
-
-| ErrorCode | reason 示例 | Agent 行为 |
-|---|---|---|
-| INVALID_ARGUMENT | MISSING_NAMESPACE、CONTAINER_REQUIRED | 修正参数或询问目标 |
-| SCOPE_DENIED | NAMESPACE_DENIED、EXEC_ACTION_DENIED | 告知缺少授权，不请求审批、不换工具绕过 |
-| RBAC_DENIED | POD_EXEC_FORBIDDEN | 告知执行身份权限不足 |
-| UNSUPPORTED | EXEC_COMMAND_UNSUPPORTED、RESOURCE_PROFILE_UNSUPPORTED | 使用已支持工具或说明能力边界 |
-| POLICY_DENIED（新增） | SENSITIVE_PATH、INTERPRETER_DENIED、POD_ISOLATION_UNSUPPORTED | 停止同义重试，说明硬限制 |
-| TARGET_ISOLATION_DENIED（新增） | TARGET_OVERRIDE、UNPROVABLE_SHELL | 保持当前目标，改用可证明执行方式 |
-| CONFLICT | POD_REPLACED、CONTAINER_RESTARTED、PLAN_CHANGED | 重建计划；需重新批准 |
-| TOOL_UNAVAILABLE | APPROVER_UNAVAILABLE、EXEC_DISABLED | 说明通道不可用，使用替代读取 |
-| EXECUTION_BUSY（新增） | USER_LIMIT、INSTANCE_LIMIT | 不立即循环重试，返回暂时繁忙 |
-| TIMEOUT | EXEC_TIMEOUT | 展示部分安全结果，避免重复启动 |
-| TOOL_ERROR | REMOTE_BINARY_MISSING、REMOTE_ARGUMENT_UNSUPPORTED | 在支持的诊断规则内选择替代 |
-| CLUSTER_UNAVAILABLE / AUTHENTICATION_EXPIRED | 连接或凭据失效 | 按既有集群连接流程处理 |
-
-审批需要确认属于交互状态，不作为普通错误推给模型。用户拒绝沿用既有拒绝契约。新增错误必须同时接入结果分类、SSE/UI 文案与 Agent 提示，不能退回字符串猜测。
-
-### 11.3 Agent 工具选择
-
-工具描述与 Prompt 使用同一能力口径：
-
-1. Kubernetes 对象、日志和事件优先使用结构化工具。
-2. 容器目录、进程与运行状态使用 `exec_pod`。
-3. 结构化工具无法表达的资源查询使用 kubectl；过滤使用既有受控组合。
-4. 命令被拒绝后根据 reason 选择替代，不通过 Shell 包装、编码、解释器或切换工具重复尝试。
-5. 需要文件内容、任意网络探测或脚本时明确说明当前能力边界，不宣称已经读取或验证。
-
-## 12. 审计与可观测性
-
-复用既有工具调用、审批请求、批准/拒绝、执行结果事件，不新增独立审计存储。
-
-记录：userID、sessionID、toolCallID、interactionID、集群 ID、namespace、Pod UID、容器、诊断规则与版本、fingerprint、权限检查结论、批准结果、耗时、退出状态和错误原因。
-
-argv 必须先脱敏再进入审计。原始 stdout/stderr、凭据、认证插件环境及敏感值禁止写入审计；输出审计只记录字节数、截断与脱敏标记。
-
-指标覆盖调用次数、成功率、拒绝原因、审批等待、执行耗时、超时与并发占用。指标标签不使用 Pod 名称、完整命令或用户输入，避免敏感信息与高基数。
-
-## 13. 配置与兼容性
-
-新增配置按以下语义实现，所有值均由服务端校验并设置硬上限：
-
-```yaml
-agent:
-  exec_pod:
-    enabled: true
-    timeout_seconds: 15
-    max_timeout_seconds: 30
-    max_output_bytes: 65536
-    max_concurrent_per_instance: 8
-    max_concurrent_per_user: 2
-```
-
-上述为拟新增配置契约，不代表当前版本已支持。max_output_bytes 只允许收紧至更小值；超时与并发上限不得超过本方案硬限制。非法配置启动失败，不静默放宽。
-
-关闭 exec_pod 时，结构化工具不注册，兼容 kubectl exec 也返回 EXEC_DISABLED；关闭一个入口不得留下另一个绕行入口。诊断规则为随版本交付的代码策略，本期不提供自定义可执行程序配置。
-
-既有 shell_enabled、审批模式、Secret 配置、用户授权和数据库结构保持兼容；不新增 Secret 免确认模式，不自动扩大 Helm RBAC。部署缺少 pods/exec 权限时明确提示，由管理员按最小权限调整。
-
-本期 exec 不提供自动批准配置；未来若启用诊断自动执行，必须单独修改安全规范、制定诊断预授权契约并完成验收，不能通过调整 Risk 或 IsReadOnly 隐式启用。
-
-## 14. 扩展边界
-
-### 14.1 临时诊断 Pod
-
-后续作为独立工具接入同一授权、审批、执行与审计链路。临时 Pod 的创建和删除属于 Kubernetes 变更，需要明确能力授权；不得仅因用途是诊断就归为普通只读。
-
-扩展需约束镜像、ServiceAccount token、权限、挂载、资源、网络出口、目标与清理。该工具不是 Agent 任务的宿主，也不是业务 Pod exec 的替代实现。
-
-### 14.2 Linux 宿主机执行
-
-后续新增宿主机目标和 `exec_host` 类工具，接 SSH 或节点侧执行器。宿主机身份、平台授权动作、凭据和命令目录独立建模，不复用 Kubernetes namespace 权限推导主机权限。
-
-复用工具调度、批准绑定、执行限制、结果与审计契约；不复用 Pod UID、pods/exec 或 Kubernetes 目标解析。扩展不要求拆分现有 Agent Runtime。
-
-### 14.3 独立脚本执行环境
-
-平台需要运行模型生成代码、通用解释器或用户脚本时，新增独立受限执行后端：
-
-- 仅提供本次调用明确允许的文件、环境与网络目标。
-- 不挂载平台配置、数据库、加密主密钥或其他任务凭据。
-- 有 CPU、内存、进程数、执行时间和输出上限。
-- 凭据范围与平台授权一致；宽权限 Kubernetes 凭据不能仅靠 Sandbox 自动收窄。
-- 执行环境生命周期与 Agent 任务解耦；可以按调用创建，或使用具备可靠清理与隔离的执行池。
-
-该后端只承载执行态。平台侧隔离不能替代业务 Pod 或宿主机上的远端权限控制。
-
-## 15. 实施拆分
-
-| 阶段 | 交付内容 | 完成条件 |
-|---|---|---|
-| E1 策略一致性 | 共享分析、普通审批 fail-closed、错误 reason、只读元信息授权与受限 auth can-i | 单元测试与跨层契约测试通过 |
-| E2 Pod 诊断 | exec_pod、诊断规则、路径与目标检查、client-go exec、kubectl exec 收敛 | 两入口行为等价，所有 exec 逐次确认 |
-| E3 集成体验 | 审批卡、SSE、错误展示、取消、限额、审计和部署说明 | 前后端契约与集成测试通过 |
-| E4 实际验收 | 多集群、多用户、撤权、凭据轮换、Pod 重建与镜像兼容验证 | 验收矩阵完成，无隔离与审批绕过 |
-
-本方案为待评审设计；实施阶段同步更新受影响的接口、安全、工具说明及历史文档过时描述，不修改无关产品模块。
-
-## 16. 测试与验收
-
-### 16.1 自动化测试
-
-| 分类 | 必测场景 |
-|---|---|
-| 参数与解析 | namespace/container 重复、未知字段、空字节、参数长度、全局参数顺序、`--` 边界、Shell 元字符 |
-| 诊断规则 | 每种允许形式、未知选项、短参数组合、隐式文件参数、程序路径和包装器绕过 |
-| 路径 | 遍历、敏感挂载、projected token、subPath、符号链接、实际路径解析失败、策略版本变化 |
-| 授权 | read 无 exec、exec 依赖缺失、越 namespace、纯报告权限、Admin 与普通用户 |
-| 审批 | nil Approver、确认通道失败、拒绝、取消、旧批准、会话 Grant、批量批准和自动化开关 |
-| 目标 | 跨集群覆盖参数、凭据轮换、撤权、Pod 同名重建、容器重启、批准后容器安全属性变化 |
-| 只读组合 | grep/jq/head、条件分支、每段独立授权、过滤器文件输入、真实 Shell 构造、无匹配与上游失败 |
-| 能力一致性 | version/api-resources/auth can-i、rollout history/status、受支持 CRD 与未授权 CRD |
-| 执行 | 取消、超时、输出共享上限、并发上限、缺少远端程序、参数不兼容、无自动重试 |
-| 数据出口 | stdout/stderr、摘要、SSE、历史、报告、审计及模型上下文的脱敏；Secret 专用通道回归 |
-| 架构 | 进程与远端 exec 仅在 executor；工具层不得越界调用；现有结构化变更测试通过 |
-
-必须包含“同一语义分别从 exec_pod 与 kubectl exec 发起”的等价测试，以及“要求审批且没有 Approver 时 Executor 调用次数为零”的负向测试。
-
-### 16.2 真实集群验收
-
-1. 在两个绑定集群的独立会话执行相同命令，核对实际 API 访问目标和返回数据。
-2. 普通用户对授权 namespace 完成目录、磁盘、进程和连接状态诊断；未授权 namespace 不弹审批、不发 exec。
-3. 每次 exec 都产生独立审批；自动化开关、历史批准、批量批准不能免除。
-4. 等待审批期间撤权、轮换凭据、重建 Pod 或重启容器，确认旧计划停止。
-5. 验证多容器目标、非运行容器、特权/宿主机共享 Pod、敏感挂载和缺少程序场景。
-6. 验证只读组合在 shell_enabled=false 时仍工作，真实 Shell 在 TargetBound 下始终拒绝。
-7. 检查 SSE、历史、审计和报告无 Secret 明文；Secret 确认与 reveal 原有行为保持正确。
-
-代码交付须通过 `go test ./...`、`go vet ./...`、前端既有类型检查与相关测试、`git diff --check`。未完成真实集群矩阵前，不标记执行隔离和权限闭环验收完成。
-
-## 17. 参考设计与实现原则
-
-- [HolmesGPT Bash Toolset](https://holmesgpt.dev/latest/data-sources/builtin-toolsets/bash/)：参考命令分类、参数检查与审批分流；不采用前缀匹配作为多租户授权边界。
-- [Holmes Kubernetes Remediation 实现](https://github.com/robusta-dev/holmes-mcp-integrations/blob/master/servers/kubernetes-remediation/kubernetes_remediation.py)：参考结构化 Pod exec、服务端构造 argv、诊断目录和独立路径规则。
-- [对应测试](https://github.com/robusta-dev/holmes-mcp-integrations/blob/master/servers/kubernetes-remediation/test_kubernetes_remediation.py)：参考参数绕过、环境泄露和路径规范化的负向场景。
-
-实现采用 AegisOps 自有 Go 分层与现有工具、审批和 Executor 契约，不直接引入整个 HolmesGPT 或 Remediation MCP 服务。若复制上游代码，须核验对应版本许可证、保留声明并登记来源；设计借鉴不继承上游部署权限或审批信任假设。
-
-### 17.1 实现复用映射
-
-| 能力 | 参考或复用来源 | 实际实现 |
-|---|---|---|
-| 结构化 Pod/namespace/container/argv | Remediation `run_preapproved_kubectl_exec_command` | `internal/tools/pod_exec.go`；兼容 kubectl exec 解析后使用同一执行器 |
-| 参数检查与禁止环境输出 | Remediation `preapproved_exec_argv_reason` 及负向场景 | `internal/cmdplan/pod_exec.go`；ps 收敛为 pid/ppid/comm，所有 exec 逐次确认 |
-| 敏感路径与规范化失败拒绝 | Remediation `validate_read_path`、`_resolve_symlink_in_container` | Executor 目录/属性路径校验；本期不提供文件内容读取 |
-| AST 与安全组合 | AegisOps 既有 mvdan AST、cmdplan 和受控执行图 | 扩展现有分析器，不引入第二套 Shell 解析器 |
-| 远端执行协议 | 项目锁定的 client-go v0.36.3 remotecommand | 复用 SPDY 实现并拒绝重定向；不自行实现协议 |
-| 审批、授权、目标重验、结果展示 | 现有 Agent、Authz、TargetCheck、ToolResult、SSE | 扩展既有契约；单次许可仅在当前调用内存上下文传递 |
-| 资源发现 | 既有 discovery 缓存和 RESTMapper | 按绑定 Runner 复用；发现结果不产生授权 |
-| 安全回归 | 上游测试风险类别和现有测试设施 | Go 测试独立编写，覆盖参数、挂载、批准重放和目标变化；不冒充 Python 测试的直接复制 |
-
-本次没有复制上游 Python 源码或引入其运行时。上游工具将部分 exec 自动批准；本实现遵循 AegisOps 的逐次真人确认。临时诊断镜像、自动批准、任意文件读取及通用 Shell 均未随本次引入。
+本地检查不能替代真实 kubectl discovery、目标集群 RBAC、不同 API Server 版本、网络、代理和多集群隔离验收。真实环境按《统一K8s Gateway-本地验证与真机验收》执行。
