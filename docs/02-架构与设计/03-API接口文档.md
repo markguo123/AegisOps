@@ -224,7 +224,7 @@ GET  /api/v1/storage/health     // 对象存储健康唯一可观测入口；需
 **审计中心（2026-11-18 契约冻结；P4.7/P4.8 已实现）**：列表与详情都要求 `audit.read`（admin 的 `*` 天然满足），
 未登录 401、无权限 403、未装配平台 Store 时 501。列表按 `timestamp DESC, id DESC` 做 **keyset 游标分页**，
 `cursor` 是不透明串；非法时间/游标/limit 与 `from > to` 一律 400，不静默忽略筛选项。响应只回字段白名单
-（`id/timestamp/requestId/sessionId/turnId/stepId/userId/userName/clusterId/eventType/action/operation/
+（`id/timestamp/requestId/sessionId/turnId/stepId/userId/userName/clusterId/clusterName/eventType/action/operation/
 resourceKind/resourceName/risk/decision/approvalId/grantId/matchReason/parameterSummary/resultSummary/status`），
 **存储层 `payload`、原始工具参数与终端输出永不透传**。详情时间线只按显式关联键取同一条操作链，
 不按时间相邻推断；没有关联键时返回空时间线。口径见 `28-方案-审计中心.md`。

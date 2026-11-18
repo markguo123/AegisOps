@@ -159,6 +159,18 @@ function operatorLabel(row: AuditEventView): string {
   return row.userName || row.userId
 }
 
+/** 集群：优先显示后端解析的名称（如「研究院验收云」），ID 只在名称缺失时兜底。 */
+function clusterLabel(row: AuditEventView): string {
+  return row.clusterName || row.clusterId || '—'
+}
+
+function clusterTitle(row: AuditEventView): string {
+  if (row.clusterName && row.clusterId) {
+    return row.clusterName + '（' + row.clusterId + '）'
+  }
+  return row.clusterName || row.clusterId || ''
+}
+
 /**
  * 操作对象：优先结构化资源名。没有资源名时只在 operation 与 action 不同才展示
  * operation——两者相同时还并排显示同一串文字，等于用两列说同一件事。
@@ -201,7 +213,7 @@ function detailMeta(row: AuditEventView): Array<{ label: string; value: string }
     }
   }
   push('操作者', row.userId ? row.userName || row.userId : '系统')
-  push('集群', row.clusterId)
+  push('集群', clusterLabel(row))
   push('资源', targetLabel(row))
   push('动作', row.action)
   push('风险', auditRiskLabel(row.risk))
@@ -288,7 +300,7 @@ onMounted(() => {
           <span class="pill" :class="auditEventTone(row.eventType)">{{ auditEventLabel(row.eventType) }}</span>
           <span class="target" :title="targetLabel(row)">{{ targetLabel(row) }}</span>
           <span class="mono action" :title="row.action">{{ row.action }}</span>
-          <span class="mono cluster">{{ row.clusterId || '—' }}</span>
+          <span class="cluster" :title="clusterTitle(row)">{{ clusterLabel(row) }}</span>
           <span class="pill" :class="auditStatusTone(row.status)">{{ auditStatusLabel(row.status) }}</span>
           <span class="snippet" :title="summarySnippet(row)">{{ summarySnippet(row) }}</span>
           <el-icon class="go"><View /></el-icon>
@@ -543,7 +555,7 @@ onMounted(() => {
 /* 每行是一条可点击的事件：信息密度高，但不做表格（窄屏下表格会横向溢出） */
 .event-row {
   display: grid;
-  grid-template-columns: 150px minmax(90px, 130px) auto minmax(120px, 1fr) minmax(110px, 180px) 80px 64px minmax(0, 1.2fr) 18px;
+  grid-template-columns: 150px minmax(90px, 130px) auto minmax(120px, 1fr) minmax(110px, 180px) minmax(90px, 140px) 64px minmax(0, 1.2fr) 18px;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -563,9 +575,21 @@ onMounted(() => {
   background: var(--app-surface-hover);
 }
 
+.event-row > * {
+  /* 每格都必须允许收缩：集群名或资源名再长也只能在本格内省略，不能盖到结果字段上。 */
+  min-width: 0;
+}
+
 .event-row .time {
   color: var(--app-muted);
   white-space: nowrap;
+}
+
+.event-row .cluster {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-muted);
 }
 
 .event-row .operator {

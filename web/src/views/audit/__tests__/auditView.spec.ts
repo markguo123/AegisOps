@@ -22,7 +22,8 @@ const EVENTS = [
     action: 'tool-call.request',
     userId: 'u1',
     userName: '张三',
-    clusterId: 'c1',
+    clusterId: 'ecb4e9b95451d31a0d6c2ab7edce4f04',
+    clusterName: '研究院验收云',
     resourceKind: 'Pod',
     resourceName: 'arc/api-0',
     parameterSummary: '{"command":"kubectl get pods"}',
@@ -35,7 +36,8 @@ const EVENTS = [
     action: 'approval.decision',
     userId: 'u1',
     userName: '张三',
-    clusterId: 'c1',
+    clusterId: 'ecb4e9b95451d31a0d6c2ab7edce4f04',
+    clusterName: '研究院验收云',
     decision: 'approved',
     status: 'success',
   },
@@ -110,6 +112,9 @@ describe('审计中心页面', () => {
     expect(text).toContain('人工确认')
     expect(text).toContain('Pod/arc/api-0')
     expect(text).toContain('成功')
+    // 集群列显示名称而不是长 ID；ID 只放在 title 里供悬停核对。
+    expect(text).toContain('研究院验收云')
+    expect(text).not.toContain('ecb4e9b95451d31a0d6c2ab7edce4f04')
     // 事件流水顺序与后端一致，不在前端重排。
     expect(wrapper.findAll('.event-row')).toHaveLength(2)
   })

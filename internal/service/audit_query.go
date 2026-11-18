@@ -93,6 +93,7 @@ type AuditEventView struct {
 	UserID           string    `json:"userId,omitempty"`
 	UserName         string    `json:"userName,omitempty"`
 	ClusterID        string    `json:"clusterId,omitempty"`
+	ClusterName      string    `json:"clusterName,omitempty"`
 	EventType        string    `json:"eventType"`
 	Action           string    `json:"action"`
 	Operation        string    `json:"operation,omitempty"`
@@ -177,9 +178,10 @@ func (s *AuditQueryService) List(ctx context.Context, f AuditFilter) (*AuditList
 		rows = rows[:limit]
 	}
 	names := s.userNames(ctx)
+	clusters := s.clusterNames(ctx)
 	items := make([]AuditEventView, 0, len(rows))
 	for _, e := range rows {
-		items = append(items, auditEventView(e, names))
+		items = append(items, auditEventView(e, names, clusters))
 	}
 	next := ""
 	if hasMore && len(rows) > 0 {
@@ -210,12 +212,13 @@ func (s *AuditQueryService) Get(ctx context.Context, id int64) (*AuditDetailResu
 		return nil, err
 	}
 	names := s.userNames(ctx)
+	clusters := s.clusterNames(ctx)
 	timeline := make([]AuditEventView, 0, len(rows))
 	for _, row := range rows {
-		timeline = append(timeline, auditEventView(row, names))
+		timeline = append(timeline, auditEventView(row, names, clusters))
 	}
 	return &AuditDetailResult{
-		Event:             auditEventView(e, names),
+		Event:             auditEventView(e, names, clusters),
 		Timeline:          timeline,
 		TimelineTruncated: len(rows) >= auditTimelineLimit,
 	}, nil
@@ -223,7 +226,7 @@ func (s *AuditQueryService) Get(ctx context.Context, id int64) (*AuditDetailResu
 
 // auditEventView 把存储模型投影成页面可见字段。新增字段必须同时问一句
 // "它会不会把 Secret/kubeconfig/原始输出带出去"，默认不加。
-func auditEventView(e *store.AuditEvent, names map[string]string) AuditEventView {
+func auditEventView(e *store.AuditEvent, names map[string]string, clusters map[string]string) AuditEventView {
 	eventType := e.EventType
 	if eventType == "" {
 		eventType = store.EventTypeForAction(e.Action)
@@ -238,6 +241,7 @@ func auditEventView(e *store.AuditEvent, names map[string]string) AuditEventView
 		UserID:           e.UserID,
 		UserName:         names[e.UserID],
 		ClusterID:        e.ClusterID,
+		ClusterName:      clusters[e.ClusterID],
 		EventType:        eventType,
 		Action:           e.Action,
 		Operation:        e.Operation,
@@ -268,6 +272,23 @@ func (s *AuditQueryService) userNames(ctx context.Context) map[string]string {
 			name = u.Username
 		}
 		names[u.ID] = name
+	}
+	return names
+}
+
+// clusterNames 解析集群显示名。集群已删除或读取失败时返回空表，页面退回显示
+// ClusterID——审计记录必须保留它当时指向的对象，不因集群列表变化而丢失。
+func (s *AuditQueryService) clusterNames(ctx context.Context) map[string]string {
+	clusters, err := s.store.Clusters().List(ctx)
+	if err != nil {
+		return map[string]string{}
+	}
+	names := make(map[string]string, len(clusters))
+	for _, c := range clusters {
+		name := strings.TrimSpace(c.Name)
+		if name != "" {
+			names[c.ID] = name
+		}
 	}
 	return names
 }

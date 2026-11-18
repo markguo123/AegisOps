@@ -42,6 +42,17 @@ func newAuditQueryEnv(t *testing.T) *auditQueryEnv {
 	if err := authSvc.Bootstrap(context.Background(), "admin-pw"); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
+	// 集群显示名来自 clusters 表：审计页面展示 name（如「研究院验收云」），
+	// 只有集群已删除或查不到时才退回 ClusterID。
+	now := time.Now().UTC()
+	for _, c := range []*store.Cluster{
+		{ID: "c1", Name: "研究院验收云", Status: "up", CreatedAt: now, UpdatedAt: now},
+		{ID: "c2", Name: "生产云", Status: "up", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := st.Clusters().Create(context.Background(), c); err != nil {
+			t.Fatalf("create cluster %s: %v", c.ID, err)
+		}
+	}
 	handler := NewWithAuth(&fakeScan{}, authSvc).WithAuditQuery(service.NewAuditQueryService(st)).Handler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -246,6 +257,9 @@ func TestAuditEventsListFiltersAndCursor(t *testing.T) {
 	if first.Items[0].UserName != "Administrator" {
 		t.Errorf("操作者名称未解析: %q", first.Items[0].UserName)
 	}
+	if first.Items[0].ClusterName != "生产云" {
+		t.Errorf("集群名称未解析: %q (id=%q)", first.Items[0].ClusterName, first.Items[0].ClusterID)
+	}
 
 	// 第二页：游标翻页，不重复上一页末行。
 	second := decodeAuditList(t, mustAuditGet(t, env, "/api/v1/audit/events?limit=2&cursor="+url.QueryEscape(first.NextCursor), token))
@@ -288,6 +302,13 @@ func TestAuditEventsListFiltersAndCursor(t *testing.T) {
 		got := decodeAuditList(t, mustAuditGet(t, env, "/api/v1/audit/events?limit=100&"+tc.query, token))
 		if len(got.Items) != tc.want {
 			t.Errorf("%s: 事件数 = %d, want %d", tc.name, len(got.Items), tc.want)
+		}
+	}
+	// 集群过滤返回的每一行都必须带可读集群名，而不是把长 ID 直接丢给页面。
+	byCluster := decodeAuditList(t, mustAuditGet(t, env, "/api/v1/audit/events?limit=100&clusterId=c1", token))
+	for _, item := range byCluster.Items {
+		if item.ClusterName != "研究院验收云" {
+			t.Errorf("集群名 = %q, want 研究院验收云 (id=%q)", item.ClusterName, item.ClusterID)
 		}
 	}
 

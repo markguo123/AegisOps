@@ -898,6 +898,7 @@ export interface AuditEventView {
   userId?: string
   userName?: string
   clusterId?: string
+  clusterName?: string
   eventType: string
   action: string
   operation?: string
