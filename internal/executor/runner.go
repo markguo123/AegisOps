@@ -3,8 +3,10 @@ package executor
 import (
 	"context"
 	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
+	"github.com/k8s-ai/k8s-ai/internal/k8sgateway"
 	"io"
 	"log/slog"
+	"net/http"
 	"os/exec"
 	"sync"
 	"time"
@@ -22,10 +24,13 @@ const shellBinary = "bash"
 
 // Runner 同时实现 kubectl 执行与 client-go 结构化写操作。
 type Runner struct {
+	targetID      string
 	bin           string
 	kubeconfig    string
 	targetBound   bool
 	targetCheck   func(context.Context) error
+	requestCheck  func(*http.Request) error
+	gateway       k8sgateway.Gateway
 	maxBytes      int
 	denyOps       []string
 	shellEnabled  bool
@@ -51,10 +56,13 @@ type Runner struct {
 // NewRunner 创建执行器。
 func NewRunner(opts Options) *Runner {
 	r := &Runner{
+		targetID:      opts.TargetID,
 		bin:           opts.KubectlBin,
 		kubeconfig:    opts.Kubeconfig,
 		targetBound:   opts.TargetBound,
 		targetCheck:   opts.TargetCheck,
+		requestCheck:  opts.RequestCheck,
+		gateway:       opts.Gateway,
 		maxBytes:      opts.MaxBytes,
 		denyOps:       opts.DenyOps,
 		shellEnabled:  opts.ShellEnabled,

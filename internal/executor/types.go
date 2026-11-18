@@ -6,6 +6,8 @@ package executor
 
 import (
 	"context"
+	"github.com/k8s-ai/k8s-ai/internal/k8sgateway"
+	"net/http"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -45,7 +47,10 @@ type PodExecTarget struct {
 
 // Options 是执行器装配参数。
 type Options struct {
-	ExecPod *ExecPodOptions
+	TargetID     string
+	Gateway      k8sgateway.Gateway
+	RequestCheck func(*http.Request) error
+	ExecPod      *ExecPodOptions
 	// KubectlBin kubectl 二进制路径；空 = PATH 查找 "kubectl"。
 	KubectlBin string
 	// Kubeconfig 传给 kubectl 子进程的 KUBECONFIG 环境变量；

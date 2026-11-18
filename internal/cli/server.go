@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/cluster"
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/k8sgateway"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/server"
 	"github.com/k8s-ai/k8s-ai/internal/service"
@@ -122,6 +124,14 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				}
 			}
 			platformAccess := &service.PlatformAccess{Grants: authzSvc, Clusters: clusterSvc}
+			platformAccess.Observe = func(ctx context.Context, user, cluster string, record k8sgateway.RequestRecord) error {
+				payload, _ := json.Marshal(map[string]any{"method": record.Method, "path": record.Path, "allowed": record.Allowed, "duration_ms": record.Duration.Milliseconds()})
+				decision := "denied"
+				if record.Allowed {
+					decision = "allowed"
+				}
+				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
+			}
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
 				WithPlatformAccess(platformAccess).
 				WithClusters(clusterSvc).

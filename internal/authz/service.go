@@ -276,6 +276,7 @@ func (s *Service) GetGrant(ctx context.Context, id string) (*Grant, error) {
 
 // CreateGrant 创建一条 namespace 授权/销毁委派，createdBy 记录操作者。
 func (s *Service) CreateGrant(ctx context.Context, req CreateGrantRequest, createdBy string) (*Grant, error) {
+	defer InvalidateAuthorization()
 	if err := validateGrant(req.PrincipalType, req.PrincipalID, req.Namespaces, req.Permissions, req.ExpiresAt); err != nil {
 		return nil, err
 	}
@@ -308,6 +309,7 @@ func (s *Service) CreateGrant(ctx context.Context, req CreateGrantRequest, creat
 
 // UpdateGrant 部分更新授权委派（不可变更 principalType/principalId）。
 func (s *Service) UpdateGrant(ctx context.Context, id string, req UpdateGrantRequest) (*Grant, error) {
+	defer InvalidateAuthorization()
 	g, err := s.st.AuthzGrants().Get(ctx, id)
 	if err != nil {
 		return nil, mapGetErr(err, ErrGrantNotFound, "grant")
@@ -360,6 +362,7 @@ func (s *Service) DeleteGrant(ctx context.Context, id string) error {
 	if err := s.st.AuthzGrants().Delete(ctx, id); err != nil {
 		return mapGetErr(err, ErrGrantNotFound, "grant")
 	}
+	InvalidateAuthorization()
 	return nil
 }
 

@@ -1233,6 +1233,12 @@ func (a *Agent) approvalPlan(t tools.Tool, call llm.ToolCall, detail approvalDet
 	plan.Checks = append(plan.Checks, tools.ApprovalCheck{
 		Name: "平台授权", Status: "passed", Message: "当前用户允许发起该操作，仍需人工确认",
 	})
+	if a.AccessScope != nil && a.AccessScope.RequestEnforced {
+		if provider, ok := t.(tools.CapabilityProvider); ok && provider.Capability().Command {
+			plan.Checks[len(plan.Checks)-1].Status = "unknown"
+			plan.Checks[len(plan.Checks)-1].Message = "运行绑定已建立；实际资源请求在执行时由统一 Authorizer 判定"
+		}
+	}
 	if clusterAccessChecked {
 		plan.Checks = append(plan.Checks, tools.ApprovalCheck{
 			Name: "集群 RBAC", Status: "passed", Message: "当前执行身份已通过 Kubernetes 权限预检",
@@ -1266,18 +1272,13 @@ func (a *Agent) scopeCheck(ctx context.Context, call llm.ToolCall) error {
 		}
 		scope = fresh
 	}
-	if scope.Policy != nil && call.Name == "create_resource" {
-		if t, ok := a.Tools.Lookup(call.Name); ok {
-			if planner, ok := t.(interface {
-				CheckAccess(*tools.AccessScope, json.RawMessage) error
-			}); ok {
-				return planner.CheckAccess(scope, call.Arguments)
-			}
-		}
-	}
 	checked := *scope
 	checked.ResolveResource = a.AccessScope.ResolveResource
 	checked.RequestContext = ctx
+	checked.RequestEnforced = a.AccessScope.RequestEnforced
+	if checked.Policy != nil {
+		return a.Tools.Authorize(checked, call.Name, call.Arguments)
+	}
 	return checked.Check(call.Name, call.Arguments)
 }
 

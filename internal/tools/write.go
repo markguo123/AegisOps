@@ -165,6 +165,9 @@ func (t *kubectlTool) SchemaMetadata() string {
 
 func (t *kubectlTool) Name() string { return "kubectl" }
 func (t *kubectlTool) Description() string {
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() {
+		return "执行绑定集群的 kubectl argv 命令。资源和 namespace 权限由统一 Authorizer 对实际 API 请求校验。支持 set image、label、annotate、scale、patch、rollout 等现有资源变更，无须转换为 patch；变更逐次真人审批。可证明只读查询及受控 grep/head/tail/jq 管道自动执行。禁止真实 Shell、解释器、插件、本地文件/URL输入、目标/身份覆盖和直接 Secret 访问。创建使用 create_resource 提案通道，exec 优先使用 exec_pod；exec 每次真人确认。命令描述不表示当前用户有权。遇权限拒绝停止同义重试；未知执行结果不得重复写入。"
+	}
 	return "执行 kubectl 命令。支持 shell 构造（pipe |、heredoc <<EOF、redirect >、&& / ||、command substitution $() 等）。\n只读命令自动执行：单条 get/describe/logs/events/top/explain 与可证明只读的组合（kubectl get po -A | grep mysql、kubectl get pods -n team-a | grep -E 'mysql|redis' | head -n 20、kubectl get pods -n team -o json | jq -r '.items[].metadata.name'、以及 &&/||/; 连接的多条只读查询）无需审批；组合内允许的过滤器只有 grep、head、tail、sort、uniq、wc、cut、tr、jq，且参数受限、只处理管道输入。\n写命令及未证明只读的 shell 构造必须走人工审批：awk、sed、xargs、解释器、curl/wget、重定向、命令替换、环境赋值、后台任务与未知参数都不会自动执行。\n非交互 exec 仅允许 `kubectl exec <pod> -n <ns> -- <command>`，且每次必须真人审批；-i/-t/--stdin/--tty 禁止。\n禁止：edit/attach/port-forward/proxy/run/cp/debug、读取 Secret 资源、--raw 参数。Secret 元数据用 get_secret_info，明文诊断只用 get_secret_value。\n流式命令（logs -f/get -w）以固定超时采样部分输出。输出自动脱敏并截断。\n写命令安全红线（务必遵守）：(1) delete/删除类操作永远是最后选择，PVC/PV/Deployment/StatefulSet/Service/Namespace 的删除必须先给出更小范围的 patch/annotate/rollout 替代方案并征得用户同意，特别是 PVC 绑定失败必须先 patch storageClassName，只有被 immutable 拒绝+用户明确同意的情况下才允许提出 delete pvc；(2) 任何 delete pvc / delete pv / delete namespace 这种 CRITICAL 级别的删除，必须在同一个回答里同时列出 patch 替代方案给用户选择，不能只提删除。"
 }
 func (t *kubectlTool) InputSchema() any {
@@ -222,6 +225,9 @@ func (t *kubectlTool) Risk(input json.RawMessage) model.RiskLevel {
 	if err != nil {
 		return model.RiskCritical
 	}
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() && !approval.IsReadOnlyCommand(args["command"]) {
+		return model.RiskHigh
+	}
 	return approval.ClassifyCommand(args["command"])
 }
 
@@ -229,6 +235,9 @@ func (t *kubectlTool) RequiresHumanApproval(input json.RawMessage) bool {
 	args, err := ParseArgs(input, "command")
 	if err != nil {
 		return false
+	}
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() && !approval.IsReadOnlyCommand(args["command"]) {
+		return true
 	}
 	if _, matched, _ := cmdplan.ParsePodExec(args["command"]); matched {
 		return true

@@ -99,6 +99,18 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 		}
 		return r.ExecPod(ctx, req)
 	}
+	if r.targetBound && r.restConfig != nil {
+		if !r.ProxiedKubectl() {
+			return Result{}, fmt.Errorf("TOOL_UNAVAILABLE: bound kubectl request Authorizer is unavailable")
+		}
+		var cleanup func()
+		var err error
+		ctx, cleanup, err = r.startKubectlProxy(ctx, command)
+		if err != nil {
+			return Result{}, err
+		}
+		defer cleanup()
+	}
 	// 目标前置校验（P12.2）：每次执行前重验用户授权、集群存在性与凭据版本。
 	// 撤权或凭据轮换后，旧命令与旧批准在真正起进程前失效，不再依赖看护周期。
 	if r.targetCheck != nil {
@@ -189,7 +201,7 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 	if r.targetBound {
 		// 目标绑定：不继承进程环境，只注入绑定的 KUBECONFIG（childEnv 已剔除
 		// 进程里其它 KUBECONFIG 与凭据）。
-		cmd.Env = r.childEnv()
+		cmd.Env = r.commandEnv(ctx)
 	} else {
 		cmd.Env = os.Environ()
 		if r.kubeconfig != "" {

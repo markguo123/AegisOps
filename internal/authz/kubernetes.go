@@ -1,8 +1,12 @@
 package authz
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	krequest "k8s.io/apiserver/pkg/endpoints/request"
@@ -27,7 +31,64 @@ func (a EffectiveAccess) CheckRequest(r *http.Request) error {
 		return denied
 	}
 	if info.APIGroup == "authorization.k8s.io" && info.Resource == "selfsubjectaccessreviews" && info.Verb == "create" && len(info.Parts) == 1 {
-		return nil
+		// A review may inspect only a resource within the caller's platform scope.
+		// Preserve the body for client-go's transport after checking it.
+		if r.Body == nil {
+			return denied
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 65537))
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		if err != nil || len(raw) > 65536 {
+			return denied
+		}
+		var review struct {
+			Spec struct {
+				ResourceAttributes *struct{ Namespace, Verb, Group, Resource, Subresource, Name string }
+			}
+		}
+		if json.Unmarshal(raw, &review) != nil || review.Spec.ResourceAttributes == nil {
+			return denied
+		}
+		attr := review.Spec.ResourceAttributes
+		action := ActionRead
+		switch attr.Verb {
+		case "get", "list", "watch":
+		case "create", "patch", "update":
+			action = ActionOperate
+		case "delete", "deletecollection":
+			action = ActionDestroy
+		default:
+			return denied
+		}
+		switch attr.Subresource {
+		case "":
+		case "exec":
+			if attr.Resource != "pods" {
+				return denied
+			}
+			action = ActionExec
+		case "log":
+			if attr.Resource != "pods" {
+				return denied
+			}
+			action = ActionLogs
+		case "scale":
+			if attr.Group != "apps" {
+				return denied
+			}
+		default:
+			return denied
+		}
+		cluster, ok := ProfileResource(attr.Group, attr.Resource, action)
+		if !ok || cluster && attr.Namespace != "" {
+			return denied
+		}
+		ns := attr.Namespace
+		if ns == "" {
+			ns = "*"
+		}
+		return a.Check(Target{ClusterID: a.ClusterID, Namespace: ns, ClusterScoped: cluster, Resource: attr.Group + "/" + attr.Resource, Name: attr.Name, Subresource: attr.Subresource, Actions: []string{action}})
 	}
 	act := ActionRead
 	switch info.Verb {
@@ -78,6 +139,9 @@ func (a EffectiveAccess) CheckRequest(r *http.Request) error {
 // CheckMetadata grants only discovery/version access, never resource contents.
 func (a EffectiveAccess) CheckMetadata() error {
 	for _, rule := range a.Rules {
+		if rule.ExpiresAt != nil && !rule.ExpiresAt.After(time.Now()) {
+			continue
+		}
 		if validAccessRule(rule) && len(rule.Actions) > 0 {
 			return nil
 		}

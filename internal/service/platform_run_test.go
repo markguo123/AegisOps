@@ -50,7 +50,7 @@ func TestBoundRunRevocationAndCredentialRotation(t *testing.T) {
 	if err := st.Credentials().Create(ctx, cred); err != nil {
 		t.Fatal(err)
 	}
-	p := PlatformAccess{authz.New(st), cluster.New(st.Clusters(), st.Credentials(), cipher)}
+	p := PlatformAccess{Grants: authz.New(st), Clusters: cluster.New(st.Clusters(), st.Credentials(), cipher)}
 	req := authz.ResourceGrantRequest{ClusterID: "c", UserID: user.ID, ScopeType: "namespace", Namespaces: []string{"team"}, Actions: []string{"read"}}
 	g, err := p.Grants.CreateResourceGrant(ctx, req, user.ID)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestPlatformBindIsolatesClusters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p := PlatformAccess{authz.New(st), cluster.New(st.Clusters(), st.Credentials(), cipher)}
+	p := PlatformAccess{Grants: authz.New(st), Clusters: cluster.New(st.Clusters(), st.Credentials(), cipher)}
 	req := authz.ResourceGrantRequest{ClusterID: "cluster-b", UserID: user.ID, ScopeType: "namespace", Namespaces: []string{"team"}, Actions: []string{"read"}}
 	if _, err := p.Grants.CreateResourceGrant(ctx, req, user.ID); err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestBoundRunCredentialRotationInvalidatesOnlyTarget(t *testing.T) {
 		}
 		creds = append(creds, cred)
 	}
-	p := PlatformAccess{authz.New(st), cluster.New(st.Clusters(), st.Credentials(), cipher)}
+	p := PlatformAccess{Grants: authz.New(st), Clusters: cluster.New(st.Clusters(), st.Credentials(), cipher)}
 	for _, id := range []string{"cluster-b", "cluster-c"} {
 		req := authz.ResourceGrantRequest{ClusterID: id, UserID: user.ID, ScopeType: "namespace", Namespaces: []string{"team"}, Actions: []string{"read"}}
 		if _, err := p.Grants.CreateResourceGrant(ctx, req, user.ID); err != nil {

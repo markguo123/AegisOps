@@ -434,7 +434,9 @@ func chatWriteRunner(cfg *config.Config) (tools.WriteRunner, error) {
 		// Options 的零值是关闭，装配方必须显式传，别让默认镜像丢掉管道排障能力。
 		ShellEnabled: cfg.Platform.Exec.ShellEnabled,
 		TargetBound:  cfg.Kubernetes.TargetBound,
+		TargetID:     cfg.Kubernetes.TargetID,
 		TargetCheck:  cfg.Kubernetes.TargetCheck,
+		RequestCheck: cfg.Kubernetes.RequestCheck,
 		Clientset:    cs,
 		Namespace:    cfg.Kubernetes.Namespace,
 		RESTConfig:   restConfig,
@@ -527,6 +529,9 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		cfg.Kubernetes.Kubeconfig = req.KubeconfigPath
 		cfg.Kubernetes.Context = ""
 		cfg.Kubernetes.RequestCheck = req.RequestCheck
+		if req.AccessScope != nil && req.AccessScope.Policy != nil {
+			cfg.Kubernetes.TargetID = req.AccessScope.Policy.ClusterID
+		}
 		// P12.2：平台会话的目标由服务端绑定到临时 kubeconfig；执行器据此
 		// 拒绝无法证明目标边界的 shell 与目标覆盖参数，不依赖人工审批。
 		cfg.Kubernetes.TargetBound = true
@@ -658,6 +663,11 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		events <- ChatEvent{Type: ChatEventProgress, Text: fmt.Sprintf("已注入 Skill：%s（%s）", h.name, h.mode)}
 	}
 	if req.AccessScope != nil {
+		bound := *req.AccessScope
+		req.AccessScope = &bound
+		if channel, ok := writeRunner.(interface{ ProxiedKubectl() bool }); ok {
+			req.AccessScope.RequestEnforced = channel.ProxiedKubectl()
+		}
 		if resolver, ok := writeRunner.(interface {
 			ResolveCommandResource(context.Context, string) (string, string, bool, error)
 		}); ok {

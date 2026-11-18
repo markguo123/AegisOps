@@ -117,7 +117,7 @@ func (r *Runner) runReadOnlyProgram(ctx context.Context, command string, prog cm
 	}
 	runCtx, cancel := r.programContext(ctx)
 	defer cancel()
-	env := r.childEnv()
+	env := r.commandEnv(ctx)
 
 	result := Result{Command: command}
 	lastCode := 0

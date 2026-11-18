@@ -124,6 +124,11 @@ func (t *kubectlTool) PrepareExecutionContext(ctx context.Context, input json.Ra
 	}
 	r, matched, e := cmdplan.ParsePodExec(args["command"])
 	if !matched {
+		if runner, ok := t.runner.(interface {
+			PrepareKubectl(context.Context, string) (context.Context, error)
+		}); ok {
+			return runner.PrepareKubectl(ctx, args["command"])
+		}
 		return ctx, nil
 	}
 	if e != nil {
@@ -142,6 +147,11 @@ func (t *kubectlTool) AuthorizeExecutionContext(ctx context.Context, input json.
 	}
 	_, matched, _ := cmdplan.ParsePodExec(args["command"])
 	if !matched {
+		if runner, ok := t.runner.(interface {
+			AuthorizeKubectl(context.Context, string) (context.Context, error)
+		}); ok {
+			return runner.AuthorizeKubectl(ctx, args["command"])
+		}
 		return ctx, nil
 	}
 	runner, ok := t.runner.(PodExecRunner)

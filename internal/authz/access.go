@@ -26,11 +26,12 @@ const (
 // AccessRule keeps actions attached to their resource boundary. Never flatten
 // actions from different namespaces into a global write/destroy flag.
 type AccessRule struct {
-	ScopeType       string   `json:"scopeType"`
-	Namespaces      []string `json:"namespaces"`
-	ResourceProfile string   `json:"resourceProfile"`
-	Actions         []string `json:"actions"`
-	GrantID         string   `json:"grantId"`
+	ScopeType       string     `json:"scopeType"`
+	Namespaces      []string   `json:"namespaces"`
+	ResourceProfile string     `json:"resourceProfile"`
+	Actions         []string   `json:"actions"`
+	GrantID         string     `json:"grantId"`
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
 }
 
 type Target struct {
@@ -52,6 +53,21 @@ type EffectiveAccess struct {
 }
 
 func (a EffectiveAccess) Check(t Target) error {
+	if t.Resource != "" {
+		g, res, ok := strings.Cut(t.Resource, "/")
+		if !ok {
+			return fmt.Errorf("UNSUPPORTED: resource identity must be group/resource")
+		}
+		for _, action := range t.Actions {
+			cluster, supported := ProfileResource(g, res, action)
+			if !supported {
+				return fmt.Errorf("POLICY_DENIED: resource is outside the platform profile")
+			}
+			if cluster != t.ClusterScoped {
+				return fmt.Errorf("SCOPE_DENIED: resource scope mismatch")
+			}
+		}
+	}
 	if len(t.Actions) == 0 {
 		return fmt.Errorf("ACTION_DENIED: action is required")
 	}
@@ -60,6 +76,9 @@ func (a EffectiveAccess) Check(t Target) error {
 	}
 	actions := map[string]bool{}
 	for _, r := range a.Rules {
+		if r.ExpiresAt != nil && !r.ExpiresAt.After(time.Now()) {
+			continue
+		}
 		if !validAccessRule(r) {
 			continue
 		}
@@ -169,7 +188,7 @@ func (s *Service) EffectiveAccess(ctx context.Context, userID, clusterID string)
 		if containsString(actions, "*") {
 			continue
 		}
-		rule := AccessRule{ScopeType: g.ScopeType, Namespaces: ns, ResourceProfile: g.ResourceProfile, Actions: actions, GrantID: g.ID}
+		rule := AccessRule{ScopeType: g.ScopeType, Namespaces: ns, ResourceProfile: g.ResourceProfile, Actions: actions, GrantID: g.ID, ExpiresAt: g.ExpiresAt}
 		if !validAccessRule(rule) {
 			return nil, fmt.Errorf("invalid resource grant %s", g.ID)
 		}
@@ -270,6 +289,7 @@ func (s *Service) CreateResourceGrant(ctx context.Context, req ResourceGrantRequ
 	if err := s.st.AuthzGrants().Create(ctx, g); err != nil {
 		return nil, err
 	}
+	InvalidateAuthorization()
 	return &rule, nil
 }
 
@@ -308,6 +328,7 @@ func (s *Service) ReplaceResourceGrant(ctx context.Context, id string, req Resou
 	if err := s.st.AuthzGrants().Update(ctx, g); err != nil {
 		return nil, err
 	}
+	InvalidateAuthorization()
 	return s.GetGrant(ctx, id)
 }
 func (s *Service) Authorize(ctx context.Context, userID string, target Target) error {

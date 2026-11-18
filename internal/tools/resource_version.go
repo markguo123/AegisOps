@@ -17,6 +17,9 @@ import (
 // PrepareExecution captures high-risk targets before confirmation and checks
 // UID/resourceVersion again immediately before dispatch.
 func (t *kubectlTool) PrepareExecution(ctx context.Context, input json.RawMessage, scope *AccessScope) (func(context.Context) error, error) {
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() {
+		return nil, nil
+	} // request-level authorization replaces command-derived authorization
 	if args, err := ParseArgs(input, "command"); err == nil {
 		if _, matched, _ := cmdplan.ParsePodExec(args["command"]); matched {
 			return nil, nil

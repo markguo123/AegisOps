@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/k8s-ai/k8s-ai/internal/authstate"
 	"sort"
 	"strings"
 
@@ -158,6 +159,7 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*store
 // UpdateUser 支持 displayName / password / roleID / status 的部分更新。
 // 最后一个可用本地管理员由 Store 事务保护，安全字段变化撤销旧令牌。
 func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (*store.User, error) {
+	defer authstate.Invalidate()
 	if strings.TrimSpace(id) == "" {
 		return nil, ErrUserNotFound
 	}
@@ -215,6 +217,7 @@ func (s *Service) UpdateUser(ctx context.Context, id string, req UpdateUserReque
 
 // DeleteUser 保留内部身份引用并注销用户，最后一个本地管理员不能被删除。
 func (s *Service) DeleteUser(ctx context.Context, id string) error {
+	defer authstate.Invalidate()
 	if strings.TrimSpace(id) == "" {
 		return ErrUserNotFound
 	}

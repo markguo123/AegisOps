@@ -31,6 +31,7 @@ type Config struct {
 
 // KubernetesConfig controls cluster access (FR-003).
 type KubernetesConfig struct {
+	TargetID     string                    `json:"-" mapstructure:"-"`
 	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
 	// TargetBound 是运行期标记（P12.2），不来自配置文件：平台会话把目标
 	// kubeconfig 临时文件写进 Kubeconfig 后置为 true，执行器据此拒绝无法证明

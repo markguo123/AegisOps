@@ -68,7 +68,7 @@ func (s *Server) handleRevealSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer bound.Close()
-	target := authz.Target{ClusterID: sess.Cluster, Namespace: body.Namespace, Resource: "secrets", Name: body.Name, Actions: []string{authz.ActionSecretRead}}
+	target := authz.Target{ClusterID: sess.Cluster, Namespace: body.Namespace, Resource: "/secrets", Name: body.Name, Actions: []string{authz.ActionSecretRead}}
 	authorize := func() error {
 		access, e := bound.Access(ctx)
 		if e != nil {
@@ -92,7 +92,7 @@ func (s *Server) handleRevealSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, fmt.Errorf("审计不可用，请稍后重试"))
 		return
 	}
-	client, err := kube.NewClient(kube.Options{Kubeconfig: bound.Path, Timeout: 10 * time.Second})
+	client, err := kube.NewClient(kube.Options{Kubeconfig: bound.Path, Timeout: 10 * time.Second, RequestCheck: bound.CheckRequest})
 	if err != nil {
 		writeError(w, 503, fmt.Errorf("集群连接不可用"))
 		return

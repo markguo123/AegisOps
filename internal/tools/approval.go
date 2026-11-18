@@ -62,6 +62,9 @@ func (t *kubectlTool) PreviewApproval(input json.RawMessage) ApprovalPlan {
 		return ApprovalPlan{Tool: t.Name(), Summary: "参数无法解析：" + err.Error()}
 	}
 	command := strings.TrimSpace(args["command"])
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() {
+		return ApprovalPlan{Tool: t.Name(), Title: "Kubernetes 命令执行", Command: command, Operation: "kubectl", Summary: "按完整命令逐次确认；实际资源请求由统一授权入口校验。未生成字段级变更预览，不承诺未验证影响。"}
+	}
 	if command == "" {
 		return ApprovalPlan{Tool: t.Name(), Summary: "缺少 kubectl 命令"}
 	}

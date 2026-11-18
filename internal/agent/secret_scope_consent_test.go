@@ -14,6 +14,10 @@ import (
 
 type consentSecretTool struct{ stubTool }
 
+func (*consentSecretTool) Capability() tools.Capability {
+	return tools.Capability{Domain: "kubernetes", Resource: "/secrets", Action: "secret.read"}
+}
+
 func (*consentSecretTool) RequiresHumanApproval(json.RawMessage) bool { return true }
 func (*consentSecretTool) Risk(json.RawMessage) model.RiskLevel       { return model.RiskHigh }
 func TestSecretScopeAndPerCallConsent(t *testing.T) {
