@@ -12,6 +12,8 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func gatewayFixture(t *testing.T, readOnly bool) (Lease, *atomic.Int32, *atomic.Bool) {
@@ -64,8 +66,29 @@ func gatewayCall(t *testing.T, lease Lease, method, path, body, token string, he
 	if req.Header == nil {
 		req.Header = make(http.Header)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	res, e := http.DefaultClient.Do(req)
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters["bound"] = &clientcmdapi.Cluster{Server: lease.Endpoint, CertificateAuthorityData: lease.CAData}
+	cfg.AuthInfos["channel"] = &clientcmdapi.AuthInfo{Token: token}
+	cfg.Contexts["bound"] = &clientcmdapi.Context{Cluster: "bound", AuthInfo: "channel"}
+	cfg.CurrentContext = "bound"
+	raw, e := clientcmd.Write(*cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	loader, e := clientcmd.NewClientConfigFromBytes(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Use kubectl's config loader to exercise TLS verification and bearer token loading.
+	config, e := loader.ClientConfig()
+	if e != nil {
+		t.Fatal(e)
+	}
+	client, e := rest.HTTPClientFor(config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	res, e := client.Do(req)
 	if e != nil {
 		t.Fatal(e)
 	}

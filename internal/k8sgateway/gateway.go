@@ -4,8 +4,13 @@ package k8sgateway
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,6 +34,7 @@ type OpenRequest struct {
 type Lease struct {
 	Endpoint string
 	Token    string
+	CAData   []byte
 	Close    func()
 }
 type Gateway interface {
@@ -45,6 +51,29 @@ type TargetResolver func(context.Context, string) (BoundTarget, error)
 type inProcess struct{ resolve TargetResolver }
 
 func NewInProcess(resolve TargetResolver) Gateway { return &inProcess{resolve: resolve} }
+
+// loopbackCertificate creates a certificate trusted only by clients that
+// receive this lease's certificate as their trust anchor.
+func loopbackCertificate() (tls.Certificate, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		NotBefore:   now.Add(-time.Minute),
+		NotAfter:    now.Add(24 * time.Hour),
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}
 
 func (g *inProcess) Open(ctx context.Context, request OpenRequest) (Lease, error) {
 	if g.resolve == nil || request.TargetID == "" || request.ExecutionID == "" {
@@ -69,6 +98,10 @@ func (g *inProcess) Open(ctx context.Context, request OpenRequest) (Lease, error
 	transport, err := rest.TransportFor(target.Config)
 	if err != nil {
 		return Lease{}, err
+	}
+	cert, caData, err := loopbackCertificate()
+	if err != nil {
+		return Lease{}, fmt.Errorf("create gateway TLS certificate: %w", err)
 	}
 	token := rand.Text()
 	runCtx, cancel := context.WithCancel(ctx)
@@ -131,9 +164,10 @@ func (g *inProcess) Open(ctx context.Context, request OpenRequest) (Lease, error
 		return Lease{}, err
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32768}
+	server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	var once sync.Once
 	closeLease := func() { once.Do(func() { cancel(); _ = server.Close() }) }
-	go func() { _ = server.Serve(listener) }()
+	go func() { _ = server.ServeTLS(listener, "", "") }()
 	context.AfterFunc(runCtx, func() { _ = server.Close() })
-	return Lease{Endpoint: "http://" + listener.Addr().String(), Token: token, Close: closeLease}, nil
+	return Lease{Endpoint: "https://" + listener.Addr().String(), Token: token, CAData: caData, Close: closeLease}, nil
 }

@@ -55,13 +55,20 @@ func TestKubectlProxyPermitAndCredentialIsolation(t *testing.T) {
 	if strings.Contains(string(raw), "real-cluster-credential") || strings.Contains(string(raw), upstream.URL) {
 		t.Fatal("real target credentials escaped")
 	}
-	cfg, err := clientcmd.Load(raw)
+	loader, err := clientcmd.NewClientConfigFromBytes(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, _ := http.NewRequest("PATCH", cfg.Clusters["bound"].Server+"/apis/apps/v1/namespaces/team/deployments/api", strings.NewReader(`{"spec":{"replicas":2}}`))
-	req.Header.Set("Authorization", "Bearer "+cfg.AuthInfos["channel"].Token)
-	response, err := http.DefaultClient.Do(req)
+	cfg, err := loader.ClientConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := rest.HTTPClientFor(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("PATCH", cfg.Host+"/apis/apps/v1/namespaces/team/deployments/api", strings.NewReader(`{"spec":{"replicas":2}}`))
+	response, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +84,7 @@ func TestKubectlProxyPermitAndCredentialIsolation(t *testing.T) {
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatal("temporary credentials retained")
 	}
-	if response, err := http.DefaultClient.Do(req); err == nil {
+	if response, err := client.Do(req); err == nil {
 		response.Body.Close()
 		t.Fatal("closed lease still usable")
 	}

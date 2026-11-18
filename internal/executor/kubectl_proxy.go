@@ -126,7 +126,7 @@ func (r *Runner) startKubectlProxy(ctx context.Context, command string) (context
 		return ctx, nil, err
 	}
 	cfg := clientcmdapi.NewConfig()
-	cfg.Clusters["bound"] = &clientcmdapi.Cluster{Server: lease.Endpoint}
+	cfg.Clusters["bound"] = &clientcmdapi.Cluster{Server: lease.Endpoint, CertificateAuthorityData: lease.CAData}
 	cfg.AuthInfos["channel"] = &clientcmdapi.AuthInfo{Token: lease.Token}
 	cfg.Contexts["bound"] = &clientcmdapi.Context{Cluster: "bound", AuthInfo: "channel"}
 	cfg.CurrentContext = "bound"
