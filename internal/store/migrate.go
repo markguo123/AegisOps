@@ -13,7 +13,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 13
+const schemaVersion = 14
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -69,6 +69,31 @@ var migrations = []migration{
 	{version: 11, name: "two platform roles and report coverage", up: migrateV11},
 	{version: 12, name: "cluster identity and last check metadata", up: migrateV12},
 	{version: 13, name: "chat display entities and persistent event log", up: migrateV13},
+	{version: 14, name: "audit center bounded query indexes", up: migrateV14},
+}
+
+// schemaV14Indexes 是审计中心（P4.7 / 方案 28 §2/§3）的有界查询索引：
+// 列表按 (timestamp DESC, id DESC) 做 keyset 游标，详情时间线按 approval_id /
+// request_id 等显式关联键回查，集群与操作者过滤也需要各自的索引。索引只加在
+// 读路径真正用到的列上——审计写是高频路径，无用的索引会拖慢每一次落库。
+var schemaV14Indexes = []indexSpec{
+	{name: "idx_audit_time_id", table: "audit_events", cols: "timestamp, id"},
+	{name: "idx_audit_cluster", table: "audit_events", cols: "cluster_id"},
+	{name: "idx_audit_approval", table: "audit_events", cols: "approval_id"},
+	{name: "idx_audit_request", table: "audit_events", cols: "request_id"},
+}
+
+// migrateV14 为审计中心补查询索引（幂等，沿用各驱动对重复索引的容忍）。
+func migrateV14(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, idx := range schemaV14Indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(idx.name, idx.table, idx.cols)); err != nil {
+			if d.isDuplicateIndexErr(err) {
+				continue
+			}
+			return fmt.Errorf("create index %s: %w", idx.name, err)
+		}
+	}
+	return nil
 }
 
 // schemaV13 是 Chat 展示事实源（方案 25 §5.2）。所有会话共用一套表：

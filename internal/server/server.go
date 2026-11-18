@@ -64,6 +64,8 @@ type Server struct {
 	settings settingsService
 	// auditlog 写系统事件（LOGIN/LOGOUT 等，P1.11），nil 时跳过。
 	auditlog auditWriter
+	// auditQuery 是审计只读查询面（P4.7），nil 时审计端点返回 501。
+	auditQuery auditQueryService
 	// clusterSvc 是集群管理应用服务（P3.1-P3.3），nil 时集群端点返回 501。
 	clusterSvc clusterService
 	// skillsSvc 是 Skill 平台应用服务（P3.5），nil 时 Skill 端点返回 501。
@@ -235,6 +237,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/skills/import-procedural", s.handleImportProceduralDocs)
 	mux.HandleFunc("POST /api/v1/skills/import-zip", s.handleImportProceduralZip)
 	mux.HandleFunc("PATCH /api/v1/skills/{name}/enabled", s.handlePatchSkillEnabled)
+	mux.HandleFunc("GET /api/v1/audit/events", s.handleListAuditEvents)
+	mux.HandleFunc("GET /api/v1/audit/events/{id}", s.handleGetAuditEvent)
 	mux.HandleFunc("GET /api/v1/reports", s.handleListReports)
 	// 总览必须在 {id} 之前登记：Go 的 mux 让静态段优先于通配段，登记顺序只是把
 	// 「summary 不是一个报告 ID」这件事写给读代码的人看。

@@ -877,3 +877,52 @@ export interface StructuredReportEnvelope {
   legacy: boolean
   inspection: InspectionReport | null
 }
+
+// ---------------------------------------------------------------------------
+// P4.7 审计中心（方案 28）
+// ---------------------------------------------------------------------------
+
+/**
+ * 审计事件投影（后端 service.AuditEventView）。
+ *
+ * 这里刻意没有 payload 字段：后端只回字段白名单，存储层原始 Payload 可能含
+ * 工具参数与终端输出，页面拿到的永远是写入时已脱敏并截断的摘要。
+ */
+export interface AuditEventView {
+  id: number
+  timestamp: string
+  requestId?: string
+  sessionId?: string
+  turnId?: string
+  stepId?: string
+  userId?: string
+  userName?: string
+  clusterId?: string
+  eventType: string
+  action: string
+  operation?: string
+  resourceKind?: string
+  resourceName?: string
+  risk?: string
+  decision?: string
+  approvalId?: string
+  grantId?: string
+  matchReason?: string
+  parameterSummary?: string
+  resultSummary?: string
+  status?: string
+}
+
+/** 游标分页的审计列表（后端 service.AuditListResult）。 */
+export interface AuditListResult {
+  items: AuditEventView[]
+  nextCursor?: string
+  hasMore: boolean
+}
+
+/** 审计详情：当前事件 + 按明确关联键查出的有界时间线（后端 service.AuditDetailResult）。 */
+export interface AuditDetailResult {
+  event: AuditEventView
+  timeline: AuditEventView[]
+  timelineTruncated: boolean
+}

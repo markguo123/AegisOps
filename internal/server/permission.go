@@ -89,6 +89,10 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/skills/import-zip", Access: permission.AccessPermission, Permission: permission.SkillManage},
 		permission.Rule{Method: "POST", Path: "/api/v1/skills/import", Access: permission.AccessPermission, Permission: permission.SkillManage},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/skills/{name}/enabled", Access: permission.AccessPermission, Permission: permission.SkillManage},
+		// 审计中心（P4.7 / 方案 28 §2）：列表与详情都要求 audit.read。admin 的 "*"
+		// 天然满足；其他角色只有被显式授予 audit.read 才能读，网关不放宽。
+		permission.Rule{Method: "GET", Path: "/api/v1/audit/events", Access: permission.AccessPermission, Permission: permission.AuditRead},
+		permission.Rule{Method: "GET", Path: "/api/v1/audit/events/{id}", Access: permission.AccessPermission, Permission: permission.AuditRead},
 		// 报告（P8.5）：只登记「必须登录」，可见性由 owner 与集群授权在 handler 里判定。
 		// 这里刻意不加 report.read 权限位——四期没有独立的报告权限域，凭空造一个恒真的
 		// 权限位会让人误以为存在「授予后即可读所有报告」的开关（方案 15 §12.2）。

@@ -9,7 +9,6 @@ import {
   Connection,
   Document,
   Files,
-  Finished,
   MagicStick,
   Monitor,
   Moon,
@@ -48,10 +47,9 @@ const allMenuGroups = [
   },
   {
     title: '治理',
-    items: [
-      { index: '/app/approval', title: '审批中心', icon: Finished, permission: PERM.approvalRead },
-      { index: '/app/audit', title: '审计', icon: Document, permission: PERM.auditRead },
-    ],
+    // P4.7：治理菜单收敛为审计中心。审批不再有独立入口——确认动作在 Chat 内完成，
+    // 审批决定作为审计事件在本页查询（方案 28 §1）。
+    items: [{ index: '/app/audit', title: '审计中心', icon: Document, permission: PERM.auditRead }],
   },
   {
     title: '平台管理',

@@ -24,7 +24,7 @@ async function mountLayout(role: 'admin' | 'operator' | 'user', stored?: StoredU
 
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: ['chat', 'cluster', 'skill', 'approval', 'audit', 'settings', 'users'].map((name) => ({
+    routes: ['chat', 'cluster', 'skill', 'audit', 'settings', 'users'].map((name) => ({
       path: `/app/${name}`,
       component: Blank,
     })),
@@ -48,6 +48,15 @@ describe('AppLayout 权限菜单', () => {
     const menu = wrapper.find('.app-menu').text()
     expect(menu).toContain('配置中心')
     expect(menu).toContain('用户与权限')
+  })
+
+  it('治理菜单只有审计中心：审批不再有独立入口', async () => {
+    const wrapper = await mountLayout('admin')
+    const menu = wrapper.find('.app-menu').text()
+    expect(menu).toContain('审计中心')
+    expect(menu).not.toContain('审批中心')
+    // 审计中心名称必须是一个整体，不能还挂着短名「审计」。
+    expect(menu).not.toMatch(/(^|\s)审计(\s|$)/)
   })
 })
 

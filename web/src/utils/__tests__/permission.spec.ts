@@ -43,6 +43,11 @@ describe('角色权限口径', () => {
     expect(canReadGovernance(null)).toBe(false)
   })
 
+  it('治理入口按 audit.read 判定：admin 可见，user 默认不可见', () => {
+    expect(canReadGovernance('admin')).toBe(true)
+    expect(canReadGovernance('user')).toBe(false)
+  })
+
   it('会话内审批与平台权限解耦：三类登录角色均可自确认', () => {
     expect(canDecideApproval('admin')).toBe(true)
     expect(canDecideApproval('user')).toBe(true)

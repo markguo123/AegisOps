@@ -6,11 +6,54 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/k8s-ai/k8s-ai/internal/store"
 )
+
+// TestAuditCenterCapability 覆盖 P4.7/P4.8：真实装配下管理员可按 audit.read 检索
+// 审计事件与详情，普通用户直调被网关 403，响应不携带存储层 payload。
+func TestAuditCenterCapability(t *testing.T) {
+	h := newHarness(t)
+	admin := h.adminToken()
+	// 登录本身会写一条 LOGIN 审计，列表至少有这条真实事件，便于验证详情。
+	h.createUser(admin, "bob", "bob-password-123", "user")
+	bob := h.login("bob", "bob-password-123")
+
+	if r := h.do(http.MethodGet, "/api/v1/audit/events", bob, ""); r.status != http.StatusForbidden {
+		t.Fatalf("无 audit.read 的普通用户应 403，实得 %d: %s", r.status, r.body)
+	}
+
+	listed := h.must(h.do(http.MethodGet, "/api/v1/audit/events?limit=1", admin, ""), http.StatusOK)
+	if strings.Contains(listed.body, "\"payload\"") {
+		t.Fatalf("审计列表直接透传了存储层 payload: %s", listed.body)
+	}
+	var page struct {
+		Items []struct {
+			ID        int64  `json:"id"`
+			EventType string `json:"eventType"`
+			UserName  string `json:"userName"`
+		} `json:"items"`
+		HasMore bool `json:"hasMore"`
+	}
+	listed.data(t, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("limit=1 应返回 1 条，实得 %d", len(page.Items))
+	}
+	if page.Items[0].EventType == "" || page.Items[0].UserName == "" {
+		t.Errorf("审计事件缺少事件类型或操作者名称: %+v", page.Items[0])
+	}
+
+	detail := h.must(h.do(http.MethodGet, "/api/v1/audit/events/"+strconv.FormatInt(page.Items[0].ID, 10), admin, ""), http.StatusOK)
+	if strings.Contains(detail.body, "\"payload\"") {
+		t.Fatalf("审计详情直接透传了存储层 payload: %s", detail.body)
+	}
+	if !strings.Contains(detail.body, "\"timeline\"") {
+		t.Fatalf("审计详情缺少关联时间线: %s", detail.body)
+	}
+}
 
 // TestUserAndRoleCapability 覆盖 P3.11/P3.13：用户 CRUD 与三角色固定语义。
 func TestUserAndRoleCapability(t *testing.T) {

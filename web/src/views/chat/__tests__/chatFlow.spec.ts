@@ -190,6 +190,21 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
     expect(calls.filter((c) => c.url === '/api/v1/sessions' && c.body)).toHaveLength(1)
   })
 
+  it('审计中心会话入口：?session= 直接订阅该会话且参数只消费一次', async () => {
+    installFetch([])
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/chat', component: ChatView }],
+    })
+    await router.push('/chat?session=s1')
+    await router.isReady()
+    mount(ChatView, { global: { plugins: [router] } })
+    await vi.waitFor(() =>
+      expect(calls.some((c) => c.url.includes('/api/v1/sessions/s1/stream'))).toBe(true),
+    )
+    expect(router.currentRoute.value.query.session).toBeUndefined()
+  })
+
   it('多个集群时点击新建后选择目标，不改变原会话', async () => {
     installFetch([], [], [SESSION], undefined, [
       { id: 'c1', name: '生产云', access: { rules: [] } },

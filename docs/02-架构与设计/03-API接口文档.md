@@ -4,7 +4,7 @@
 
 
 - 版本：v4.0.0（企业平台）
-- 日期：2026-10-23（初版）/ 2026-11-03（发起体检契约收窄与报告三面登记，见 17-方案） / 2026-11-04（报告清单清理两面登记，见方案 15 v1.12；补体检发起面 v1.1：format 单选、阶段账、停止体检、报告总览、按需导出 Markdown）/ 2026-11-05（补结构化报告的 canonical 证据与诊断投影契约）
+- 日期：2026-10-23（初版）/ 2026-11-03（发起体检契约收窄与报告三面登记，见 17-方案） / 2026-11-04（报告清单清理两面登记，见方案 15 v1.12；补体检发起面 v1.1：format 单选、阶段账、停止体检、报告总览、按需导出 Markdown）/ 2026-11-05（补结构化报告的 canonical 证据与诊断投影契约）/ 2026-11-18（补审计中心查询与详情两面，见方案 28）
 - 状态：四期企业平台落地中
 - 范围：本文档统一描述四期企业平台的 Go 应用服务契约与 HTTP API，包括认证、会话与 SSE、
   扫描、集群、Skill、配置、用户/角色、授权、审批、审计与 Memory。所有产品 API 统一归属
@@ -207,6 +207,8 @@ POST /api/v1/users            // 创建用户 {username,password(>=8),roleId,dis
 PATCH /api/v1/users/{id}      // 部分更新 {displayName?,password?,roleId?,status?}；需 user.manage；禁止停用/降级自己
 DELETE /api/v1/users/{id}     // 删除用户；需 user.manage；内置 admin 不可删，禁止删除自己
 GET  /api/v1/roles            // 角色列表（user/operator/admin 及权限视图）；需 user.manage
+GET  /api/v1/audit/events     // 审计中心检索（P4.7）：from/to/eventType/userId/clusterId/sessionId/status/action/limit/cursor；keyset 游标（timestamp DESC,id DESC），默认 50、上限 100；需 audit.read
+GET  /api/v1/audit/events/{id} // 单条审计事件 + 按 approval/grant/request/turn/session 显式关联键查询的有界时间线；字段白名单，永不返回存储层 payload；不存在 404；需 audit.read
 GET  /api/v1/reports            // 报告中心分页列表（cluster/kind/scanId/scopeCategory/时间过滤，不返回对象 key、不加载正文；每行附 createdByName 即发起人）；需登录，可见性由后端三层归属判定下推 SQL
 GET  /api/v1/reports/{id}/content // 报告正文流式下载或 presign 直连；越权与 id 不存在同形 404；available=false 返回 410；后端不匹配 409
 GET  /api/v1/reports/{id}/report  // 结构化体检报告详情（P9）：普通 JSON 响应，供 Web 报告详情页渲染；授权与 /content 同一套 scope 判定；415=无结构化形态、413=正文超 8MiB
@@ -218,6 +220,14 @@ GET  /api/v1/storage/health     // 对象存储健康唯一可观测入口；需
 ```
 
 `roleId` 必须指向 `user / operator / admin` 之一；创建表单默认选择 `user`。
+
+**审计中心（2026-11-18 契约冻结；P4.7/P4.8 已实现）**：列表与详情都要求 `audit.read`（admin 的 `*` 天然满足），
+未登录 401、无权限 403、未装配平台 Store 时 501。列表按 `timestamp DESC, id DESC` 做 **keyset 游标分页**，
+`cursor` 是不透明串；非法时间/游标/limit 与 `from > to` 一律 400，不静默忽略筛选项。响应只回字段白名单
+（`id/timestamp/requestId/sessionId/turnId/stepId/userId/userName/clusterId/eventType/action/operation/
+resourceKind/resourceName/risk/decision/approvalId/grantId/matchReason/parameterSummary/resultSummary/status`），
+**存储层 `payload`、原始工具参数与终端输出永不透传**。详情时间线只按显式关联键取同一条操作链，
+不按时间相邻推断；没有关联键时返回空时间线。口径见 `28-方案-审计中心.md`。
 
 **发起体检与报告读取（2026-11-03 契约冻结；报告三面 P8.5/P8.11 已实现，体检发起面 P8.13 已实现，2026-11-05 按代码回写）**：
 `POST /api/v1/scans` 的请求体是**白名单 DTO**，只接受 `scope`（`cluster`/`namespace`/`pod`）、`namespace`、`pod`、

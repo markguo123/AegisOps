@@ -52,16 +52,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Skill', permission: PERM.skillRead },
       },
       {
-        path: 'approval',
-        name: 'approval',
-        component: () => import('@/views/approval/ApprovalView.vue'),
-        meta: { title: '审批中心', permission: PERM.approvalRead },
-      },
-      {
+        // 治理菜单收敛为审计中心（P4.7 / 方案 28）：审批决定作为审计事件查询，
+        // 确认动作仍在 Chat 内完成，不再有独立的审批中心页面。
         path: 'audit',
         name: 'audit',
         component: () => import('@/views/audit/AuditView.vue'),
-        meta: { title: '审计', permission: PERM.auditRead },
+        meta: { title: '审计中心', permission: PERM.auditRead },
       },
       {
         path: 'settings',

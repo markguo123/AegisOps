@@ -138,10 +138,15 @@ type StepStore interface {
 }
 
 // AuditStore 写入/查询带全链路关联的结构化审计事件（P1.11/P4.7）。
+//
+// List 保留为"读全部"的诊断入口；页面查询一律走 ListFiltered（过滤与游标
+// 下推 SQL）与 Timeline（详情关联链），两者都是有界查询。
 type AuditStore interface {
 	Write(ctx context.Context, e *AuditEvent) error
 	Get(ctx context.Context, id int64) (*AuditEvent, error)
 	List(ctx context.Context) ([]*AuditEvent, error)
+	ListFiltered(ctx context.Context, q AuditQuery) ([]*AuditEvent, error)
+	Timeline(ctx context.Context, rel AuditRelation, limit int) ([]*AuditEvent, error)
 }
 
 // SettingsStore 是配置中心通用键值存取（P1.10）。

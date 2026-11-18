@@ -15,6 +15,19 @@ P2.11 三期 Chat 行为回归、P2.12 前端测试与构建门禁、P2.13 会�
 与授权架构修订（见
 `docs/02-架构与设计/13-方案-企业级身份权限与审批中心.md`，计划回写 v1.12/v1.13）。
 
+### Added（2026-11-18，P4 审计中心）
+
+- 后端新增 `GET /api/v1/audit/events`（七类筛选 + keyset 游标分页，默认 50/上限 100）与
+  `GET /api/v1/audit/events/{id}`（字段白名单 + 显式关联键时间线），均要求 `audit.read`；
+  `payload`、原始工具参数与终端输出不出查询接口。
+- `internal/store` 的 `AuditStore` 增加 `ListFiltered`/`Timeline`；schema v14 补
+  `(timestamp,id)`/`cluster_id`/`approval_id`/`request_id` 查询索引。
+- 前端 `AuditView.vue` 由占位页替换为真实页面（筛选、加载更多、详情抽屉、关联时间线、原会话入口），
+  侧栏「审计」改「审计中心」；治理菜单删除独立「审批中心」页与 `/app/approval` 路由，
+  审批决定改由审计事件查询，确认动作仍在 Chat 内完成。
+- 新增 store/server/平台装配/前端契约与页面用例；`go test ./...`、`go vet ./...`、
+  前端 `test/typecheck/lint/build` 全绿。
+
 ### Changed（2026-11-07，身份权限重构第一批）
 
 - 用户与权限方案迁至架构设计目录 `20-方案-用户身份认证与权限体系.md`，作为本地/OIDC 与资源授权重构基线。

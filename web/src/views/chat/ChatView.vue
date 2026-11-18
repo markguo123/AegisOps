@@ -411,6 +411,29 @@ function handleReject(id?:string): void {
  * 一个会话”。这里只设置新会话目标并调用新建，不改写任何已有会话的绑定；
  * 目标不可用时给出明确提示，不回落其它集群。
  */
+/**
+ * P4.7 审计中心 / 报告页的会话入口：`/app/chat?session=<id>` 表示直接打开
+ * 该会话。这里只负责切换；能不能看得见仍由后端按 owner / admin 判定
+ * （越权与不存在同形 404，页面收到错误就诚实提示，不回落其它会话）。
+ */
+async function applySessionEntry(): Promise<void> {
+  if (!route) {
+    return
+  }
+  const id = route.query.session
+  if (typeof id !== 'string' || !id) {
+    return
+  }
+  const query = { ...route.query }
+  delete query.session
+  await router.replace({ query })
+  if (!sessions.value.some((session) => session.id === id)) {
+    ElMessage.warning('该会话不存在或你无权查看')
+    return
+  }
+  activeId.value = id
+}
+
 async function applyClusterEntry(): Promise<void> {
   if (!route) {
     return
@@ -439,6 +462,7 @@ async function applyClusterEntry(): Promise<void> {
 onMounted(async () => {
   await loadSessions()
   await loadScope()
+  await applySessionEntry()
   await applyClusterEntry()
 })
 

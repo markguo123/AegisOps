@@ -90,6 +90,8 @@ func newHarness(t *testing.T) *harness {
 		WithClusters(clusterSvc).
 		WithSkills(skillPlat).
 		WithAuthz(authzSvc).
+		// P4.7：审计中心查询面按生产装配方式接入，端到端套件与平台进程同构。
+		WithAuditQuery(service.NewAuditQueryService(st)).
 		Handler()
 	chatAPI := sessionapi.New(newStoreChat(st), "test-model").
 		WithAudit(auditSvc.Record).
