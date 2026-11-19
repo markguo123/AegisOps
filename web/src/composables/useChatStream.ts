@@ -110,6 +110,7 @@ export function useChatStream() {
         state.value = applyFatal(state.value, frame.code, frame.message)
         status.value = 'fatal'
         error.value = frame.message
+        controller?.abort()
         return
       case 'event': {
         const result = applyChatEvent(state.value, frame.event)

@@ -172,9 +172,10 @@ export async function sendMessage(
 }
 
 /** 取消当前会话正在执行的 Chat 运行。 */
-export async function cancelRun(id: string): Promise<{ sessionId: string }> {
+export async function cancelRun(id: string, signal?: AbortSignal): Promise<{ sessionId: string }> {
   return sessionFetch<{ sessionId: string }>(`/api/v1/sessions/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
+    signal,
   })
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -20,6 +21,61 @@ import (
 )
 
 type rejectFinishStore struct{ store.ChatStore }
+
+type canceledStreamLLM struct {
+	typedStreamLLM
+	started chan struct{}
+}
+
+func (m *canceledStreamLLM) ChatStreamEvents(ctx context.Context, _ llm.ChatRequest, onEvent func(llm.StreamEvent)) (*llm.ChatResponse, error) {
+	onEvent(llm.StreamEvent{Type: llm.StreamContentDelta, Text: strings.Repeat("partial answer ", 100)})
+	close(m.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestChatCancelPersistsInterruptedOutputAndCanceledTurn(t *testing.T) {
+	model := &canceledStreamLLM{started: make(chan struct{})}
+	svc := testChatServiceWithFlow(t, model, &collector{}).(*chatService)
+	sess, err := svc.GetOrCreateSession("canceled-run", "", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	events, err := svc.Chat(ctx, ChatRequest{SessionID: sess.ID, Query: "检查"}, make(chan string, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-model.started:
+		cancel()
+	case <-ctx.Done():
+		t.Fatal("model stream did not start")
+	}
+	for event := range events {
+		if event.Type == ChatEventError {
+			t.Errorf("cancel emitted an error: %s", event.Text)
+		}
+	}
+	snap, err := svc.Snapshot(context.Background(), sess.ID, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Turns) != 1 || snap.Turns[0].Status != sse.TurnCanceled {
+		t.Fatalf("cancel did not persist a canceled turn: %+v", snap.Turns)
+	}
+	for _, item := range snap.Items {
+		if msg := item.Message; msg != nil && msg.Status == sse.MessageInterrupted && msg.Error == "" {
+			for _, part := range msg.Parts {
+				if strings.Contains(part.Text, "partial answer") {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("cancel did not preserve partial output")
+}
 
 func TestApprovalCommitChecksRevisionAndPersistsDecision(t *testing.T) {
 	svc := testChatServiceWithFlow(t, &scriptedLLM{}, &collector{}).(*chatService)
@@ -130,7 +186,9 @@ func (c *collector) contains(t sse.EventType) bool {
 // testChatServiceWithFlow 装配带 SQLite 事实源与单一输出管道的 Chat 服务。
 func testChatServiceWithFlow(t *testing.T, fl llm.LLMClient, col *collector) ChatService {
 	t.Helper()
-	cfg, err := config.Load(config.LoadOptions{NoEnv: true})
+	cfg, err := config.Load(config.LoadOptions{NoEnv: true, Overrides: map[string]any{
+		"platform.store.driver": config.StoreDriverSQLite,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}

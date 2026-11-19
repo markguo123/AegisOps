@@ -128,29 +128,9 @@ function turnDurationMs(turn: TurnUiData): number | null {
   return (Number.isNaN(end) ? Date.now() : end) - start
 }
 
-const tasks = computed(() => props.turn.items.filter(item => item.type === 'tool'))
-const active = computed(() => ['pending', 'running', 'waiting'].includes(props.turn.status))
-const tasksOpen = ref<boolean | null>(null)
-const unknownTask = computed(() => tasks.value.some(task => task.data.status === 'unknown'))
-
-function taskStatus(task: (typeof tasks.value)[number]['data']): string {
-  if (active.value && task.status === 'running') {
-    const approval = props.turn.items.find(item =>
-      item.type === 'approval' && item.data.toolCallId === task.key && item.data.decision === 'pending',
-    )
-    if (approval?.type === 'approval') {
-      if (approval.data.operation === 'secret.read') return '等待同意读取 Secret'
-      return approval.data.secret ? '等待提供所需的值' : '等待人工确认'
-    }
-  }
-  if (task.denied) return '未获批准，未执行'
-  switch (task.status) {
-    case 'done': return '已完成'
-    case 'error': return '失败或受限'
-    case 'unknown': return '结果未知'
-    default: return !active.value ? '未取得结果' : '处理中'
-  }
-}
+const unknownTask = computed(() =>
+  props.turn.items.some(item => item.type === 'tool' && item.data.status === 'unknown'),
+)
 
 const reportDone = computed(() =>
   props.turn.items.some((item) => item.type === 'report' && item.data.purpose === 'final' && item.data.done),
@@ -218,17 +198,6 @@ function itemAnchor(item: { data: { key: string } }): string {
         <span>{{ turn.error }}</span>
       </div>
 
-      <div v-if="tasks.length" class="turn-tasks">
-        <button type="button" :aria-expanded="tasksOpen ?? active" @click="tasksOpen = !(tasksOpen ?? active)">
-          本轮任务 · {{ tasks.length }} 项
-        </button>
-        <ul v-if="tasksOpen ?? active">
-          <li v-for="task in tasks" :key="task.data.key">
-            <strong>{{ task.data.shortName }}</strong> · {{ taskStatus(task.data) }}
-            <span v-if="task.data.summary"> — {{ task.data.summary }}</span>
-          </li>
-        </ul>
-      </div>
       <p v-if="unknownTask" class="turn-error" role="alert">有操作结果未知，请先核实集群现场，不要直接重试。</p>
       <div class="turn-items">
         <component
@@ -347,24 +316,6 @@ function itemAnchor(item: { data: { key: string } }): string {
   .message-shell > .message-action-bar {
     transition: none;
   }
-}
-.turn-tasks {
-  padding: 8px 12px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  font-size: 13px;
-}
-.turn-tasks button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.turn-tasks ul {
-  margin: 8px 0 0;
-  padding-inline-start: 24px;
-  overflow-wrap: anywhere;
 }
 .report-block.commentary {
   border: 0;

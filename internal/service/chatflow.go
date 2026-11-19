@@ -334,13 +334,15 @@ func (w *chatWriter) Emit(ctx context.Context, e sse.Event) {
 	wait := e.EventType != sse.EventMessageDelta
 	if wait {
 		cmd.ack = make(chan error, 1)
+		// Control events include cleanup after cancellation. Keep them ordered
+		// and bounded by the writer timeout, even after the run is canceled.
+		ctx = context.WithoutCancel(ctx)
 	}
 	timeout := time.NewTimer(flowEmitWait)
 	defer timeout.Stop()
 	select {
 	case w.cmds <- cmd:
 	case <-ctx.Done():
-		w.failOutput(fmt.Errorf("enqueue chat event: %w", ctx.Err()))
 		return
 	case <-timeout.C:
 		w.failOutput(errors.New("enqueue chat event timed out"))

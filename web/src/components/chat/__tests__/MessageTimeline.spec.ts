@@ -93,6 +93,15 @@ function mountTimeline(props: {
 }
 
 describe('MessageTimeline（规范对象渲染）', () => {
+  it('保留主动停止前的回复内容，不显示输出中断告警', () => {
+    const wrapper = mountTimeline({
+      turns: [turn({ status: 'canceled' })],
+      items: items({ type: 'message', item_order: 1, message: message({ status: 'interrupted' }) }),
+    })
+    expect(wrapper.text()).toContain('发现 3 个异常项')
+    expect(wrapper.text()).not.toContain('该消息输出中断')
+  })
+
   it('只允许从已完成的最终回复发出分叉请求', async () => {
     const wrapper = mountTimeline({
       turns: [turn({ status: 'waiting' })],

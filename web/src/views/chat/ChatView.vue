@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatDotRound, RefreshRight } from '@element-plus/icons-vue'
 
+import type { ChatToolCall } from '@/api/chat'
 import type { SessionSummary } from '@/api/sessions'
 import { branchSession, getBranchOrigin, listChatModels, type BranchOrigin } from '@/api/sessions'
 import {
@@ -20,6 +21,7 @@ import {
 import ConversationList from '@/components/chat/ConversationList.vue'
 import MessageTimeline from '@/components/chat/MessageTimeline.vue'
 import ComposerBox from '@/components/chat/ComposerBox.vue'
+import TaskStatusBar from '@/components/chat/TaskStatusBar.vue'
 import TokenUsageBadge from '@/components/chat/TokenUsageBadge.vue'
 import TechEmptyState from '@/components/TechEmptyState.vue'
 import {useClusterAccess} from '@/composables/useClusterAccess'
@@ -58,9 +60,15 @@ const latestTurn = computed(() => {
   const turn = turns[turns.length - 1]
   return turn?.session_id === activeId.value ? turn : undefined
 })
-const latestTaskCount = computed(() => stream.items.value.filter(item =>
-  item.type === 'tool' && item.tool.turn_id === latestTurn.value?.turn_id,
-).length)
+const latestTools = computed<ChatToolCall[]>((previous) => {
+  const turnId = latestTurn.value?.turn_id
+  const tools = stream.items.value.flatMap(item =>
+    item.type === 'tool' && item.tool.turn_id === turnId ? [item.tool] : [],
+  )
+  return previous?.length === tools.length && tools.every((tool, index) => tool === previous[index])
+    ? previous
+    : tools
+})
 const runStatus = computed(() => {
   const turn = latestTurn.value
   if (turn?.status === 'waiting') {
@@ -74,10 +82,6 @@ const runStatus = computed(() => {
   if (turn?.status === 'canceled') return '上一轮已停止'
   return ''
 })
-function jumpToTasks() {
-  const id = latestTurn.value?.turn_id
-  if (id) document.getElementById(`turn-${id}`)?.scrollIntoView({ block: 'start' })
-}
 const contextBudget = computed(() => {
   const sample = latestTurn.value?.context_budget
   if (!stream.running.value && nextModel.value && sample?.model_id && sample.model_id !== nextModel.value) return undefined
@@ -490,11 +494,30 @@ function handleStop(): void {
     return
   }
   stoppingSession.value = id
-  void cancelRun(id).catch((error) => {
-    if (stoppingSession.value === id) stoppingSession.value = ''
-    ElMessage.error(error instanceof Error ? error.message : '取消失败')
+  void cancelRun(id, AbortSignal.timeout(10_000)).catch((error) => {
+    if (stoppingSession.value !== id) return
+    stoppingSession.value = ''
+    if (activeId.value !== id) return
+    void stream.resync()
+    ElMessage.warning(error instanceof Error && error.name !== 'TimeoutError'
+      ? error.message
+      : '暂未确认停止，正在同步会话')
   })
 }
+
+watch([stoppingSession, activeId], ([id, active], _, onCleanup) => {
+  if (!id || id !== active) return
+  // 终态事件丢失时重取快照。仅在服务端确认终态后恢复发送。
+  const syncTimer = window.setTimeout(() => void stream.resync(), 5_000)
+  const settleTimer = window.setTimeout(() => {
+    stoppingSession.value = ''
+    ElMessage.warning('暂未确认停止，可重试停止或重新同步会话')
+  }, 15_000)
+  onCleanup(() => {
+    window.clearTimeout(syncTimer)
+    window.clearTimeout(settleTimer)
+  })
+})
 
 /** 审批回传：把用户选择回传给服务端。 */
 function handleApprove(value: string,id?:string): void {
@@ -583,6 +606,7 @@ onMounted(async () => {
 watch(
   activeId,
   (id) => {
+    stoppingSession.value = ''
     branchOrigin.value = null
     if (id) {
       void getBranchOrigin(id).then(origin => {
@@ -686,7 +710,6 @@ watch(
           <span v-if="viewingOthersSession" class="state-pill tone-waiting" title="管理员查看他人会话，操作仍按平台权限与目标授权判定">
             他人会话
           </span>
-          <TokenUsageBadge :token="sessionToken" />
           <span class="state-pill" :class="`tone-${sessionStateTone(activeSession.state)}`">
             {{ activeSession.state }}
           </span>
@@ -710,7 +733,7 @@ watch(
                 </el-button>
               </div>
             </header>
-            <p v-if="stream.error.value" class="stream-error">{{ stream.error.value }}</p>
+            <p v-if="stream.error.value && !stream.state.value.fatal" class="stream-error">{{ stream.error.value }}</p>
             <div v-if="stream.state.value.fatal" class="stream-error" role="alert">
               <span>{{ stream.state.value.fatal.message || '输出未能可靠保存，请重新同步' }}</span>
               <el-button size="small" text type="danger" @click="stream.resync()">重新同步</el-button>
@@ -769,12 +792,16 @@ watch(
           @stop="handleStop"
         />
         <div v-if="activeSession" class="chat-budget">
-          <div class="chat-task-status">
-            <span v-if="runStatus" role="status">{{ runStatus }}</span>
-            <button v-if="latestTaskCount" type="button" class="chat-budget-button" @click="jumpToTasks">
-              {{ stream.running.value ? '本轮任务' : '上一轮任务' }} · {{ latestTaskCount }} 项
-            </button>
-          </div>
+          <TaskStatusBar
+            v-if="latestTools.length"
+            :key="latestTurn?.turn_id"
+            :tools="latestTools"
+            :turn="latestTurn"
+            :pending="stream.pending.value"
+            :stopping="stoppingSession === activeId"
+          />
+          <span v-else-if="runStatus" class="chat-task-status" role="status">{{ runStatus }}</span>
+          <TokenUsageBadge :token="sessionToken" />
           <el-tooltip :content="contextDetails" placement="top" :trigger="['hover', 'focus', 'click']">
             <button type="button" class="chat-budget-button">
               <span class="chat-budget-ring" aria-hidden="true"
@@ -791,15 +818,15 @@ watch(
 
 <style scoped>
 .chat-budget {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
+  justify-content: center;
+  align-items: center;
+  gap: 4px 10px;
   padding-top: 4px;
 }
 .chat-task-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   color: var(--app-muted);
   font-size: 12px;
 }

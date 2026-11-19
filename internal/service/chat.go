@@ -957,7 +957,7 @@ func (s *chatService) runChat(ctx context.Context, ag *agent.Agent, sess *sessio
 		capacityWarn, capacityFail = s.persistTurnSession(ctx, sess)
 	}
 	events <- ChatEvent{Type: ChatEventAnswer, Text: answer, Usage: &usage}
-	if chatErr != nil {
+	if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
 		events <- ChatEvent{Type: ChatEventError, Text: chatErr.Error()}
 	}
 	// 容量提示放在答案之后：它不影响本轮回复内容，抢在答案前面会把用户注意力从结果上挪走。

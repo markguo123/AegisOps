@@ -230,7 +230,8 @@ function noticeUi(notice: ChatNotice): NoticeUiData {
   }
 }
 
-function messageItems(message: ChatMessage, keyPrefix: string): TurnItem[] {
+function messageItems(message: ChatMessage, turn: ChatTurn): TurnItem[] {
+  const keyPrefix = turn.turn_id
   const streaming = message.status === 'streaming'
   const out: TurnItem[] = []
   const reasoning = message.parts.filter((part) => part.type === 'reasoning')
@@ -260,7 +261,7 @@ function messageItems(message: ChatMessage, keyPrefix: string): TurnItem[] {
     }
     out.push({ type: 'report', data: report })
   }
-  if (message.status === 'failed' || message.status === 'interrupted') {
+  if (message.status === 'failed' || (message.status === 'interrupted' && (turn.status !== 'canceled' || message.error))) {
     out.push({
       type: 'notice',
       data: {
@@ -304,7 +305,7 @@ const uiTurns = computed<TurnUiData[]>(() => {
     const items: TurnItem[] = []
     for (const item of byTurn.get(turn.turn_id) ?? []) {
       if (item.type === 'message') {
-        items.push(...messageItems(item.message, turn.turn_id))
+        items.push(...messageItems(item.message, turn))
       } else if (item.type === 'tool') {
         items.push({ type: 'tool', data: toolUi(item.tool) })
       } else if (item.type === 'interaction') {

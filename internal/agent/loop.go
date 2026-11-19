@@ -93,6 +93,9 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	}
 
 	for iter := 0; iter < a.MaxIterations; iter++ {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return "", usage, ctx.Err()
+		}
 		// P1.8: 思考 Step 必须在发起本轮 LLM 调用之前开始。reason.started 若晚于
 		// reasoning 增量下发，前端只能收到一堆没有归属的思考分片（P0-3 同类顺序问题）。
 		reason := a.beginStep(ctx, session.StepReason, "", "")
@@ -105,6 +108,11 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		}
 		prepared, compactUsage, budgetErr := a.prepareContext(ctx, msgs, req.Tools, query, &compactionRequests)
 		usage = addUsage(usage, compactUsage)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			a.completeStep(ctx, reason, false, "已停止")
+			a.turn.Token = toSessionUsage(usage)
+			return "", usage, ctx.Err()
+		}
 		if budgetErr != nil {
 			a.completeStep(ctx, reason, false, budgetErr.Error())
 			a.turn.Token = toSessionUsage(usage)
@@ -124,6 +132,12 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		a.beginFlowMessage(ctx)
 		a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityGenerating, "")
 		resp, streamed, err := a.chatOnce(ctx, mode, req)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			a.interruptFlowMessage(ctx, nil)
+			a.completeStep(ctx, reason, false, "已停止")
+			a.turn.Token = toSessionUsage(usage)
+			return "", usage, ctx.Err()
+		}
 		if err != nil {
 			// auto 模式：网关不支持原生 tools 时降级 shim 重试一次。
 			if mode == "native" && a.ToolCalling == "auto" && isUnsupportedToolsError(err) {
@@ -201,6 +215,9 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		answered := map[string]bool{}
 
 		for _, call := range step.calls {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				break
+			}
 			toolCallsTotal++
 			if toolCallsTotal > a.MaxToolCalls {
 				err := fmt.Errorf("agent exceeded max tool calls (%d)", a.MaxToolCalls)
@@ -374,6 +391,9 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				}
 			}
 		}
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return "", usage, ctx.Err()
 	}
 	err := fmt.Errorf("agent exceeded max iterations (%d)", a.MaxIterations)
 	a.turn.Token = toSessionUsage(usage)
