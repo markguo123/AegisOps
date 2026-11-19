@@ -80,7 +80,7 @@ type ChatCommitResult struct {
 // ChatStore 是 Chat 展示事实源的存储能力（SQLite/MySQL 同时实现）。
 type ChatStore interface {
 	CommitChat(ctx context.Context, c ChatCommit) (ChatCommitResult, error)
-	ChatSnapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error)
+	ChatSnapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error)
 	ChatEventsAfter(ctx context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error)
 	ChatHead(ctx context.Context, sessionID string) (head, floor uint64, err error)
 	// LegacyMigrated 标记旧会话已一次性转换为规范展示对象（幂等）。
@@ -509,7 +509,7 @@ func (s *dbStore) ChatHead(ctx context.Context, sessionID string) (uint64, uint6
 }
 
 // ChatSnapshot 在一个短一致读事务内获取规范实体与水位，形成首屏快照。
-func (s *dbStore) ChatSnapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error) {
+func (s *dbStore) ChatSnapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error) {
 	if turnLimit <= 0 {
 		turnLimit = 30
 	}
@@ -526,7 +526,11 @@ func (s *dbStore) ChatSnapshot(ctx context.Context, sessionID string, turnLimit 
 	}
 	snap.Cursor, snap.ReplayFloor = head, floor
 
-	turns, ids, err := readSnapshotTurns(ctx, tx, sessionID, turnLimit)
+	turnID := ""
+	if len(target) > 0 {
+		turnID = target[0]
+	}
+	turns, ids, err := readSnapshotTurns(ctx, tx, sessionID, turnLimit, turnID)
 	if err != nil {
 		return snap, err
 	}
@@ -536,6 +540,23 @@ func (s *dbStore) ChatSnapshot(ctx context.Context, sessionID string, turnLimit 
 		return snap, err
 	}
 	snap.Items = items
+	if turnID == "" && len(turns) == turnLimit {
+		rows, err := tx.QueryContext(ctx, "SELECT id, substr(input,1,80) FROM turns WHERE session_id = ? AND input <> '' ORDER BY created_at, id", sessionID)
+		if err != nil {
+			return snap, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var q sse.QuestionSummary
+			if err := rows.Scan(&q.Key, &q.Input); err != nil {
+				return snap, err
+			}
+			snap.Questions = append(snap.Questions, q)
+		}
+		if err := rows.Err(); err != nil {
+			return snap, err
+		}
+	}
 	return snap, nil
 }
 
@@ -552,13 +573,19 @@ func lockChatHeadRead(ctx context.Context, tx *sql.Tx, sessionID string) (uint64
 	return head, floor, nil
 }
 
-func readSnapshotTurns(ctx context.Context, tx *sql.Tx, sessionID string, limit int) ([]sse.TurnView, []string, error) {
-	rows, err := tx.QueryContext(ctx, `
+func readSnapshotTurns(ctx context.Context, tx *sql.Tx, sessionID string, limit int, turnID string) ([]sse.TurnView, []string, error) {
+	query := `
 		SELECT id, session_id, status, input, output, error,
 			prompt_tokens, completion_tokens, total_tokens, started_at, finished_at, updated_at,
 			(SELECT e.payload FROM chat_events e WHERE e.session_id = turns.session_id
 				AND e.turn_id = turns.id AND e.event_type = 'turn.status' ORDER BY e.seq DESC LIMIT 1)
-		FROM turns WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, sessionID, limit)
+		FROM turns WHERE session_id = ?`
+	args := []any{sessionID}
+	if turnID != "" {
+		query += " AND id = ?"
+		args = append(args, turnID)
+	}
+	rows, err := tx.QueryContext(ctx, query+" ORDER BY created_at DESC, id DESC LIMIT ?", append(args, limit)...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read snapshot turns: %w", err)
 	}

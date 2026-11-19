@@ -136,8 +136,8 @@ func (f *chatFlow) Notice(sessionID, turnID string, severity sse.NoticeSeverity,
 }
 
 // Snapshot/EventsAfter/Head 暴露给 HTTP 层（规范快照与游标补齐）。
-func (f *chatFlow) Snapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error) {
-	return f.store.ChatSnapshot(ctx, sessionID, turnLimit)
+func (f *chatFlow) Snapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error) {
+	return f.store.ChatSnapshot(ctx, sessionID, turnLimit, target...)
 }
 
 func (f *chatFlow) EventsAfter(ctx context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error) {
@@ -149,7 +149,7 @@ func (f *chatFlow) Head(ctx context.Context, sessionID string) (uint64, uint64, 
 }
 
 // Snapshot 返回会话规范快照（HTTP 时间线与 SSE 首屏共用）。
-func (s *chatService) Snapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error) {
+func (s *chatService) Snapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error) {
 	if s.startupErr != nil {
 		return sse.Snapshot{}, s.startupErr
 	}
@@ -157,7 +157,7 @@ func (s *chatService) Snapshot(ctx context.Context, sessionID string, turnLimit 
 	if s.flow == nil {
 		return sse.Snapshot{ProtocolVersion: sse.ProtocolVersion, SessionID: sessionID}, nil
 	}
-	return s.flow.Snapshot(ctx, sessionID, turnLimit)
+	return s.flow.Snapshot(ctx, sessionID, turnLimit, target...)
 }
 
 // EventsAfter 读取游标之后的持久事件。

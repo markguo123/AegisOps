@@ -33,10 +33,18 @@ func TestModelChecksUseSavedProvider(t *testing.T) {
 				cfg := &config.Config{}
 				cfg.LLM.Enabled = true
 				cfg.LLM.Endpoint = provider.URL + "/v1"
-				cfg.LLM.APIKey = "saved-key"
+				cfg.LLM.ModelProfiles = []config.ModelProfile{{ID: "first", Endpoint: cfg.LLM.Endpoint, APIKey: "saved-key"}}
 				return cfg, nil
 			})
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/settings/model/"+action, strings.NewReader(`{"model":"model-a"}`))
+			bad := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"profileId":"first","endpoint":"https://other.invalid","apiFormat":"openai-chat-completions","model":"model-a"}`))
+			bad.SetPathValue("action", action)
+			denied := httptest.NewRecorder()
+			server.handleModelCheck(denied, bad)
+			if denied.Code != http.StatusBadRequest {
+				t.Fatalf("changed endpoint reused saved key: %d", denied.Code)
+			}
+
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/settings/model/"+action, strings.NewReader(fmt.Sprintf(`{"model":"model-a","profileId":"first","apiFormat":"openai-chat-completions","endpoint":%q}`, provider.URL+"/v1")))
 			request.SetPathValue("action", action)
 			recorder := httptest.NewRecorder()
 			server.handleModelCheck(recorder, request)

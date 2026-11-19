@@ -86,7 +86,7 @@ type fatalEmitter interface {
 
 // chatDisplay 是 ChatService 的可选展示读取能力（规范快照与游标补齐）。
 type chatDisplay interface {
-	Snapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error)
+	Snapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error)
 	EventsAfter(ctx context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error)
 	Head(ctx context.Context, sessionID string) (head, floor uint64, err error)
 }
@@ -778,7 +778,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	snap, err := display.Snapshot(r.Context(), id, limit)
+	snap, err := display.Snapshot(r.Context(), id, limit, r.URL.Query().Get("turn_id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

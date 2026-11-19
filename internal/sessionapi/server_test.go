@@ -64,7 +64,7 @@ func (f *fakeChat) publish(sessionID, turnID string, typ sse.EventType, data any
 	}
 }
 
-func (f *fakeChat) Snapshot(_ context.Context, sessionID string, _ int) (sse.Snapshot, error) {
+func (f *fakeChat) Snapshot(_ context.Context, sessionID string, _ int, _ ...string) (sse.Snapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	snap := sse.Snapshot{ProtocolVersion: 2, SessionID: sessionID, Cursor: f.seq[sessionID]}

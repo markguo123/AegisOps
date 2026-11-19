@@ -43,6 +43,7 @@ export function useChatStream() {
   const lastFrameAt = ref('')
   const state = ref<ChatState>(emptyChatState())
 
+  const questions = ref<{ key: string; input: string }[]>([])
   const turns = computed(() =>
     state.value.turnOrder
       .map((id) => state.value.turns[id])
@@ -67,6 +68,7 @@ export function useChatStream() {
     error.value = ''
     reconnectAttempt.value = 0
     lastFrameAt.value = ''
+    questions.value = []
     state.value = emptyChatState()
   }
 
@@ -97,6 +99,7 @@ export function useChatStream() {
     lastFrameAt.value = new Date().toISOString()
     switch (frame.kind) {
       case 'snapshot':
+        questions.value = frame.snapshot.questions ?? []
         state.value = applySnapshot(frame.snapshot)
         return
       case 'reset_required':
@@ -255,6 +258,7 @@ export function useChatStream() {
   return {
     status,
     sessionId,
+    questions,
     error,
     reconnectAttempt,
     lastFrameAt,

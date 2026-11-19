@@ -105,6 +105,19 @@ func TestCommitChatSnapshotAndReplay(t *testing.T) {
 		t.Fatalf("snapshot budget mismatch: %+v", budget)
 	}
 
+	index, err := cs.ChatSnapshot(ctx, "s1", 1)
+	if err != nil || len(index.Questions) != 1 || index.Questions[0].Key != "t1" {
+		t.Fatalf("question index: %+v %v", index.Questions, err)
+	}
+	target, err := cs.ChatSnapshot(ctx, "s1", 1, "t1")
+	if err != nil || len(target.Items) != 1 || len(target.Questions) != 0 {
+		t.Fatalf("targeted turn: %+v %v", target, err)
+	}
+	foreign, err := cs.ChatSnapshot(ctx, "another", 1, "t1")
+	if err != nil || len(foreign.Turns) != 0 {
+		t.Fatalf("cross-session turn: %+v %v", foreign, err)
+	}
+
 	// 2) 第二个增量 + 完成消息（块行回收）+ 终态。
 	done := startMessage("m1", "p1", 10)
 	done.Status = sse.MessageCompleted

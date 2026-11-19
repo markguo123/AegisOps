@@ -388,13 +388,19 @@ type Item struct {
 	Notice      *Notice      `json:"notice,omitempty"`
 }
 
+type QuestionSummary struct {
+	Key   string `json:"key"`
+	Input string `json:"input"`
+}
+
 // Snapshot 是首屏/重同步的规范快照；cursor 是快照对应的会话水位。
 type Snapshot struct {
-	ProtocolVersion int        `json:"protocol_version"`
-	SessionID       string     `json:"session_id"`
-	Cursor          uint64     `json:"cursor"`
-	Turns           []TurnView `json:"turns"`
-	Items           []Item     `json:"items"`
+	Questions       []QuestionSummary `json:"questions,omitempty"`
+	ProtocolVersion int               `json:"protocol_version"`
+	SessionID       string            `json:"session_id"`
+	Cursor          uint64            `json:"cursor"`
+	Turns           []TurnView        `json:"turns"`
+	Items           []Item            `json:"items"`
 	// ReplayFloor 是事件日志仍可补齐的最低 seq；cursor 低于它时必须重取快照。
 	ReplayFloor uint64 `json:"replay_floor"`
 }

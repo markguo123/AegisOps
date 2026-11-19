@@ -15,6 +15,7 @@ export const TOKEN_KEY = 'aegisops_token'
 export const USER_KEY = 'aegisops_user'
 
 export interface RequestOptions {
+  signal?: AbortSignal
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   body?: unknown
   /**
@@ -153,7 +154,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<A
   }
   if (method !== 'GET') addCsrfHeader(headers)
 
-  const init: RequestInit = { method, headers }
+  const init: RequestInit = { method, headers, signal: options.signal }
   if (rawBody !== undefined) {
     init.body = rawBody
   } else if (formData !== undefined) {
@@ -217,8 +218,8 @@ export function apiGet<T>(
   return request<T>(path, { method: 'GET', query, filters })
 }
 
-export function apiPost<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-  return request<T>(path, { method: 'POST', body })
+export function apiPost<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<ApiResponse<T>> {
+  return request<T>(path, { method: 'POST', body, signal })
 }
 
 /** 以文本/YAML 原始请求体发送 POST（导入端点专用，P3.6）。 */

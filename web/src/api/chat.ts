@@ -172,6 +172,7 @@ export interface ChatTurn {
 }
 
 export interface ChatSnapshot {
+  questions?: { key: string; input: string }[]
   protocol_version: number
   session_id: string
   cursor: number
@@ -351,9 +352,10 @@ export async function fetchChatStream(
 export async function fetchTimeline(
   sessionId: string,
   turnLimit = 30,
+  turnId = '',
 ): Promise<ChatSnapshot> {
   const response = await fetch(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/timeline?turn_limit=${turnLimit}`,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/timeline?turn_limit=${turnLimit}${turnId ? `&turn_id=${encodeURIComponent(turnId)}` : ''}`,
     { headers: { Accept: 'application/json' } },
   )
   if (!response.ok) {

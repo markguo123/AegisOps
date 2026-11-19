@@ -49,7 +49,7 @@ func (f *sseFakeChat) ListSessionsForUser(string) ([]session.Session, error) { r
 func (f *sseFakeChat) DeleteSession(string) error                            { return nil }
 func (f *sseFakeChat) RenameSession(string, string) error                    { return nil }
 func (f *sseFakeChat) PinSession(string, bool) error                         { return nil }
-func (f *sseFakeChat) Snapshot(_ context.Context, sessionID string, _ int) (sse.Snapshot, error) {
+func (f *sseFakeChat) Snapshot(_ context.Context, sessionID string, _ int, _ ...string) (sse.Snapshot, error) {
 	if f.snapshotHook != nil {
 		f.snapshotHook()
 	}

@@ -727,6 +727,7 @@ watch(
             </section>
             <MessageTimeline
               :turns="stream.turns.value"
+              :question-index="stream.questions.value"
               :can-branch="!viewingOthersSession && !sending && !stream.running.value && !branching"
               @branch="handleBranch"
               :items="stream.items.value"

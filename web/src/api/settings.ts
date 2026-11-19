@@ -31,17 +31,17 @@ export async function listModelProfiles() {
 
 export function saveModelProfile(input: ModelProfileInput, id?: string) {
   return id
-    ? apiPatch<boolean>(`${MODEL_PROFILES_PATH}/${encodeURIComponent(id)}`, input)
-    : apiPost<boolean>(MODEL_PROFILES_PATH, input)
+    ? apiPatch<{id: string}>(`${MODEL_PROFILES_PATH}/${encodeURIComponent(id)}`, input)
+    : apiPost<{id: string}>(MODEL_PROFILES_PATH, input)
 }
 
 export function deleteModelProfile(id: string) {
   return apiDelete<boolean>(`${MODEL_PROFILES_PATH}/${encodeURIComponent(id)}`)
 }
 
-export async function checkModel(action: 'discover' | 'probe', model?: string) {
+export async function checkModel(action: 'discover' | 'probe', input: Pick<ModelProfileInput, 'model' | 'endpoint' | 'apiKey' | 'apiFormat'> & { profileId?: string }, signal?: AbortSignal) {
   const response = await apiPost<{ models: string[]; checkedAt: string }>(
-    `/settings/model/${action}`, action === 'probe' ? { model } : {},
+    `/settings/model/${action}`, input, signal,
   )
   if (!response.data) throw new Error('未收到模型检测结果')
   return response.data

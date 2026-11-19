@@ -16,9 +16,8 @@ import (
 )
 
 type modelChecks struct {
-	load func(context.Context) (*config.Config, error)
-	mu   sync.Mutex
-	next time.Time
+	active sync.Mutex
+	load   func(context.Context) (*config.Config, error)
 }
 
 func (s *Server) WithModelChecks(load func(context.Context) (*config.Config, error)) *Server {
@@ -37,16 +36,11 @@ func (s *Server) handleModelCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "未启用模型检测")
 		return
 	}
-	checks.mu.Lock()
-	now := time.Now()
-	if now.Before(checks.next) {
-		checks.mu.Unlock()
-		writeError(w, r, http.StatusTooManyRequests, codeInvalidArgument, "模型检测过于频繁，请稍后再试")
+	if !checks.active.TryLock() {
+		writeError(w, r, http.StatusTooManyRequests, codeInvalidArgument, "另一个模型检测正在进行")
 		return
 	}
-	checks.next = now.Add(8 * time.Second)
-	checks.mu.Unlock()
-
+	defer checks.active.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	cfg, err := checks.load(ctx)
@@ -54,7 +48,43 @@ func (s *Server) handleModelCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "请先保存并启用服务端模型配置")
 		return
 	}
-	endpoint, err := url.Parse(cfg.LLM.Endpoint)
+	var input struct {
+		ProfileID string  `json:"profileId"`
+		Endpoint  string  `json:"endpoint"`
+		APIFormat string  `json:"apiFormat"`
+		APIKey    *string `json:"apiKey"`
+		Model     string  `json:"model"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&input); err != nil || input.APIFormat != "openai-chat-completions" {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "无效的模型检测参数")
+		return
+	}
+	key := ""
+	if input.ProfileID != "" {
+		found := false
+		for _, profile := range cfg.LLM.ModelProfiles {
+			if profile.ID != input.ProfileID {
+				continue
+			}
+			found = true
+			if input.APIKey == nil {
+				if profile.Endpoint != strings.TrimSpace(input.Endpoint) && profile.APIKey != "" {
+					writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "修改接口地址时请重新填写或清除 API Key")
+					return
+				}
+				key = profile.APIKey
+			}
+			break
+		}
+		if !found {
+			writeError(w, r, http.StatusNotFound, codeNotFound, "模型不存在")
+			return
+		}
+	}
+	if input.APIKey != nil {
+		key = strings.TrimSpace(*input.APIKey)
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(input.Endpoint))
 	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
 		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "模型接口地址配置无效")
@@ -63,11 +93,7 @@ func (s *Server) handleModelCheck(w http.ResponseWriter, r *http.Request) {
 	method, path := http.MethodGet, "models"
 	var body io.Reader
 	if action == "probe" {
-		var input struct {
-			Model string `json:"model"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil ||
-			len(input.Model) > 256 || strings.TrimSpace(input.Model) == "" {
+		if len(input.Model) > 256 || strings.TrimSpace(input.Model) == "" {
 			writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "请选择要测试的模型")
 			return
 		}
@@ -86,8 +112,8 @@ func (s *Server) handleModelCheck(w http.ResponseWriter, r *http.Request) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if cfg.LLM.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.LLM.APIKey)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	client := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -122,7 +148,7 @@ func (s *Server) handleModelCheck(w http.ResponseWriter, r *http.Request) {
 	seen := make(map[string]bool)
 	for _, entry := range result.Data {
 		id := strings.TrimSpace(entry.ID)
-		if id != "" && len(id) <= 256 && !seen[id] && (cfg.LLM.APIKey == "" || !strings.Contains(id, cfg.LLM.APIKey)) {
+		if id != "" && len(id) <= 256 && !seen[id] && (key == "" || !strings.Contains(id, key)) {
 			models = append(models, id)
 			seen[id] = true
 		}

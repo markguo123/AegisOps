@@ -45,7 +45,7 @@ const emit = defineEmits<{
 const open = ref(true)
 watch(() => props.questionHighlighted, (highlighted) => {
   if (highlighted) open.value = true
-})
+}, { immediate: true })
 const lastActionableReply = computed(() => [...props.turn.items].reverse().find(
   item => item.type === 'report' && item.data.purpose === 'final' && item.data.done,
 ))

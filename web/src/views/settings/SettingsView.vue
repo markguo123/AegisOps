@@ -6,7 +6,6 @@ import { Check, InfoFilled, Key, Lock, Promotion, Refresh, Setting } from '@elem
 import TechEmptyState from '@/components/TechEmptyState.vue'
 import ModelProfiles from './ModelProfiles.vue'
 import {
-  checkModel,
   describeSettingsError,
   getSettings,
   patchSettings,
@@ -39,59 +38,6 @@ const savingError = ref('')
 const drafts = ref<Record<string, unknown>>({})
 const dirty = ref<Record<string, boolean>>({})
 const clearRequested = ref<Record<string, boolean>>({})
-const modelCandidates = ref<string[]>([])
-const selectedCandidate = ref('')
-const candidateWindow = ref<number>()
-const modelCheckBusy = ref<'discover' | 'probe' | ''>('')
-const modelCheckNotice = ref('')
-const modelCheckError = ref(false)
-const modelConnectionDirty = computed(() =>
-  ['base_url', 'api_key', 'enabled', 'provider', 'api_format'].some(key => dirty.value[key]),
-)
-
-async function runModelCheck(action: 'discover' | 'probe') {
-  if (modelCheckBusy.value || modelConnectionDirty.value) return
-  modelCheckBusy.value = action
-  modelCheckError.value = false
-  modelCheckNotice.value = ''
-  if (action === 'discover') {
-    modelCandidates.value = []
-    selectedCandidate.value = ''
-  }
-  const model = selectedCandidate.value || draftAsString('model').trim()
-  try {
-    const result = await checkModel(action, model)
-    if (action === 'discover') modelCandidates.value = result.models
-    const time = new Date(result.checkedAt).toLocaleTimeString()
-    modelCheckNotice.value = action === 'discover'
-      ? `列表接口可达 · ${result.models.length} 个候选 · 尚未验证推理 · ${time}`
-      : `${model}：基础推理通过，工具调用未验证 · ${time}`
-  } catch (error) {
-    modelCheckError.value = true
-    modelCheckNotice.value = describeSettingsError(action === 'discover' ? '获取模型列表' : '测试模型', error)
-  } finally {
-    modelCheckBusy.value = ''
-  }
-}
-
-function addCandidateToCatalog() {
-  const id = selectedCandidate.value
-  const window = candidateWindow.value
-  if (!id || !window || !Number.isInteger(window) || window < 8192 || window > 4194304) return
-  try {
-    const entries = JSON.parse(draftAsString('chat_models') || '[]') as Array<{ id: string; context_window: number }>
-    if (!Array.isArray(entries)) throw new Error('目录必须是数组')
-    if (entries.some(entry => entry.id === id)) {
-      ElMessage.warning('该模型已在目录中，请直接修改其上下文窗口')
-      return
-    }
-    setDraft('chat_models', JSON.stringify([...entries, { id, context_window: window }], null, 2))
-    ElMessage.success('已添加到目录草稿，保存后生效')
-  } catch {
-    ElMessage.error('请先修正问诊模型目录 JSON')
-  }
-}
-
 const groupMeta = computed(
   () => GROUPS.find((g) => g.key === activeGroup.value) ?? GROUPS[0],
 )
@@ -448,7 +394,7 @@ onMounted(loadGroup)
                   <div class="sub strong">{{ groupMeta.title }}</div>
                   <div class="muted small">{{ groupMeta.desc }}</div>
                   <div class="faint small">
-                    <span class="mono">已配置 {{ appliedCount }}</span>
+                    <span v-if="activeGroup !== 'model'" class="mono">已配置 {{ appliedCount }}</span>
                     <span v-if="dirtyCount > 0" class="warn-tag"> · 待保存 {{ dirtyCount }}</span>
                   </div>
                 </div>
@@ -459,35 +405,13 @@ onMounted(loadGroup)
                   :loading="saving"
                   @click="handleSave"
                 >
-                  保存
+                  {{ activeGroup === 'model' ? '保存开关' : '保存' }}
                 </el-button>
               </div>
             </div>
 
             <div v-if="loading" class="muted center-hint">加载中…</div>
             <div v-else class="field-grid">
-              <ModelProfiles v-if="activeGroup === 'model' && view?.items.some(item => item.key === 'model_profiles')" :can-write="canWrite" />
-              <section v-if="activeGroup === 'model' && canWrite" class="model-checks">
-                <div class="row">
-                  <el-button :loading="modelCheckBusy === 'discover'" :disabled="!!modelCheckBusy || modelConnectionDirty"
-                    @click="runModelCheck('discover')">获取候选模型</el-button>
-                  <el-button :loading="modelCheckBusy === 'probe'"
-                    :disabled="!!modelCheckBusy || modelConnectionDirty || !(selectedCandidate || draftAsString('model').trim())"
-                    @click="runModelCheck('probe')">测试所选模型</el-button>
-                </div>
-                <el-select v-if="modelCandidates.length && !modelConnectionDirty" v-model="selectedCandidate" filterable
-                  placeholder="选择候选模型" aria-label="候选模型">
-                  <el-option v-for="candidate in modelCandidates" :key="candidate" :label="candidate" :value="candidate" />
-                </el-select>
-                <div v-if="selectedCandidate && !modelConnectionDirty && view?.items.some(item => item.key === 'chat_models')" class="row">
-                  <el-input-number v-model="candidateWindow" :min="8192" :max="4194304" :precision="0"
-                    placeholder="模型总窗口" aria-label="候选模型总上下文窗口" />
-                  <el-button :disabled="!candidateWindow" @click="addCandidateToCatalog">加入问诊目录</el-button>
-                  <el-button @click="setDraft('model', selectedCandidate)">设为默认模型</el-button>
-                </div>
-                <p v-if="modelConnectionDirty" class="muted small">连接参数变更后，请先保存再检测。</p>
-                <p v-else-if="modelCheckNotice" :class="modelCheckError ? 'warn-tag' : 'muted'" role="status">{{ modelCheckNotice }}</p>
-              </section>
               <el-alert
                 v-if="encryptionUnavailable"
                 class="encryption-alert"
@@ -497,10 +421,10 @@ onMounted(loadGroup)
                 title="敏感配置暂不可保存"
                 description="服务端尚未配置 AEGISOPS_ENC_KEY。请联系平台管理员完成加密密钥配置后再保存 API Key、kubeconfig 或 MCP 配置。"
               />
-              <div v-for="item in view?.items.filter(entry => entry.key !== 'model_profiles') ?? []" :key="item.key" class="field">
+              <div v-for="item in view?.items.filter(entry => activeGroup !== 'model' || entry.key === 'enabled') ?? []" :key="item.key" class="field">
                 <div class="field-meta">
                   <div class="row field-label">
-                    <span class="mono strong">{{ item.key === 'api_format' ? 'API 格式' : item.key }}</span>
+                    <span class="mono strong">{{ item.key === 'enabled' && activeGroup === 'model' ? '启用模型调用' : item.key }}</span>
                     <span v-if="item.sensitive" class="pill" :class="item.hasValue ? 'ok' : 'mute'">
                       <el-icon class="tiny"><Key /></el-icon>
                       {{ item.hasValue ? '已配置' : '未配置' }}
@@ -639,6 +563,7 @@ onMounted(loadGroup)
                   />
                 </div>
               </div>
+              <ModelProfiles v-if="activeGroup === 'model' && view?.items.some(item => item.key === 'model_profiles')" :can-write="canWrite" />
             </div>
           </div>
         </div>
@@ -648,10 +573,6 @@ onMounted(loadGroup)
 </template>
 
 <style scoped>
-.model-checks {
-  display: grid;
-  gap: 8px;
-}
 .settings-page {
   display: flex;
   flex-direction: column;

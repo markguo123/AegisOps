@@ -102,6 +102,7 @@ func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		if index < 0 {
 			profile.ID = "profile_" + rand.Text()
+			id = profile.ID
 			profiles = append(profiles, profile)
 		} else {
 			profiles[index] = profile
@@ -120,5 +121,5 @@ func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
 		writeSettingsError(w, r, err)
 		return
 	}
-	writeOK(w, r, http.StatusOK, true)
+	writeOK(w, r, http.StatusOK, map[string]string{"id": id})
 }

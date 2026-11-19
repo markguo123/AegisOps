@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { List } from '@element-plus/icons-vue'
+import { fetchTimeline, type ChatSnapshot } from '@/api/chat'
+import { ElMessage } from 'element-plus'
+import QuestionMinimap from './QuestionMinimap.vue'
 
 import type {
   ChatInteraction,
@@ -24,6 +26,7 @@ import { parseJsonLoose } from './render/constants'
  */
 const props = withDefaults(
   defineProps<{
+    questionIndex?: { key: string; input: string }[]
     turns: ChatTurn[]
     canBranch?: boolean
     items: ChatItem[]
@@ -53,6 +56,8 @@ const emit = defineEmits<{
   ): void
 }>()
 
+const history = ref<ChatSnapshot>()
+let navigation = 0
 const rollRef = ref<HTMLElement | null>(null)
 
 function toolStatus(tool: ChatToolCall): ToolUiData['status'] {
@@ -282,7 +287,7 @@ function statusOf(turn: ChatTurn): TurnStatus {
 
 const uiTurns = computed<TurnUiData[]>(() => {
   const byTurn = new Map<string, ChatItem[]>()
-  for (const item of props.items) {
+  for (const item of [...(history.value?.items ?? []), ...props.items]) {
     const turnId =
       item.type === 'message'
         ? item.message.turn_id
@@ -295,7 +300,7 @@ const uiTurns = computed<TurnUiData[]>(() => {
     list.push(item)
     byTurn.set(turnId, list)
   }
-  return props.turns.map((turn, index) => {
+  return [...(history.value?.turns ?? []).filter(t => !props.turns.some(live => live.turn_id === t.turn_id)), ...props.turns].map((turn, index) => {
     const items: TurnItem[] = []
     for (const item of byTurn.get(turn.turn_id) ?? []) {
       if (item.type === 'message') {
@@ -333,9 +338,13 @@ const uiTurns = computed<TurnUiData[]>(() => {
 const FOLLOW_THRESHOLD_PX = 24
 const following = ref(true)
 const unseenContent = ref(false)
-const questions = computed(() => uiTurns.value.filter(turn => turn.input.trim()))
+const questions = computed(() => {
+  const entries = new Map((props.questionIndex ?? []).map(q => [q.key, q]))
+  for (const turn of uiTurns.value) if (turn.input.trim()) entries.set(turn.key, turn)
+  return [...entries.values()]
+})
 const highlightedQuestion = ref('')
-const outlineOpen = ref(false)
+const readingKey = ref('')
 let highlightTimer: ReturnType<typeof setTimeout> | undefined
 
 function clearQuestionHighlight() {
@@ -346,8 +355,21 @@ function clearQuestionHighlight() {
 async function jumpToQuestion(key: string) {
   following.value = false
   unseenContent.value = false
-  outlineOpen.value = false
   clearQuestionHighlight()
+  const request = ++navigation
+  if (!uiTurns.value.some(turn => turn.key === key)) {
+    const session = props.turns[0]?.session_id
+    if (!session) return
+    try {
+      const snapshot = await fetchTimeline(session, 1, key)
+      if (request !== navigation) return
+      if (!snapshot.turns?.length) throw new Error()
+      history.value = snapshot
+    } catch {
+      if (request === navigation) ElMessage.error('无法加载这条历史提问')
+      return
+    }
+  }
   highlightedQuestion.value = key
   await nextTick()
   if (highlightedQuestion.value !== key) return
@@ -361,8 +383,10 @@ async function jumpToQuestion(key: string) {
 }
 
 watch(() => props.turns[0]?.session_id, () => {
+  navigation++
+  history.value = undefined
+  readingKey.value = ''
   clearQuestionHighlight()
-  outlineOpen.value = false
   following.value = true
   unseenContent.value = false
 })
@@ -377,6 +401,9 @@ function onScroll(): void {
   if (!el) {
     return
   }
+  const line = el.getBoundingClientRect().top + el.clientHeight / 3
+  const turns = Array.from(el.querySelectorAll<HTMLElement>('[data-question-key]'))
+  readingKey.value = (turns.filter(turn => turn.getBoundingClientRect().top <= line).pop() ?? turns[0])?.dataset.questionKey ?? ''
   following.value = distanceToBottom(el) <= FOLLOW_THRESHOLD_PX
   if (following.value) unseenContent.value = false
 }
@@ -411,35 +438,10 @@ defineExpose({ uiTurns })
 
 <template>
   <div class="timeline-layout">
-    <aside v-if="questions.length" class="question-outline" :class="{ 'outline-open': outlineOpen }">
-      <button
-        class="outline-toggle"
-        type="button"
-        :aria-expanded="outlineOpen"
-        @click="outlineOpen = !outlineOpen"
-      >
-        <List aria-hidden="true" /> 提问大纲
-      </button>
-      <nav class="outline-panel" aria-label="提问大纲">
-        <div class="outline-title">提问大纲 <span>{{ questions.length }}</span></div>
-        <ol>
-          <li v-for="(question, index) in questions" :key="question.key">
-            <button
-              type="button"
-              :title="question.input"
-              :aria-current="highlightedQuestion === question.key ? 'location' : undefined"
-              @click="jumpToQuestion(question.key)"
-            >
-              <span class="outline-index" aria-hidden="true">{{ index + 1 }}</span>
-              <span class="outline-text">{{ question.input }}</span>
-            </button>
-          </li>
-        </ol>
-      </nav>
-    </aside>
+    <QuestionMinimap :questions="questions" :active="readingKey || questions[0]?.key" @navigate="jumpToQuestion" />
   <div ref="rollRef" class="timeline" @scroll.passive="onScroll">
     <template v-if="uiTurns.length">
-      <div v-for="(turn, index) in uiTurns" :key="turn.key" class="turn-wrap rise-in">
+      <div v-for="(turn, index) in uiTurns" :key="turn.key" :data-question-key="turn.input.trim() ? turn.key : undefined" class="turn-wrap rise-in">
         <TurnBlock
           :turn="turn"
           :latest="index === uiTurns.length - 1"
@@ -469,116 +471,6 @@ defineExpose({ uiTurns })
   flex: 1;
   min-height: 0;
   min-width: 0;
-}
-
-.question-outline {
-  display: flex;
-  flex: 0 0 172px;
-  min-height: 0;
-  padding: 16px 0 16px 12px;
-}
-
-.outline-panel {
-  align-self: flex-start;
-  max-height: 100%;
-  width: 100%;
-  overflow-y: auto;
-  box-sizing: border-box;
-  padding: 8px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-surface);
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.outline-title {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 4px 8px;
-  font-weight: 600;
-}
-
-.outline-panel ol {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.outline-panel button,
-.outline-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  text-align: left;
-}
-
-.outline-panel button:hover,
-.outline-panel button:focus-visible,
-.outline-panel button[aria-current] {
-  background: var(--app-accent-soft);
-  color: var(--app-text);
-}
-
-.outline-index {
-  flex: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.outline-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.outline-toggle {
-  display: none;
-}
-
-@media (max-width: 1050px) {
-  .timeline-layout {
-    flex-direction: column;
-  }
-
-  .question-outline {
-    flex: none;
-    padding: 4px 16px 0;
-    z-index: 2;
-  }
-
-  .outline-toggle {
-    display: inline-flex;
-    width: auto;
-    color: var(--app-muted);
-    font-size: 12px;
-  }
-
-  .outline-toggle svg {
-    width: 16px;
-    height: 16px;
-  }
-
-  .outline-panel {
-    display: none;
-    position: absolute;
-    top: 34px;
-    left: 16px;
-    width: min(300px, calc(100% - 32px));
-    max-height: min(280px, 60%);
-    box-shadow: var(--app-shadow);
-  }
-
-  .outline-open .outline-panel {
-    display: block;
-  }
 }
 
 .timeline {

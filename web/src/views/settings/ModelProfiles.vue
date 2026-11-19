@@ -1,27 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteModelProfile, describeSettingsError, listModelProfiles, saveModelProfile } from '@/api/settings'
-import type { ModelProfile, ModelProfileInput } from '@/api/settings'
+import { deleteModelProfile, describeSettingsError, listModelProfiles } from '@/api/settings'
+import type { ModelProfile } from '@/api/settings'
+
+import ModelProfileDialog from './ModelProfileDialog.vue'
 
 defineProps<{ canWrite: boolean }>()
 
 const profiles = ref<ModelProfile[]>([])
 const loading = ref(false)
-const saving = ref(false)
 const error = ref('')
 const dialogOpen = ref(false)
 const editing = ref<ModelProfile>()
-const clearKey = ref(false)
-
-function emptyDraft(): ModelProfileInput {
-  return { name: '', model: '', endpoint: '', apiFormat: 'openai-chat-completions', contextWindow: 65536, maxTokens: 4096, apiKey: '' }
-}
-
-const draft = ref(emptyDraft())
-const ready = computed(() => draft.value.name.trim() && draft.value.model.trim() && draft.value.endpoint.trim() &&
-  draft.value.contextWindow >= 8192 && draft.value.maxTokens > 0 && draft.value.maxTokens < draft.value.contextWindow)
-
+const statuses = ref<Record<string, string>>({})
 async function load() {
   loading.value = true
   error.value = ''
@@ -36,33 +28,13 @@ async function load() {
 
 function open(profile?: ModelProfile) {
   editing.value = profile
-  clearKey.value = false
-  if (profile) {
-    const { name, model, endpoint, apiFormat, contextWindow, maxTokens } = profile
-    draft.value = { name, model, endpoint, apiFormat, contextWindow, maxTokens, apiKey: '' }
-  } else {
-    draft.value = emptyDraft()
-  }
   dialogOpen.value = true
 }
 
-async function save() {
-  if (!ready.value || saving.value) return
-  saving.value = true
-  try {
-    const { apiKey, ...input } = draft.value
-    await saveModelProfile({
-      ...input,
-      ...(clearKey.value ? { apiKey: '' } : apiKey?.trim() ? { apiKey } : {}),
-    }, editing.value?.id)
-    dialogOpen.value = false
-    await load()
-    ElMessage.success('模型已保存')
-  } catch (failure) {
-    ElMessage.error(describeSettingsError('保存模型', failure))
-  } finally {
-    saving.value = false
-  }
+async function saved(id: string, status: string) {
+  statuses.value[id] = status
+  dialogOpen.value = false
+  await load()
 }
 
 async function remove(profile: ModelProfile) {
@@ -82,7 +54,7 @@ onMounted(load)
   <section class="model-profiles">
     <header>
       <div>
-        <strong>独立问诊模型</strong>
+        <strong>问诊模型</strong>
         <p>每个模型单独配置接口与凭据，保存后可在 Chat 中切换。</p>
       </div>
       <el-button v-if="canWrite" type="primary" @click="open()">添加模型</el-button>
@@ -94,8 +66,9 @@ onMounted(load)
       <li v-for="profile in profiles" :key="profile.id">
         <div>
           <strong>{{ profile.name }}</strong>
-          <p>{{ profile.model }} · {{ profile.contextWindow.toLocaleString() }} Token</p>
+          <p>OpenAI 兼容 · {{ profile.model }} · {{ profile.contextWindow.toLocaleString() }} Token</p>
         </div>
+        <small :class="{ ok: statuses[profile.id]?.startsWith('测试通过'), failed: statuses[profile.id]?.startsWith('测试失败') }">{{ statuses[profile.id] || '未测试' }}</small>
         <div v-if="canWrite">
           <el-button text @click="open(profile)">编辑</el-button>
           <el-button text type="danger" @click="remove(profile)">删除</el-button>
@@ -103,33 +76,7 @@ onMounted(load)
       </li>
     </ul>
 
-    <el-dialog v-model="dialogOpen" :title="editing ? '编辑模型' : '添加模型'" width="min(520px, 92vw)" @closed="draft = emptyDraft()">
-      <el-form label-position="top" @submit.prevent="save">
-        <el-form-item label="显示名称"><el-input v-model="draft.name" maxlength="128" /></el-form-item>
-        <el-form-item label="模型 ID"><el-input v-model="draft.model" maxlength="256" /></el-form-item>
-        <el-form-item label="接口地址"><el-input v-model="draft.endpoint" placeholder="https://gateway.example/v1" /></el-form-item>
-        <el-form-item label="API 格式">
-          <el-select v-model="draft.apiFormat">
-            <el-option value="openai-chat-completions" label="OpenAI 兼容 · Chat Completions" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="API Key">
-          <el-input v-model="draft.apiKey" type="password" :disabled="clearKey"
-            :placeholder="editing?.hasKey ? '留空保留已保存的密钥' : '无鉴权时可留空'" />
-          <el-checkbox v-if="editing?.hasKey" v-model="clearKey">清除已保存的密钥</el-checkbox>
-        </el-form-item>
-        <el-form-item label="上下文总窗口（Token）">
-          <el-input-number v-model="draft.contextWindow" :min="8192" :max="4194304" :precision="0" />
-        </el-form-item>
-        <el-form-item label="单次输出上限（Token）">
-          <el-input-number v-model="draft.maxTokens" :min="1" :precision="0" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="dialogOpen = false">取消</el-button>
-        <el-button type="primary" :disabled="!ready" :loading="saving" @click="save">保存模型</el-button>
-      </template>
-    </el-dialog>
+    <ModelProfileDialog v-if="dialogOpen" :editing="editing" @close="dialogOpen = false" @saved="saved" />
   </section>
 </template>
 
@@ -141,6 +88,9 @@ onMounted(load)
   border: 1px solid var(--app-border);
   border-radius: 8px;
 }
+small::before { content: "●"; margin-right: 5px; color: var(--app-muted); }
+small.ok::before { color: #26986b; }
+small.failed::before { color: #d65353; }
 header, li {
   display: flex;
   justify-content: space-between;

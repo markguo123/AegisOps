@@ -392,7 +392,7 @@ func TestChatFlowSnapshotMatchesEvents(t *testing.T) {
 	}
 
 	provider, ok := svc.(interface {
-		Snapshot(ctx context.Context, sessionID string, turnLimit int) (sse.Snapshot, error)
+		Snapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error)
 	})
 	if !ok {
 		t.Fatal("ChatService 未暴露展示读取能力")
