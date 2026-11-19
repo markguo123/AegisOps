@@ -10,6 +10,7 @@ import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import QuestionInteraction from './QuestionInteraction.vue'
 import MarkdownView from './MarkdownView.vue'
+import copyText from '@/composables/useClipboard'
 
 /**
  * 单回合容器：用户输入 + 真实过程条目（消息/工具/问题/审批/告警）。
@@ -116,14 +117,29 @@ function turnDurationMs(turn: TurnUiData): number | null {
   return (Number.isNaN(end) ? Date.now() : end) - start
 }
 
-const tokenTotal = computed(() => {
-  const total = props.turn.token?.total_tokens
-  const prompt = props.turn.token?.prompt_tokens
-  const completion = props.turn.token?.completion_tokens
-  if (total !== undefined && total !== null) return total
-  if (prompt === undefined && completion === undefined) return null
-  return (prompt ?? 0) + (completion ?? 0)
-})
+const tasks = computed(() => props.turn.items.filter(item => item.type === 'tool'))
+const active = computed(() => ['pending', 'running', 'waiting'].includes(props.turn.status))
+const tasksOpen = ref<boolean | null>(null)
+const unknownTask = computed(() => tasks.value.some(task => task.data.status === 'unknown'))
+
+function taskStatus(task: (typeof tasks.value)[number]['data']): string {
+  if (active.value && task.status === 'running') {
+    const approval = props.turn.items.find(item =>
+      item.type === 'approval' && item.data.toolCallId === task.key && item.data.decision === 'pending',
+    )
+    if (approval?.type === 'approval') {
+      if (approval.data.operation === 'secret.read') return '等待同意读取 Secret'
+      return approval.data.secret ? '等待提供所需的值' : '等待人工确认'
+    }
+  }
+  if (task.denied) return '未获批准，未执行'
+  switch (task.status) {
+    case 'done': return '已完成'
+    case 'error': return '失败或受限'
+    case 'unknown': return '结果未知'
+    default: return !active.value ? '未取得结果' : '处理中'
+  }
+}
 
 const reportDone = computed(() =>
   props.turn.items.some((item) => item.type === 'report' && item.data.purpose === 'final' && item.data.done),
@@ -171,9 +187,6 @@ function itemAnchor(item: { data: { key: string } }): string {
       <div class="turn-meta">
         <span v-if="turn.startedAt" class="turn-time">{{ timeLabel(turn.startedAt) }}</span>
         <span v-if="duration" class="turn-duration">{{ duration }}</span>
-        <span v-if="tokenTotal !== null" class="turn-token" :title="`提示词 + 生成 tokens`"
-          >{{ tokenTotal }} tokens</span
-        >
         <el-tag size="small" effect="plain" :type="statusType" class="turn-status">{{
           statusLabel
         }}</el-tag>
@@ -184,7 +197,10 @@ function itemAnchor(item: { data: { key: string } }): string {
       <!-- 用户输入：与原型一致，回合内先回显用户诉求，再展示执行过程 -->
       <article v-if="turn.input" class="turn-question">
         <span class="question-role">你</span>
-        <p class="question-text">{{ turn.input }}</p>
+        <div>
+          <p class="question-text">{{ turn.input }}</p>
+          <el-button text size="small" @click="copyText(turn.input)">复制</el-button>
+        </div>
       </article>
 
       <div v-if="turn.error" class="turn-error">
@@ -192,6 +208,18 @@ function itemAnchor(item: { data: { key: string } }): string {
         <span>{{ turn.error }}</span>
       </div>
 
+      <div v-if="tasks.length" class="turn-tasks">
+        <button type="button" :aria-expanded="tasksOpen ?? active" @click="tasksOpen = !(tasksOpen ?? active)">
+          本轮任务 · {{ tasks.length }} 项
+        </button>
+        <ul v-if="tasksOpen ?? active">
+          <li v-for="task in tasks" :key="task.data.key">
+            <strong>{{ task.data.shortName }}</strong> · {{ taskStatus(task.data) }}
+            <span v-if="task.data.summary"> — {{ task.data.summary }}</span>
+          </li>
+        </ul>
+      </div>
+      <p v-if="unknownTask" class="turn-error" role="alert">有操作结果未知，请先核实集群现场，不要直接重试。</p>
       <div class="turn-items">
         <component
           :is="group.process ? ProcessGroup : 'div'"
@@ -256,6 +284,7 @@ function itemAnchor(item: { data: { key: string } }): string {
               <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
             </div>
             <MarkdownView :text="item.data.text" />
+            <el-button v-if="item.data.purpose === 'final' && item.data.done" text size="small" @click="copyText(item.data.text)">复制</el-button>
           </article>
         </template>
         </component>
@@ -265,6 +294,24 @@ function itemAnchor(item: { data: { key: string } }): string {
 </template>
 
 <style scoped>
+.turn-tasks {
+  padding: 8px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.turn-tasks button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.turn-tasks ul {
+  margin: 8px 0 0;
+  padding-inline-start: 24px;
+  overflow-wrap: anywhere;
+}
 .report-block.commentary {
   border: 0;
   background: transparent;

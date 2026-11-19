@@ -38,6 +38,7 @@ const stream = useChatStream()
 
 const input = ref('')
 const sending = ref(false)
+const stoppingSession = ref('')
 const composerRef = ref<InstanceType<typeof ComposerBox> | null>(null)
 const auth = useAuthStore()
 const {clusters,refresh:loadScope}=useClusterAccess()
@@ -334,7 +335,7 @@ function newIdempotencyKey(): string {
 
 async function handleSend(): Promise<void> {
   const raw = input.value.trim()
-  if (!activeId.value || !raw || sending.value) {
+  if (!activeId.value || !raw || sending.value || stream.running.value) {
     return
   }
   const available = composerRef.value?.availableSkills ?? []
@@ -377,11 +378,13 @@ function handleAnswer(payload: {
 
 /** 停止当前正在执行的会话运行。 */
 function handleStop(): void {
-  if (!activeId.value) {
+  const id = activeId.value
+  if (!id || stoppingSession.value === id) {
     return
   }
-  sending.value = false
-  void cancelRun(activeId.value).catch((error) => {
+  stoppingSession.value = id
+  void cancelRun(id).catch((error) => {
+    if (stoppingSession.value === id) stoppingSession.value = ''
     ElMessage.error(error instanceof Error ? error.message : '取消失败')
   })
 }
@@ -487,6 +490,7 @@ watch(
 watch(
   () => stream.running.value,
   (running) => {
+    if (!running && stoppingSession.value === activeId.value) stoppingSession.value = ''
     if (!running && sending.value) {
       sending.value = false
       void loadSessions()
@@ -639,7 +643,8 @@ watch(
           v-model="input"
           :model="activeSession?.model || ''"
           :disabled="!activeSession"
-          :sending="sending"
+          :sending="sending || stream.running.value"
+          :stopping="stoppingSession === activeId"
           :can-use-skills="canUseSkills"
           @send="handleSend"
           @stop="handleStop"

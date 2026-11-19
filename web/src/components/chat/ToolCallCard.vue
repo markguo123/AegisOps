@@ -36,6 +36,7 @@ export interface ToolUiData {
   command: string
   risk: string
   status: 'running' | 'done' | 'error' | 'unknown'
+  denied?: boolean
   ok: boolean
   params: unknown
   result: unknown

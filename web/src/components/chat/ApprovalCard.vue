@@ -17,6 +17,7 @@ export interface ApprovalUiData {
   key: string
   title?: string
   operation?: string
+  toolCallId?: string
   command?: string
   prompt: string
   options: Array<{ label: string; value: string }>

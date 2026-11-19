@@ -47,6 +47,12 @@ function render(): string {
   const doc = new DOMParser().parseFromString(`<div id="__mdroot">${html}</div>`, 'text/html')
   const root = doc.getElementById('__mdroot')
   if (root) {
+    root.querySelectorAll('table').forEach((table) => {
+      const wrapper = doc.createElement('div')
+      wrapper.className = 'md-table-scroll'
+      table.before(wrapper)
+      wrapper.append(table)
+    })
     const pres = root.querySelectorAll('pre')
     pres.forEach((pre) => {
       const code = pre.querySelector('code')
@@ -249,6 +255,15 @@ function onContainerClick(event: MouseEvent): void {
   margin: 0.6em 0;
   border-collapse: collapse;
   font-size: 12px;
+}
+
+.md-body :deep(.md-table-scroll) {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-body :deep(tbody tr:nth-child(even)) {
+  background: var(--app-header-bg, var(--app-bg));
 }
 
 .md-body :deep(th),
