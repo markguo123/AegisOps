@@ -78,6 +78,7 @@ var catalog = map[string][]Definition{
 		{Key: "api_key", Kind: KindString, Default: "", Sensitive: true, Source: "llm.api_key", Desc: "接口密钥（不回显）"},
 		{Key: "model", Kind: KindString, Default: "qwen-plus", Source: "llm.model", Desc: "模型名"},
 		{Key: "chat_models", Kind: KindJSON, Default: []any{}, Source: "llm.chat_models", Example: `[{"id":"model-a","context_window":131072}]`, Desc: "同一提供方下启用的问诊模型，每个模型单独填写部署支持的上下文窗口"},
+		{Key: "model_profiles", Kind: KindJSON, Default: []any{}, Sensitive: true, Source: "llm.model_profiles", Desc: "独立问诊模型配置（加密存储）"},
 		{Key: "temperature", Kind: KindFloat, Default: 0.1, Min: 0, Max: 2, Source: "llm.temperature", Desc: "采样温度"},
 		{Key: "max_tokens", Kind: KindInt, Default: 4096, Min: 1, Source: "llm.max_tokens", Desc: "单次回复上限"},
 		{Key: "max_input_tokens", Kind: KindInt, Default: 8192, Min: 1, Source: "llm.max_input_tokens", Desc: "单条输入上限"},

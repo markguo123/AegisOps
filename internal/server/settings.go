@@ -56,6 +56,10 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "no settings provided")
 		return
 	}
+	if _, present := patch["model_profiles"]; present && r.PathValue("group") == settings.GroupModel {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "请使用独立模型配置接口")
+		return
+	}
 	actor := settings.Actor{RequestID: RequestIDFrom(r.Context())}
 	if u := UserFrom(r.Context()); u != nil {
 		actor.UserID = u.ID

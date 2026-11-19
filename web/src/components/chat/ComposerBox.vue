@@ -19,6 +19,7 @@ const props = withDefaults(
     modelValue: string
     model?: string
     models?: string[]
+    modelLabels?: Record<string, string>
     stopping?: boolean
     disabled?: boolean
     sending?: boolean
@@ -221,9 +222,9 @@ defineExpose({ focus, availableSkills })
       <span class="composer-actions">
         <el-select v-if="(models?.length ?? 0) > 1" :model-value="model" :disabled="disabled || sending"
           aria-label="下一轮模型" class="composer-model" @change="emit('select-model', $event)">
-          <el-option v-for="entry in models" :key="entry" :label="entry" :value="entry" />
+          <el-option v-for="entry in models" :key="entry" :label="modelLabels?.[entry] || entry" :value="entry" />
         </el-select>
-        <span v-else class="composer-chip">{{ model || '默认模型' }}</span>
+        <span v-else class="composer-chip">{{ modelLabels?.[model] || model || '默认模型' }}</span>
         <el-button
           v-if="!sending"
           type="primary"

@@ -54,8 +54,47 @@ type KubernetesConfig struct {
 const ModelAPIChatCompletions = "openai-chat-completions"
 
 type ChatModel struct {
+	Name          string `json:"name,omitempty" mapstructure:"name"`
 	ID            string `json:"id" mapstructure:"id"`
 	ContextWindow int    `json:"context_window" mapstructure:"context_window"`
+}
+
+type ModelProfile struct {
+	ID            string `json:"id" mapstructure:"id"`
+	Name          string `json:"name" mapstructure:"name"`
+	Model         string `json:"model" mapstructure:"model"`
+	Endpoint      string `json:"endpoint" mapstructure:"endpoint"`
+	APIKey        string `json:"apiKey" mapstructure:"apiKey"`
+	APIFormat     string `json:"apiFormat" mapstructure:"apiFormat"`
+	ContextWindow int    `json:"contextWindow" mapstructure:"contextWindow"`
+	MaxTokens     int    `json:"maxTokens" mapstructure:"maxTokens"`
+}
+
+func ValidateModelProfiles(profiles []ModelProfile) error {
+	if len(profiles) > 50 {
+		return fmt.Errorf("最多添加 50 个模型")
+	}
+	seen := make(map[string]bool, len(profiles))
+	for _, entry := range profiles {
+		endpoint, err := url.Parse(entry.Endpoint)
+		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+			endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.ForceQuery {
+			return fmt.Errorf("模型接口地址必须是有效的 HTTP(S) 基础地址")
+		}
+		if !strings.HasPrefix(entry.ID, "profile_") || seen[entry.ID] ||
+			strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Model) == "" ||
+			len(entry.Name) > 128 || len(entry.Model) > 256 || len(entry.APIKey) > 4096 {
+			return fmt.Errorf("模型名称、模型 ID 或 API Key 无效")
+		}
+		if entry.APIFormat != ModelAPIChatCompletions {
+			return fmt.Errorf("不支持该 API 格式")
+		}
+		if entry.ContextWindow < 8192 || entry.ContextWindow > 4194304 || entry.MaxTokens <= 0 || entry.MaxTokens >= entry.ContextWindow {
+			return fmt.Errorf("上下文窗口需在 8192 到 4194304 之间，输出上限必须小于总窗口")
+		}
+		seen[entry.ID] = true
+	}
+	return nil
 }
 
 func ValidateChatModels(models []ChatModel) error {
@@ -74,6 +113,8 @@ func ValidateChatModels(models []ChatModel) error {
 }
 
 type LLMConfig struct {
+	ModelProfiles   []ModelProfile    `mapstructure:"model_profiles"`
+	ProfilesOnly    bool              `mapstructure:"-"`
 	APIFormat       string            `mapstructure:"api_format"`
 	ChatModels      []ChatModel       `mapstructure:"chat_models"`
 	Enabled         bool              `mapstructure:"enabled"`
@@ -614,6 +655,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Scan.PodLogsTimeout <= 0 {
 		return fmt.Errorf("scan.pod_logs_timeout must be > 0")
+	}
+	if err := ValidateModelProfiles(c.LLM.ModelProfiles); err != nil {
+		return err
 	}
 	if c.LLM.Enabled {
 		if c.LLM.APIFormat != "" && c.LLM.APIFormat != ModelAPIChatCompletions {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ArrowDown, WarningFilled } from '@element-plus/icons-vue'
 
 import type { TurnItem, TurnUiData } from './turn'
@@ -10,7 +10,7 @@ import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import QuestionInteraction from './QuestionInteraction.vue'
 import MarkdownView from './MarkdownView.vue'
-import copyText from '@/composables/useClipboard'
+import MessageActionBar from './MessageActionBar.vue'
 
 /**
  * 单回合容器：用户输入 + 真实过程条目（消息/工具/问题/审批/告警）。
@@ -20,6 +20,8 @@ import copyText from '@/composables/useClipboard'
 const props = withDefaults(
   defineProps<{
     turn: TurnUiData
+    latest?: boolean
+    questionHighlighted?: boolean
     canBranch?: boolean
     /** P2.9 当前用户是否有权审批（本人自确认）。 */
     canDecide?: boolean
@@ -41,6 +43,12 @@ const emit = defineEmits<{
 }>()
 
 const open = ref(true)
+watch(() => props.questionHighlighted, (highlighted) => {
+  if (highlighted) open.value = true
+})
+const lastActionableReply = computed(() => [...props.turn.items].reverse().find(
+  item => item.type === 'report' && item.data.purpose === 'final' && item.data.done,
+))
 // P7.4：展开/折叠全部工具卡（数值信号驱动子卡片），报告完成后未手动操作过的卡片自动折叠。
 const collapseAllSignal = ref(0)
 const expandAllSignal = ref(0)
@@ -188,7 +196,6 @@ function itemAnchor(item: { data: { key: string } }): string {
         <span class="turn-input">{{ turn.input || '（历史会话）' }}</span>
       </button>
       <div class="turn-meta">
-        <span v-if="turn.startedAt" class="turn-time">{{ timeLabel(turn.startedAt) }}</span>
         <span v-if="duration" class="turn-duration">{{ duration }}</span>
         <el-tag size="small" effect="plain" :type="statusType" class="turn-status">{{
           statusLabel
@@ -198,14 +205,13 @@ function itemAnchor(item: { data: { key: string } }): string {
 
     <div v-if="open" class="turn-body">
       <!-- 用户输入：与原型一致，回合内先回显用户诉求，再展示执行过程 -->
-      <article v-if="turn.input" class="turn-question">
-        <span class="question-role">你</span>
-        <div>
-          <p class="question-text">{{ turn.input }}</p>
-          <el-button text size="small" @click="copyText(turn.input)">复制</el-button>
-          <span v-if="turn.startedAt" class="turn-time" title="本轮开始时间">{{ timeLabel(turn.startedAt) }}</span>
-        </div>
-      </article>
+      <div v-if="turn.input" class="message-shell question-shell" :class="{ latest: latest && !lastActionableReply }">
+        <article :id="`question-${turn.key}`" class="turn-question" :class="{ 'question-highlight': questionHighlighted }">
+          <span class="question-role">你</span>
+          <div><p class="question-text">{{ turn.input }}</p></div>
+        </article>
+        <MessageActionBar :text="turn.input" :timestamp="turn.startedAt" :time-label="timeLabel(turn.startedAt)" />
+      </div>
 
       <div v-if="turn.error" class="turn-error">
         <el-icon><WarningFilled /></el-icon>
@@ -277,24 +283,31 @@ function itemAnchor(item: { data: { key: string } }): string {
           >
             {{ item.data.message }}
           </p>
-          <article
+          <div
             v-else-if="item.type === 'report'"
-            :id="itemAnchor(item)"
-            class="turn-item report-block"
-            :class="{ streaming: item.data.streaming, commentary: item.data.purpose !== 'final' }"
+            class="message-shell"
+            :class="{ latest: latest && item.data.key === lastActionableReply?.data.key }"
           >
-            <div class="report-head">
-              <span class="report-label">{{ item.data.purpose === 'final' ? '诊断回复' : '分析' }}</span>
-              <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
-            </div>
-            <MarkdownView :text="item.data.text" />
-            <el-button v-if="item.data.purpose === 'final' && item.data.done" text size="small" @click="copyText(item.data.text)">复制</el-button>
-            <el-button v-if="canBranch && turn.status === 'completed' && item.data.purpose === 'final' && item.data.done && item.data.text.trim()"
-              text size="small" @click="emit('branch', turn.key)">从这里开启新会话</el-button>
-            <span v-if="item.data.purpose === 'final' && item.data.done && turn.completedAt" class="turn-time" title="本轮结束时间">
-              {{ timeLabel(turn.completedAt) }}
-            </span>
-          </article>
+            <article
+              :id="itemAnchor(item)"
+              class="turn-item report-block"
+              :class="{ streaming: item.data.streaming, commentary: item.data.purpose !== 'final' }"
+            >
+              <div class="report-head">
+                <span class="report-label">{{ item.data.purpose === 'final' ? '诊断回复' : '分析' }}</span>
+                <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
+              </div>
+              <MarkdownView :text="item.data.text" />
+            </article>
+            <MessageActionBar
+              v-if="item.data.purpose === 'final' && item.data.done"
+              :text="item.data.text"
+              :can-branch="canBranch && turn.status === 'completed' && !!item.data.text.trim()"
+              :timestamp="turn.completedAt"
+              :time-label="timeLabel(turn.completedAt)"
+              @branch="emit('branch', turn.key)"
+            />
+          </div>
         </template>
         </component>
       </div>
@@ -303,6 +316,38 @@ function itemAnchor(item: { data: { key: string } }): string {
 </template>
 
 <style scoped>
+.message-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.question-shell {
+  align-self: flex-end;
+  max-width: min(100%, 820px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-shell > .message-action-bar {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease;
+  }
+
+  .message-shell.latest > .message-action-bar,
+  .message-shell:hover > .message-action-bar,
+  .message-shell:focus-within > .message-action-bar {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-shell > .message-action-bar {
+    transition: none;
+  }
+}
 .turn-tasks {
   padding: 8px 12px;
   border: 1px solid var(--app-border);
@@ -398,12 +443,6 @@ function itemAnchor(item: { data: { key: string } }): string {
   flex: none;
 }
 
-.turn-time {
-  font-size: 11px;
-  color: var(--app-muted);
-  font-variant-numeric: tabular-nums;
-}
-
 .turn-duration {
   font-size: 11px;
   color: var(--app-muted);
@@ -429,13 +468,24 @@ function itemAnchor(item: { data: { key: string } }): string {
 }
 
 .turn-question {
+  scroll-margin-block: 16px;
   /* 对齐原型 .msg.user：accent 描边 + accent-soft 底色，右对齐 */
-  align-self: flex-end;
-  max-width: 820px;
   padding: 11px 14px;
   border: 1px solid var(--app-accent);
   border-radius: var(--app-radius);
   background: var(--app-accent-soft);
+  transition: box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.turn-question.question-highlight {
+  box-shadow: 0 0 0 3px var(--app-accent);
+  background: var(--app-surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-question {
+    transition: none;
+  }
 }
 
 .question-role {

@@ -40,11 +40,14 @@ const stream = useChatStream()
 const input = ref('')
 const sending = ref(false)
 const modelOptions = ref<string[]>([])
+const modelLabels = ref<Record<string, string>>({})
 const selectedModel = ref('')
 const nextModel = computed(() => selectedModel.value || modelOptions.value[0] || '')
 async function refreshModels() {
   try {
-    modelOptions.value = (await listChatModels()).map(model => model.id)
+    const models = await listChatModels()
+    modelOptions.value = models.map(model => model.id)
+    modelLabels.value = Object.fromEntries(models.map(model => [model.id, model.name || model.id]))
     if (!modelOptions.value.includes(selectedModel.value)) selectedModel.value = ''
   } catch {
     modelOptions.value = []
@@ -755,6 +758,7 @@ watch(
           v-model="input"
           :model="nextModel || activeSession?.model || ''"
           :models="modelOptions"
+          :model-labels="modelLabels"
           @select-model="selectedModel = $event"
           :disabled="!activeSession"
           :sending="sending || stream.running.value"

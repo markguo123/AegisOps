@@ -393,6 +393,10 @@ func (s *Service) ChatRuntimeConfig(ctx context.Context, base *config.Config) (*
 	if s.modelExplicitlyConfigured(configured, cfg) {
 		return cfg, nil
 	}
+	if len(cfg.LLM.ModelProfiles) > 0 {
+		cfg.LLM.ProfilesOnly = true
+		return cfg, nil
+	}
 	return nil, fmt.Errorf("%w: 请在配置中心「模型」分组设置接口地址与模型名，或部署时注入 AEGISOPS_LLM_ENDPOINT / AEGISOPS_LLM_MODEL", ErrModelNotConfigured)
 }
 
@@ -685,6 +689,14 @@ func normalize(def Definition, raw json.RawMessage) (string, error) {
 			return "", fmt.Errorf("需要合法 JSON")
 		}
 		switch def.Key {
+		case "model_profiles":
+			var profiles []config.ModelProfile
+			if err := json.Unmarshal(raw, &profiles); err != nil {
+				return "", fmt.Errorf("独立模型配置必须是数组")
+			}
+			if err := config.ValidateModelProfiles(profiles); err != nil {
+				return "", err
+			}
 		case "chat_models":
 			var models []config.ChatModel
 			decoder := json.NewDecoder(strings.NewReader(trimmed))

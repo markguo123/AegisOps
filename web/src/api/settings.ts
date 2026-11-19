@@ -5,8 +5,39 @@
  * 只回 hasValue，永不回明文（P3.9 落库静态加密）；PATCH 只更新出现的键，
  * 成功返回整组最新视图。
  */
-import { apiGet, apiPatch, apiPost } from './request'
+import { apiDelete, apiGet, apiPatch, apiPost } from './request'
 import type { SettingsGroupView } from './types'
+
+export interface ModelProfileInput {
+  name: string
+  model: string
+  endpoint: string
+  apiFormat: string
+  contextWindow: number
+  maxTokens: number
+  apiKey?: string
+}
+
+export interface ModelProfile extends Omit<ModelProfileInput, 'apiKey'> {
+  id: string
+  hasKey: boolean
+}
+
+const MODEL_PROFILES_PATH = '/settings/model/profiles'
+
+export async function listModelProfiles() {
+  return (await apiGet<ModelProfile[]>(MODEL_PROFILES_PATH)).data ?? []
+}
+
+export function saveModelProfile(input: ModelProfileInput, id?: string) {
+  return id
+    ? apiPatch<boolean>(`${MODEL_PROFILES_PATH}/${encodeURIComponent(id)}`, input)
+    : apiPost<boolean>(MODEL_PROFILES_PATH, input)
+}
+
+export function deleteModelProfile(id: string) {
+  return apiDelete<boolean>(`${MODEL_PROFILES_PATH}/${encodeURIComponent(id)}`)
+}
 
 export async function checkModel(action: 'discover' | 'probe', model?: string) {
   const response = await apiPost<{ models: string[]; checkedAt: string }>(

@@ -1,5 +1,5 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
 
 import MessageTimeline from '@/components/chat/MessageTimeline.vue'
 import type { ChatInteraction, ChatItem, ChatMessage, ChatToolCall, ChatTurn } from '@/api/chat'
@@ -99,13 +99,58 @@ describe('MessageTimeline（规范对象渲染）', () => {
       items: items({ type: 'message', item_order: 1, message: message() }),
       canBranch: true,
     })
-    expect(wrapper.text()).not.toContain('从这里开启新会话')
+    const branchButton = 'button[aria-label="从这里开启新会话"]'
+    expect(wrapper.find(branchButton).exists()).toBe(false)
     await wrapper.setProps({ turns: [turn({ status: 'done' })] })
-    const action = wrapper.findAll('button').find(button => button.text() === '从这里开启新会话')!
+    const action = wrapper.get(branchButton)
+    expect(action.text()).toBe('')
+    expect(wrapper.get('.report-block').find(branchButton).exists()).toBe(false)
     await action.trigger('click')
     expect(wrapper.emitted('branch')).toEqual([['t1']])
     await wrapper.setProps({ canBranch: false })
-    expect(wrapper.text()).not.toContain('从这里开启新会话')
+    expect(wrapper.find(branchButton).exists()).toBe(false)
+  })
+
+  it('操作行紧贴正文外侧，只有最新回复的操作行常显', () => {
+    const wrapper = mountTimeline({
+      turns: [turn({ status: 'done' }), turn({ turn_id: 't2', status: 'done' })],
+      items: items(
+        { type: 'message', item_order: 1, message: message() },
+        { type: 'message', item_order: 2, message: message({ message_id: 'm2', turn_id: 't2' }) },
+      ),
+    })
+    expect(wrapper.findAll('.turn-question + .message-action-bar')).toHaveLength(2)
+    expect(wrapper.findAll('.report-block + .message-action-bar')).toHaveLength(2)
+    expect(wrapper.findAll('.message-shell.latest > .message-action-bar')).toHaveLength(1)
+    expect(wrapper.find('#turn-t2 .message-shell.latest > .report-block').exists()).toBe(true)
+  })
+
+  it('大纲只收录用户提问，点击时展开回合、定位并短暂高亮', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountTimeline({
+      turns: [turn(), turn({ turn_id: 't2', input: '检查 Pod 日志' }), turn({ turn_id: 't3', input: '' })],
+      items: items({ type: 'message', item_order: 1, message: message() }),
+    })
+    const scroll = vi.fn()
+    const originalScroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scroll })
+    try {
+      const entries = wrapper.findAll('nav[aria-label="提问大纲"] li button')
+      expect(entries.map(entry => entry.attributes('title'))).toEqual(['体检 default 命名空间', '检查 Pod 日志'])
+      await wrapper.get('#turn-t2 .turn-toggle').trigger('click')
+      expect(wrapper.find('#question-t2').exists()).toBe(false)
+      await entries[1].trigger('click')
+      await flushPromises()
+      expect(wrapper.get('#question-t2').classes()).toContain('question-highlight')
+      expect(scroll).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' })
+      await vi.advanceTimersByTimeAsync(1600)
+      expect(wrapper.get('#question-t2').classes()).not.toContain('question-highlight')
+    } finally {
+      wrapper.unmount()
+      if (originalScroll) Object.defineProperty(Element.prototype, 'scrollIntoView', originalScroll)
+      else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+      vi.useRealTimers()
+    }
   })
   it('同一消息的多段正文只渲染一块报告，最终回答单独标识', () => {
     const wrapper = mountTimeline({

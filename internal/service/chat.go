@@ -508,18 +508,64 @@ func (s *chatService) ChatModels(ctx context.Context) ([]config.ChatModel, error
 	if err != nil {
 		return nil, err
 	}
-	models := []config.ChatModel{{ID: cfg.LLM.Model, ContextWindow: cfg.Agent.ContextWindow}}
-	for _, entry := range cfg.LLM.ChatModels {
-		if entry.ContextWindow <= cfg.LLM.MaxTokens {
-			continue
-		}
-		if entry.ID == cfg.LLM.Model {
-			models[0] = entry
-		} else {
-			models = append(models, entry)
+	return configuredChatModels(cfg), nil
+}
+
+func configuredChatModels(cfg *config.Config) []config.ChatModel {
+	models := make([]config.ChatModel, 0, 1+len(cfg.LLM.ChatModels)+len(cfg.LLM.ModelProfiles))
+	if !cfg.LLM.ProfilesOnly {
+		models = append(models, config.ChatModel{ID: cfg.LLM.Model, ContextWindow: cfg.Agent.ContextWindow})
+		for _, entry := range cfg.LLM.ChatModels {
+			if entry.ContextWindow <= cfg.LLM.MaxTokens {
+				continue
+			}
+			if entry.ID == cfg.LLM.Model {
+				models[0] = entry
+			} else {
+				models = append(models, entry)
+			}
 		}
 	}
-	return models, nil
+	for _, profile := range cfg.LLM.ModelProfiles {
+		models = append(models, config.ChatModel{ID: profile.ID, Name: profile.Name, ContextWindow: profile.ContextWindow})
+	}
+	return models
+}
+
+func resolveChatModel(cfg *config.Config, selected string) (*config.Config, string, error) {
+	if selected == "" {
+		models := configuredChatModels(cfg)
+		if len(models) == 0 {
+			return nil, "", ErrChatModelUnavailable
+		}
+		selected = models[0].ID
+	}
+	for _, profile := range cfg.LLM.ModelProfiles {
+		if profile.ID == selected {
+			resolved := *cfg
+			resolved.LLM.Model = profile.Model
+			resolved.LLM.Endpoint = profile.Endpoint
+			resolved.LLM.APIKey = profile.APIKey
+			resolved.LLM.APIFormat = profile.APIFormat
+			resolved.LLM.MaxTokens = profile.MaxTokens
+			resolved.Agent.ContextWindow = profile.ContextWindow
+			return &resolved, selected, nil
+		}
+	}
+	if !cfg.LLM.ProfilesOnly {
+		for _, entry := range cfg.LLM.ChatModels {
+			if entry.ID == selected && entry.ContextWindow > cfg.LLM.MaxTokens {
+				resolved := *cfg
+				resolved.LLM.Model = entry.ID
+				resolved.Agent.ContextWindow = entry.ContextWindow
+				return &resolved, selected, nil
+			}
+		}
+		if selected == cfg.LLM.Model {
+			return cfg, selected, nil
+		}
+	}
+	return nil, "", ErrChatModelUnavailable
 }
 
 func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan string) (<-chan ChatEvent, error) {
@@ -543,23 +589,9 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	if err != nil {
 		return nil, err
 	}
-	selected := req.ModelID
-	if selected == "" {
-		selected = cfg.LLM.Model
-	}
-	found := selected == cfg.LLM.Model
-	for _, entry := range cfg.LLM.ChatModels {
-		if entry.ID == selected && entry.ContextWindow > cfg.LLM.MaxTokens {
-			resolved := *cfg
-			resolved.LLM.Model = entry.ID
-			resolved.Agent.ContextWindow = entry.ContextWindow
-			cfg = &resolved
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, ErrChatModelUnavailable
+	cfg, selected, err := resolveChatModel(cfg, req.ModelID)
+	if err != nil {
+		return nil, err
 	}
 	makeReader, makeWriter := s.newReader, s.newWriteRunner
 	if req.KubeconfigPath != "" {
@@ -736,7 +768,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		HistoryTurns:   cfg.Agent.HistoryTurns,
 		ContextWindow:  cfg.Agent.ContextWindow,
 		OutputTokens:   cfg.LLM.MaxTokens,
-		ModelID:        cfg.LLM.Model,
+		ModelID:        selected,
 		ResultStore:    s.resultStore,
 		DisabledTools:  cfg.Agent.DisabledTools,
 		TurnUserID:     req.UserID,

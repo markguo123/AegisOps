@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/auth"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/cluster"
+	"github.com/k8s-ai/k8s-ai/internal/config"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/settings"
@@ -29,7 +32,7 @@ type platformServer struct {
 }
 
 // newPlatformServer 装配带认证 + 配置中心 + 审计的服务（与 cli server 一致）。
-func newPlatformServer(t *testing.T) *platformServer {
+func newPlatformServer(t *testing.T, modelBase ...*config.Config) *platformServer {
 	t.Helper()
 	st, err := store.OpenSQLite("file:server-settings-" + time.Now().Format("150405.000000000") + "?mode=memory&cache=shared")
 	if err != nil {
@@ -58,8 +61,14 @@ func newPlatformServer(t *testing.T) *platformServer {
 	if err != nil {
 		t.Fatalf("cipher: %v", err)
 	}
-	handler := NewWithPlatform(&fakeScan{}, authSvc, settings.New(st, settings.WithCipher(cipher)), service.NewAuditService(st)).WithSkills(skillPlat).WithAuthz(authzSvc).Handler()
-	ts := httptest.NewServer(handler)
+	settingsSvc := settings.New(st, settings.WithCipher(cipher))
+	server := NewWithPlatform(&fakeScan{}, authSvc, settingsSvc, service.NewAuditService(st)).WithSkills(skillPlat).WithAuthz(authzSvc)
+	if len(modelBase) > 0 {
+		server.WithModelProfiles(func(ctx context.Context) (*config.Config, error) {
+			return settingsSvc.LoadRuntimeConfig(ctx, modelBase[0])
+		})
+	}
+	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
 	return &platformServer{ts: ts, store: st, authSvc: authSvc, skillPlat: skillPlat, authzSvc: authzSvc}
 }
@@ -152,6 +161,58 @@ func TestSettingsRequiresAuth(t *testing.T) {
 	resp, raw := p.do(t, http.MethodGet, "/api/v1/settings/model", "", "")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("未登录应 401, got %d: %s", resp.StatusCode, raw)
+	}
+}
+
+func TestModelProfilesCRUDAndCredentialIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("platform:\n  store:\n    driver: sqlite\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(config.LoadOptions{ConfigFile: path, NoEnv: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := newPlatformServer(t, cfg)
+	admin := platform.tokenAs(t, "admin", "admin-pw")
+	member := createUserWithRole(t, platform, "profile-member", auth.RoleUser)
+	const endpoint = "/api/v1/settings/model/profiles"
+	const secret = "independent-test-credential"
+	const payload = `{"name":"私有模型","model":"model-a","endpoint":"https://models.example/v1","apiFormat":"openai-chat-completions","contextWindow":131072,"maxTokens":4096`
+	for _, action := range []string{http.MethodGet, http.MethodPost} {
+		if response, raw := platform.do(t, action, endpoint, member, ""); response.StatusCode != http.StatusForbidden {
+			t.Fatalf("model profile permissions %s: %d %s", action, response.StatusCode, raw)
+		}
+	}
+	if response, raw := platform.do(t, http.MethodPost, endpoint, admin, payload+`,"apiKey":"`+secret+`"}`); response.StatusCode != http.StatusOK {
+		t.Fatalf("create profile: %d %s", response.StatusCode, raw)
+	}
+	response, raw := platform.do(t, http.MethodGet, endpoint, admin, "")
+	var catalog struct {
+		Data []struct {
+			ID            string `json:"id"`
+			HasKey        bool   `json:"hasKey"`
+			ContextWindow int    `json:"contextWindow"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &catalog); err != nil || response.StatusCode != http.StatusOK ||
+		len(catalog.Data) != 1 || !catalog.Data[0].HasKey || catalog.Data[0].ContextWindow != 131072 || strings.Contains(raw, secret) || strings.Contains(raw, `"apiKey"`) {
+		t.Fatalf("list profile: %d %s, %v", response.StatusCode, raw, err)
+	}
+	stored, err := platform.store.Settings().Get(context.Background(), settings.GroupModel, "model_profiles")
+	if err != nil || stored.Value == "" || strings.Contains(stored.Value, secret) {
+		t.Fatalf("profile credential was not encrypted: %v", err)
+	}
+	resource := endpoint + "/" + catalog.Data[0].ID
+	changedAddress := strings.Replace(payload, "models.example", "other.example", 1)
+	if response, raw := platform.do(t, http.MethodPatch, resource, admin, changedAddress+"}"); response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("must not transfer an omitted credential to a new endpoint: %d %s", response.StatusCode, raw)
+	}
+	if response, raw := platform.do(t, http.MethodDelete, resource, admin, ""); response.StatusCode != http.StatusOK {
+		t.Fatalf("delete profile: %d %s", response.StatusCode, raw)
+	}
+	if response, raw := platform.do(t, http.MethodGet, endpoint, admin, ""); response.StatusCode != http.StatusOK || !strings.Contains(raw, `"data":[]`) {
+		t.Fatalf("profile not removed: %d %s", response.StatusCode, raw)
 	}
 }
 

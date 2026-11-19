@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { Check, InfoFilled, Key, Lock, Promotion, Refresh, Setting } from '@element-plus/icons-vue'
 
 import TechEmptyState from '@/components/TechEmptyState.vue'
+import ModelProfiles from './ModelProfiles.vue'
 import {
   checkModel,
   describeSettingsError,
@@ -465,6 +466,7 @@ onMounted(loadGroup)
 
             <div v-if="loading" class="muted center-hint">加载中…</div>
             <div v-else class="field-grid">
+              <ModelProfiles v-if="activeGroup === 'model' && view?.items.some(item => item.key === 'model_profiles')" :can-write="canWrite" />
               <section v-if="activeGroup === 'model' && canWrite" class="model-checks">
                 <div class="row">
                   <el-button :loading="modelCheckBusy === 'discover'" :disabled="!!modelCheckBusy || modelConnectionDirty"
@@ -495,7 +497,7 @@ onMounted(loadGroup)
                 title="敏感配置暂不可保存"
                 description="服务端尚未配置 AEGISOPS_ENC_KEY。请联系平台管理员完成加密密钥配置后再保存 API Key、kubeconfig 或 MCP 配置。"
               />
-              <div v-for="item in view?.items ?? []" :key="item.key" class="field">
+              <div v-for="item in view?.items.filter(entry => entry.key !== 'model_profiles') ?? []" :key="item.key" class="field">
                 <div class="field-meta">
                   <div class="row field-label">
                     <span class="mono strong">{{ item.key === 'api_format' ? 'API 格式' : item.key }}</span>

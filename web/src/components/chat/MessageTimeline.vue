@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { List } from '@element-plus/icons-vue'
 
 import type {
   ChatInteraction,
@@ -332,6 +333,40 @@ const uiTurns = computed<TurnUiData[]>(() => {
 const FOLLOW_THRESHOLD_PX = 24
 const following = ref(true)
 const unseenContent = ref(false)
+const questions = computed(() => uiTurns.value.filter(turn => turn.input.trim()))
+const highlightedQuestion = ref('')
+const outlineOpen = ref(false)
+let highlightTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearQuestionHighlight() {
+  clearTimeout(highlightTimer)
+  highlightedQuestion.value = ''
+}
+
+async function jumpToQuestion(key: string) {
+  following.value = false
+  unseenContent.value = false
+  outlineOpen.value = false
+  clearQuestionHighlight()
+  highlightedQuestion.value = key
+  await nextTick()
+  if (highlightedQuestion.value !== key) return
+  const target = Array.from(rollRef.value?.querySelectorAll('.turn-question') ?? [])
+    .find(question => question.id === `question-${key}`)
+  if (target) {
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    target.scrollIntoView?.({ behavior: reducedMotion ? 'instant' : 'smooth', block: 'center' })
+  }
+  highlightTimer = setTimeout(clearQuestionHighlight, 1600)
+}
+
+watch(() => props.turns[0]?.session_id, () => {
+  clearQuestionHighlight()
+  outlineOpen.value = false
+  following.value = true
+  unseenContent.value = false
+})
+onUnmounted(clearQuestionHighlight)
 
 function distanceToBottom(el: HTMLElement): number {
   return el.scrollHeight - el.scrollTop - el.clientHeight
@@ -375,11 +410,40 @@ defineExpose({ uiTurns })
 </script>
 
 <template>
+  <div class="timeline-layout">
+    <aside v-if="questions.length" class="question-outline" :class="{ 'outline-open': outlineOpen }">
+      <button
+        class="outline-toggle"
+        type="button"
+        :aria-expanded="outlineOpen"
+        @click="outlineOpen = !outlineOpen"
+      >
+        <List aria-hidden="true" /> 提问大纲
+      </button>
+      <nav class="outline-panel" aria-label="提问大纲">
+        <div class="outline-title">提问大纲 <span>{{ questions.length }}</span></div>
+        <ol>
+          <li v-for="(question, index) in questions" :key="question.key">
+            <button
+              type="button"
+              :title="question.input"
+              :aria-current="highlightedQuestion === question.key ? 'location' : undefined"
+              @click="jumpToQuestion(question.key)"
+            >
+              <span class="outline-index" aria-hidden="true">{{ index + 1 }}</span>
+              <span class="outline-text">{{ question.input }}</span>
+            </button>
+          </li>
+        </ol>
+      </nav>
+    </aside>
   <div ref="rollRef" class="timeline" @scroll.passive="onScroll">
     <template v-if="uiTurns.length">
-      <div v-for="turn in uiTurns" :key="turn.key" class="turn-wrap rise-in">
+      <div v-for="(turn, index) in uiTurns" :key="turn.key" class="turn-wrap rise-in">
         <TurnBlock
           :turn="turn"
+          :latest="index === uiTurns.length - 1"
+          :question-highlighted="highlightedQuestion === turn.key"
           :can-decide="canDecide"
           :cluster-name="clusterName"
           :can-branch="canBranch"
@@ -395,15 +459,135 @@ defineExpose({ uiTurns })
       {{ unseenContent ? '有新内容，回到底部' : '回到底部' }}
     </button>
   </div>
+  </div>
 </template>
 
 <style scoped>
+.timeline-layout {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.question-outline {
+  display: flex;
+  flex: 0 0 172px;
+  min-height: 0;
+  padding: 16px 0 16px 12px;
+}
+
+.outline-panel {
+  align-self: flex-start;
+  max-height: 100%;
+  width: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.outline-title {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 4px 8px;
+  font-weight: 600;
+}
+
+.outline-panel ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.outline-panel button,
+.outline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.outline-panel button:hover,
+.outline-panel button:focus-visible,
+.outline-panel button[aria-current] {
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+}
+
+.outline-index {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.outline-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-toggle {
+  display: none;
+}
+
+@media (max-width: 1050px) {
+  .timeline-layout {
+    flex-direction: column;
+  }
+
+  .question-outline {
+    flex: none;
+    padding: 4px 16px 0;
+    z-index: 2;
+  }
+
+  .outline-toggle {
+    display: inline-flex;
+    width: auto;
+    color: var(--app-muted);
+    font-size: 12px;
+  }
+
+  .outline-toggle svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .outline-panel {
+    display: none;
+    position: absolute;
+    top: 34px;
+    left: 16px;
+    width: min(300px, calc(100% - 32px));
+    max-height: min(280px, 60%);
+    box-shadow: var(--app-shadow);
+  }
+
+  .outline-open .outline-panel {
+    display: block;
+  }
+}
+
 .timeline {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  min-width: 0;
   padding: 16px;
   overflow-y: auto;
   position: relative;

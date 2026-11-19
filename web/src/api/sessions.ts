@@ -131,7 +131,7 @@ export async function pinSession(
  * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。
  * `idempotencyKey` 用于网络重试时复用同一个 turn，不创建第二轮。 */
 export function listChatModels() {
-  return sessionFetch<Array<{ id: string; context_window: number }>>('/api/v1/sessions/models')
+  return sessionFetch<Array<{ id: string; name?: string; context_window: number }>>('/api/v1/sessions/models')
 }
 
 export interface BranchOrigin {
