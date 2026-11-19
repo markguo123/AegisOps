@@ -34,11 +34,9 @@ type AuditQuery struct {
 // 只认明确的身份字段，不按"时间相邻"猜关联：相邻的两条记录可能毫无关系，
 // 拿它们拼成一条时间线等于编造因果。
 type AuditRelation struct {
-	RequestID  string
 	SessionID  string
-	TurnID     string
+	StepID     string
 	ApprovalID string
-	GrantID    string
 }
 
 // auditDefaultLimit / auditMaxLimit 与方案 28 §2 一致：默认 50 条、上限 100 条。
@@ -110,9 +108,7 @@ func (st *auditStore) ListFiltered(ctx context.Context, q AuditQuery) ([]*AuditE
 
 // Timeline 返回与当前事件同一条操作链的有界事件（按时间正序，便于阅读）。
 //
-// 关联优先级：审批/授权/请求 ID / 回合 ID 是"同一次操作"的强关联；只有在
-// 这些键全部缺失时才退到会话级，并把条数交给 limit 收敛——否则一个长会话的
-// 全部事件都会被当成这条记录的因果链。
+// 工具步骤优先；历史审批记录可按审批 ID 查看，不将会话或回合当成操作。
 func (st *auditStore) Timeline(ctx context.Context, rel AuditRelation, limit int) ([]*AuditEvent, error) {
 	if limit <= 0 {
 		limit = auditDefaultLimit
@@ -129,19 +125,18 @@ func (st *auditStore) Timeline(ctx context.Context, rel AuditRelation, limit int
 		clauses = append(clauses, column+" = ?")
 		args = append(args, strings.TrimSpace(value))
 	}
-	add("approval_id", rel.ApprovalID)
-	add("grant_id", rel.GrantID)
-	add("request_id", rel.RequestID)
-	add("turn_id", rel.TurnID)
-	if len(clauses) == 0 {
+	if rel.StepID != "" && rel.SessionID != "" {
+		add("step_id", rel.StepID)
 		add("session_id", rel.SessionID)
+	} else {
+		add("approval_id", rel.ApprovalID)
 	}
 	if len(clauses) == 0 {
 		return nil, nil
 	}
 	args = append(args, limit)
 	rows, err := st.s.db.QueryContext(ctx, `SELECT `+auditSelectColumns+`
-			FROM audit_events WHERE (`+strings.Join(clauses, ` OR `)+`)
+			FROM audit_events WHERE (`+strings.Join(clauses, ` AND `)+`)
 			ORDER BY timestamp ASC, id ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list audit timeline: %w", err)

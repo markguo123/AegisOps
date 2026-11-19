@@ -51,6 +51,8 @@ const STATUS_OPTIONS = [
   { value: 'success', label: '成功' },
   { value: 'error', label: '失败' },
   { value: 'pending', label: '待处理' },
+  { value: 'unknown', label: '未知' },
+  { value: 'not_executed', label: '未执行' },
 ]
 
 const activeFilterCount = computed(() => {
@@ -334,6 +336,14 @@ onMounted(() => {
             </dd>
           </template>
         </dl>
+
+        <div v-if="detail.event.eventType === 'RESOURCE_MUTATION'" class="block">
+          <div class="block-title">验证</div>
+          <span v-if="!detail.timeline.some(row => row.action.startsWith('verification.'))" class="muted">
+            无验证记录
+          </span>
+          <span v-else>见关联时间线中的验证事件</span>
+        </div>
 
         <div v-if="detail.event.parameterSummary" class="block">
           <div class="block-title">参数摘要</div>

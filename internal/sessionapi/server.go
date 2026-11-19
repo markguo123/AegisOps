@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
@@ -136,9 +137,10 @@ func (b *Broadcaster) broadcast(frame []byte) {
 
 // Server 是 Web chat HTTP 服务。
 type confirmationTicket struct {
-	id      string
-	expires time.Time
-	reply   chan string
+	operation audit.Operation
+	id        string
+	expires   time.Time
+	reply     chan string
 }
 
 type Server struct {
@@ -999,10 +1001,18 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			if s.audit == nil {
 				return "", nil, nil, fmt.Errorf("audit unavailable")
 			}
-			key, ch, done := s.newConfirmation(id, data.InteractionID)
+			operation := audit.OperationFrom(ctx)
+			key, ch, done := s.newConfirmation(id, data.InteractionID, operation)
 			raw, _ := json.Marshal(data)
 			payload, _ := json.Marshal(map[string]any{"planSHA256": fmt.Sprintf("%x", sha256.Sum256(raw)), "sessionVersion": principal.User.SessionVersion, "credentialVersion": bound.CredentialVersion, "expiresAt": time.Now().UTC().Add(5 * time.Minute), "target": data.Target})
-			if e := s.audit(ctx, store.AuditEvent{Action: "approval.request", EventType: store.AuditEventApproval, SessionID: id, UserID: principal.User.ID, ClusterID: sess.Cluster, ApprovalID: key, Payload: string(payload), Operation: data.Operation, Risk: data.Risk, Status: "pending"}); e != nil {
+			event := store.AuditEvent{Action: "approval.request", EventType: store.AuditEventApproval, SessionID: id, TurnID: operation.TurnID, StepID: operation.StepID, UserID: principal.User.ID, ClusterID: sess.Cluster, ApprovalID: key, Payload: string(payload), Operation: data.Operation, Risk: data.Risk, Status: "pending"}
+			if data.Target != nil {
+				event.ResourceKind, event.ResourceName = data.Target.Kind, data.Target.Name
+				if data.Target.Namespace != "" && event.ResourceName != "" {
+					event.ResourceName = data.Target.Namespace + "/" + event.ResourceName
+				}
+			}
+			if e := s.audit(ctx, event); e != nil {
 				done()
 				return "", nil, nil, e
 			}
@@ -1127,11 +1137,13 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	respond, ok := s.pending[id]
+	var operation audit.Operation
 	if s.platform != nil {
 		ticket, exists := s.tickets[id]
 		ok = ok && exists && body.ApprovalID == ticket.id && time.Now().Before(ticket.expires)
 		if ok {
 			respond = ticket.reply
+			operation = ticket.operation
 		}
 	}
 	s.mu.Unlock()
@@ -1139,12 +1151,14 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Errorf("no pending approval for session %s", id))
 		return
 	}
+	var answerEvent store.AuditEvent
 	if s.platform != nil {
 		decision := "confirmed"
 		if body.Choice == "no" {
 			decision = "rejected"
 		}
-		if s.audit == nil || s.audit(r.Context(), store.AuditEvent{Action: "approval.answer", EventType: store.AuditEventApproval, SessionID: id, ClusterID: sess.Cluster, UserID: caller.User.ID, ApprovalID: body.ApprovalID, Decision: decision, Status: "success"}) != nil {
+		answerEvent = store.AuditEvent{Action: "approval.answer.attempt", EventType: store.AuditEventApproval, SessionID: id, TurnID: operation.TurnID, StepID: operation.StepID, ClusterID: sess.Cluster, UserID: caller.User.ID, ApprovalID: body.ApprovalID, Decision: decision, Status: "pending"}
+		if s.audit == nil || s.audit(r.Context(), answerEvent) != nil {
 			writeError(w, 503, fmt.Errorf("audit unavailable"))
 			return
 		}
@@ -1163,6 +1177,14 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	select {
 	case respond <- body.Choice:
+		if s.platform != nil {
+			answerEvent.Action, answerEvent.Status = "approval.answer", "success"
+			auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+			defer cancelAudit()
+			if err := s.audit(auditCtx, answerEvent); err != nil {
+				slog.Warn("approval outcome audit failed", "approval_id", body.ApprovalID, "error", err)
+			}
+		}
 		s.mu.Lock()
 		if ticket, exists := s.tickets[id]; exists && ticket.id == body.ApprovalID {
 			delete(s.tickets, id)
@@ -1177,12 +1199,15 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) newConfirmation(sessionID, interactionID string) (string, <-chan string, func()) {
+func (s *Server) newConfirmation(sessionID, interactionID string, operations ...audit.Operation) (string, <-chan string, func()) {
 	id := interactionID
 	if id == "" {
 		id = rand.Text()
 	}
-	ticket := confirmationTicket{id, time.Now().Add(5 * time.Minute), make(chan string, 1)}
+	ticket := confirmationTicket{id: id, expires: time.Now().Add(5 * time.Minute), reply: make(chan string, 1)}
+	if len(operations) != 0 {
+		ticket.operation = operations[0]
+	}
 	s.mu.Lock()
 	s.tickets[sessionID] = ticket
 	s.mu.Unlock()

@@ -124,21 +124,35 @@ func TestAuditTimelineUsesExplicitRelations(t *testing.T) {
 	}
 	auditFixture(t, st)
 
-	rows, err := st.Audit().Timeline(ctx, AuditRelation{ApprovalID: "a1", RequestID: "r1", TurnID: "t1"}, 10)
+	rows, err := st.Audit().Timeline(ctx, AuditRelation{ApprovalID: "a1"}, 10)
 	if err != nil {
 		t.Fatalf("timeline: %v", err)
 	}
 	if !equalIDs(auditIDs(rows), 2, 3, 4) {
 		t.Fatalf("审批关联时间线应按时间正序为 [2 3 4]，got %v", auditIDs(rows))
 	}
+	for _, event := range []*AuditEvent{
+		{SessionID: "s1", TurnID: "t1", StepID: "step-a", Action: "tool-call.request"},
+		{SessionID: "s1", TurnID: "t1", StepID: "step-b", Action: "tool-call.request"},
+		{SessionID: "s1", TurnID: "t1", StepID: "step-a", Action: "k8s.access"},
+		{SessionID: "s2", TurnID: "t1", StepID: "step-a", Action: "k8s.access"},
+	} {
+		if err := st.Audit().Write(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err = st.Audit().Timeline(ctx, AuditRelation{SessionID: "s1", StepID: "step-a", ApprovalID: "a1"}, 10)
+	if err != nil || !equalIDs(auditIDs(rows), 6, 8) {
+		t.Fatalf("时间线应只关联当前会话的同一工具步骤: ids=%v err=%v", auditIDs(rows), err)
+	}
 
-	// 只有会话键时退回会话级（有界），不会把别的会话事件算进来。
+	// 会话不是单次操作关联键。
 	rows, err = st.Audit().Timeline(ctx, AuditRelation{SessionID: "s2"}, 10)
 	if err != nil {
 		t.Fatalf("session timeline: %v", err)
 	}
-	if !equalIDs(auditIDs(rows), 5) {
-		t.Fatalf("会话时间线应为 [5]，got %v", auditIDs(rows))
+	if len(rows) != 0 {
+		t.Fatalf("会话时间线应为空，got %v", auditIDs(rows))
 	}
 
 	// 无任何关联键：空时间线，而不是返回最近若干条。

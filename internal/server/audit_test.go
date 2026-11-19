@@ -340,8 +340,8 @@ func TestAuditEventDetailTimelineAndRedaction(t *testing.T) {
 	if detail.Event.ID != seed.events[1].ID || detail.Event.EventType != store.AuditEventToolCall {
 		t.Fatalf("详情事件不符: %+v", detail.Event)
 	}
-	if detail.Event.ParameterSummary == "" {
-		t.Fatal("详情应带已脱敏的参数摘要")
+	if detail.Event.ParameterSummary != "" || detail.Event.ResultSummary != "" {
+		t.Fatal("详情不得透传历史自由格式摘要")
 	}
 	if len(detail.Timeline) != 3 {
 		t.Fatalf("审批关联时间线应有 3 条, got %d: %+v", len(detail.Timeline), detail.Timeline)

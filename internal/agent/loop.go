@@ -232,7 +232,8 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 					// 写工具的审批拒绝仍由原有拒绝计数处理。
 					toolExecuted = tool.IsReadOnly(call.Arguments)
 				}
-				tr = a.executeTool(ctx, call, batchApproved[call.ID])
+				toolCtx := audit.WithOperation(ctx, audit.Operation{SessionID: a.Session.ID, TurnID: a.turn.ID, StepID: toolStep.ID})
+				tr = a.executeTool(toolCtx, call, batchApproved[call.ID])
 			}
 			readonly := false
 			if tool, exists := a.Tools.Lookup(call.Name); exists {
@@ -902,6 +903,12 @@ func (a *Agent) batchApprove(ctx context.Context, calls []llm.ToolCall) (approve
 // batchApproved=true 时跳过个体审批（已被批量审批预授权）。
 // 错误以 ToolResult 回传 LLM，不中断 Loop。
 func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApproved bool) tools.ToolResult {
+	executionStarted := false
+	defer func() {
+		if !executionStarted {
+			a.audit(ctx, audit.ActionToolCallResponse, map[string]any{"name": call.Name, "status": "not_executed"})
+		}
+	}()
 	t, ok := a.Tools.Lookup(call.Name)
 	if !ok {
 		return tools.ResultError("unknown tool: " + call.Name)
@@ -1157,14 +1164,17 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		}
 	}
 	a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")
+	executionStarted = true
 	tr, err := t.Execute(execCtx, call.Arguments)
 	if err != nil {
 		tr = tools.ResultError(err.Error())
 	}
+	outcomeUnknown := false
 	if !tools.Present(tr).Ok && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
 		code := tools.Present(tr).ErrorCode
 		if code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable || code == tools.ErrorToolFailed {
 			a.unknownWrite = true
+			outcomeUnknown = true
 		}
 	}
 	a.recordSensitiveValues(tr.SensitiveValues)
@@ -1173,6 +1183,9 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		// readonly/risk 让四期审计能把非只读工具响应归类为 RESOURCE_MUTATION（P1.11）。
 		"name": call.Name, "truncated": tr.Truncated, "error": hasErr,
 		"readonly": t.IsReadOnly(call.Arguments), "risk": string(t.Risk(call.Arguments)),
+	}
+	if outcomeUnknown {
+		responseAudit["status"] = "unknown"
 	}
 	if result, ok := tr.Data.(executor.Result); ok && result.ExecutionLocation == "pod" {
 		responseAudit["execution_location"] = result.ExecutionLocation

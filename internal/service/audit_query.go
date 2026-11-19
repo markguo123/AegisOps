@@ -202,11 +202,9 @@ func (s *AuditQueryService) Get(ctx context.Context, id int64) (*AuditDetailResu
 		return nil, err
 	}
 	rows, err := s.store.Audit().Timeline(ctx, store.AuditRelation{
-		RequestID:  e.RequestID,
 		SessionID:  e.SessionID,
-		TurnID:     e.TurnID,
+		StepID:     e.StepID,
 		ApprovalID: e.ApprovalID,
-		GrantID:    e.GrantID,
 	}, auditTimelineLimit)
 	if err != nil {
 		return nil, err
@@ -232,29 +230,27 @@ func auditEventView(e *store.AuditEvent, names map[string]string, clusters map[s
 		eventType = store.EventTypeForAction(e.Action)
 	}
 	return AuditEventView{
-		ID:               e.ID,
-		Timestamp:        e.Timestamp,
-		RequestID:        e.RequestID,
-		SessionID:        e.SessionID,
-		TurnID:           e.TurnID,
-		StepID:           e.StepID,
-		UserID:           e.UserID,
-		UserName:         names[e.UserID],
-		ClusterID:        e.ClusterID,
-		ClusterName:      clusters[e.ClusterID],
-		EventType:        eventType,
-		Action:           e.Action,
-		Operation:        e.Operation,
-		ResourceKind:     e.ResourceKind,
-		ResourceName:     e.ResourceName,
-		Risk:             e.Risk,
-		Decision:         e.Decision,
-		ApprovalID:       e.ApprovalID,
-		GrantID:          e.GrantID,
-		MatchReason:      e.MatchReason,
-		ParameterSummary: e.ParameterSummary,
-		ResultSummary:    e.ResultSummary,
-		Status:           e.Status,
+		ID:           e.ID,
+		Timestamp:    e.Timestamp,
+		RequestID:    e.RequestID,
+		SessionID:    e.SessionID,
+		TurnID:       e.TurnID,
+		StepID:       e.StepID,
+		UserID:       e.UserID,
+		UserName:     names[e.UserID],
+		ClusterID:    e.ClusterID,
+		ClusterName:  clusters[e.ClusterID],
+		EventType:    eventType,
+		Action:       e.Action,
+		Operation:    e.Operation,
+		ResourceKind: e.ResourceKind,
+		ResourceName: e.ResourceName,
+		Risk:         e.Risk,
+		Decision:     e.Decision,
+		ApprovalID:   e.ApprovalID,
+		GrantID:      e.GrantID,
+		MatchReason:  e.MatchReason,
+		Status:       e.Status,
 	}
 }
 

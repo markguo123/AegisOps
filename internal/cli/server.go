@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/auth"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/cluster"
@@ -130,7 +131,8 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				if record.Allowed {
 					decision = "allowed"
 				}
-				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
+				operation := audit.OperationFrom(ctx)
+				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, SessionID: operation.SessionID, TurnID: operation.TurnID, StepID: operation.StepID, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
 			}
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
 				WithPlatformAccess(platformAccess).

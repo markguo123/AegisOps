@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"k8s.io/client-go/rest"
 )
 
@@ -137,7 +138,7 @@ func (g *inProcess) Open(ctx context.Context, request OpenRequest) (Lease, error
 		defer callCancel()
 		stop := context.AfterFunc(runCtx, callCancel)
 		defer stop()
-		r = r.WithContext(callCtx)
+		r = r.WithContext(audit.WithOperation(callCtx, audit.OperationFrom(ctx)))
 		if r.Method == http.MethodConnect || r.Header.Get("Upgrade") != "" || r.URL.IsAbs() || strings.Contains(r.URL.Path, "//") || strings.Contains(r.URL.Path, "..") {
 			proxyError(w, 403, "POLICY_DENIED: unsupported API transport")
 			return

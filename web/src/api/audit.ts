@@ -95,6 +95,8 @@ export function auditStatusLabel(status?: string): string {
       return '已拒绝'
     case 'unknown':
       return '未知'
+    case 'not_executed':
+      return '未执行'
     default:
       return status ? status : '未记录'
   }

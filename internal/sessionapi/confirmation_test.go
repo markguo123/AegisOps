@@ -83,3 +83,31 @@ func TestPlatformConfirmationCannotPreapproveOrReplay(t *testing.T) {
 	s.tickets["s"] = ticket
 	submit(next, 409)
 }
+
+type conflictingApprovalChat struct{ *fakeChat }
+
+func (conflictingApprovalChat) CommitApproval(context.Context, string, string, string, uint64) error {
+	return store.ErrChatHeadConflict
+}
+
+func TestApprovalCommitConflictDoesNotAuditSuccess(t *testing.T) {
+	chat := newFakeChat()
+	chat.sessions["s"] = &session.Session{ID: "s", UserID: "u-owner"}
+	server := New(conflictingApprovalChat{chat}, "model").WithPlatformAccess(&service.PlatformAccess{})
+	server.pending["s"] = make(chan string, 1)
+	id, reply, done := server.newConfirmation("s", "")
+	defer done()
+	var events []store.AuditEvent
+	server.WithAudit(func(_ context.Context, event store.AuditEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	handler := server.AuthenticatedHandler(ownershipResolver(map[string]string{"token": "owner"}, nil))
+	request := httptest.NewRequest("POST", "/api/v1/sessions/s/approve", strings.NewReader(`{"choice":"yes","approvalId":"`+id+`"}`))
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 409 || len(events) != 1 || events[0].Action != "approval.answer.attempt" || events[0].Status != "pending" || len(reply) != 0 {
+		t.Fatalf("conflicting approval must only audit an attempt: status=%d events=%+v", response.Code, events)
+	}
+}
