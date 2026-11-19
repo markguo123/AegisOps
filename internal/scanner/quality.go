@@ -62,18 +62,6 @@ var operationKind = func() map[string]string {
 	return m
 }()
 
-// alwaysPlannedKinds 是任何档位都会调度的采集项（events/logs 受 opts 开关控制）。
-var alwaysPlannedKinds = func() []string {
-	out := make([]string, 0, len(collectionKindGroups))
-	for _, g := range collectionKindGroups {
-		if g.kind == "events" || g.kind == "logs" {
-			continue
-		}
-		out = append(out, g.kind)
-	}
-	return out
-}()
-
 // plannedCalls 是每个采集项一次体检应当发生的 API 调用次数：Phase1 每类资源一次
 // list（workloads / storage 这类合并采集项按子类型各一次），events 按命名空间数、
 // logs 按目标 Pod 数单独计。planned 只有按「调用次数」计量，failed/planned 才是
@@ -93,6 +81,19 @@ type kindAccount struct {
 	failed  int
 	status  string // ok | partial | failed
 	detail  string
+}
+
+func collectionInScope(operation string, opts model.ScanOptions) bool {
+	if opts.Namespace == "" {
+		return true
+	}
+	switch operation {
+	case "list_namespaces", "list_nodes", "list_pvs", "list_storage_classes",
+		"list_volume_attachments", "list_cluster_roles", "list_cluster_role_bindings":
+		return false
+	default:
+		return true
+	}
 }
 
 // CollectionQuality 汇总本次体检的采集质量。
@@ -116,8 +117,15 @@ func CollectionQuality(snap *model.ClusterSnapshot, opts model.ScanOptions, logT
 		accts[kind] = a
 		return a
 	}
-	for _, k := range alwaysPlannedKinds {
-		ensure(k).planned += plannedCalls[k]
+	for _, group := range collectionKindGroups {
+		if group.kind == "events" || group.kind == "logs" {
+			continue
+		}
+		for _, operation := range group.operations {
+			if collectionInScope(operation, opts) {
+				ensure(group.kind).planned++
+			}
+		}
 	}
 
 	// events 按计划采集的命名空间数计（与 collector 的 eventNamespaces 口径一致）。
@@ -261,7 +269,7 @@ func CollectionQuality(snap *model.ClusterSnapshot, opts model.ScanOptions, logT
 		q.Integrity = model.IntegrityComplete // 主动跳过不等于采失败，报告用 SkippedKinds 说明
 	}
 	if q.Integrity == model.IntegrityInsufficient {
-		q.MissingData = append([]string{"关键数据采集不完整：本报告不得解读为「集群正常」"}, q.MissingData...)
+		q.MissingData = append([]string{"关键数据采集不完整：本报告不得解读为「体检目标正常」"}, q.MissingData...)
 	}
 	return q
 }

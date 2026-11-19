@@ -113,7 +113,7 @@ func (s *scanService) Run(ctx context.Context, opts model.ScanOptions) (*model.S
 	phaseDone(stageConnect, serverVersionLabel(serverVersion), true, connStart)
 
 	// Phase1：全量轻量 list（无 N+1）。
-	p1Start := phaseStart(stageCollect, "资源采集：集群资源全量 list（无 N+1）")
+	p1Start := phaseStart(stageCollect, "资源采集：按体检范围读取资源")
 	collector := scanner.New(client)
 	snap, err := collector.Phase1(ctx, opts)
 	if err != nil {
@@ -422,7 +422,13 @@ func summaryFromSnapshot(snap *model.ClusterSnapshot, opts model.ScanOptions) mo
 		summary.Components = 0
 	}
 	if opts.PodTarget != "" {
-		summary.Pods = 1
+		summary.Pods = 0
+		for _, pod := range snap.Pods {
+			if pod.Ref.Namespace == opts.Namespace && pod.Ref.Name == opts.PodTarget {
+				summary.Pods = 1
+				break
+			}
+		}
 	}
 	return summary
 }

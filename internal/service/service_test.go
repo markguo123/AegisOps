@@ -144,9 +144,13 @@ func TestSummaryFromSnapshotPodTargetCountsOnlyTargetPod(t *testing.T) {
 		Pods:       make([]model.PodInfo, 7),
 		Namespaces: make([]model.NamespaceInfo, 2),
 	}
+	snap.Pods[0].Ref = model.ResourceRef{Kind: "Pod", Namespace: "team-a", Name: "web-0"}
 	got := summaryFromSnapshot(snap, model.ScanOptions{Namespace: "team-a", PodTarget: "web-0"})
 	if got.Namespaces != 1 || got.Pods != 1 {
 		t.Fatalf("单 Pod 报告的汇总必须是 1 个命名空间 / 1 个 Pod：%+v", got)
+	}
+	if got := summaryFromSnapshot(snap, model.ScanOptions{Namespace: "team-a", PodTarget: "missing"}); got.Pods != 0 {
+		t.Fatalf("missing Pod counted: %+v", got)
 	}
 }
 

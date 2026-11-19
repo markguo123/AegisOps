@@ -153,6 +153,14 @@ func ProfileResource(group, res, action string) (bool, bool) {
 	if group != "" {
 		key = group + "/" + res
 	}
+	if action == ActionRead {
+		switch key {
+		case "networking.k8s.io/networkpolicies", "rbac.authorization.k8s.io/roles", "rbac.authorization.k8s.io/rolebindings":
+			return false, true
+		case "storage.k8s.io/volumeattachments", "rbac.authorization.k8s.io/clusterroles", "rbac.authorization.k8s.io/clusterrolebindings":
+			return true, true
+		}
+	}
 	cluster := clusterResources[key]
 	if !cluster && !namespaceResources[key] {
 		return false, false
