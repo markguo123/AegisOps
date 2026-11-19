@@ -29,6 +29,8 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 	a.SetState(AgentStateRunning)
 	defer func() { a.SetState(AgentStateDone) }()
 	a.clearSensitiveValues()
+	a.flowContextBudget = nil
+	sensitiveContext := false
 	a.unknownWrite = false
 	a.decisionUnresolved = false
 	defer a.clearSensitiveValues()
@@ -110,6 +112,13 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			return "", usage, budgetErr
 		}
 		msgs, req.Messages = prepared, prepared
+		budget := &sse.ContextBudget{ModelID: a.modelID, Unavailable: sensitiveContext || a.hasSensitiveValues()}
+		if !budget.Unavailable {
+			budget.Window = a.ContextWindow
+			budget.OutputReserve = req.MaxTokens
+			budget.InputEstimate = EstimateRequestTokens(req.Messages, req.Tools)
+		}
+		a.flowContextBudget = budget
 		a.audit(ctx, audit.ActionLLMRequest, map[string]any{"mode": mode, "messages": len(msgs), "tools": len(req.Tools)})
 		// 每次模型调用有自己的消息与 invocation_id；正文先建立 part 再接收增量。
 		a.beginFlowMessage(ctx)
@@ -305,6 +314,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				failedToolCalls[failureKey]++
 			}
 			text := a.resultForModel(ctx, call, tr)
+			sensitiveContext = sensitiveContext || tr.ModelOnly != nil
 			if feedback != "" {
 				text += "\nTool failure guidance: " + feedback
 			}

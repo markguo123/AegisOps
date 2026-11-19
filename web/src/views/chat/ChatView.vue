@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatDotRound, RefreshRight } from '@element-plus/icons-vue'
 
 import type { SessionSummary } from '@/api/sessions'
+import { branchSession, getBranchOrigin, listChatModels, type BranchOrigin } from '@/api/sessions'
 import {
   answerInteraction,
   approveRun,
@@ -38,7 +39,63 @@ const stream = useChatStream()
 
 const input = ref('')
 const sending = ref(false)
+const modelOptions = ref<string[]>([])
+const selectedModel = ref('')
+const nextModel = computed(() => selectedModel.value || modelOptions.value[0] || '')
+async function refreshModels() {
+  try {
+    modelOptions.value = (await listChatModels()).map(model => model.id)
+    if (!modelOptions.value.includes(selectedModel.value)) selectedModel.value = ''
+  } catch {
+    modelOptions.value = []
+  }
+}
+const latestTurn = computed(() => {
+  const turns = stream.turns.value
+  const turn = turns[turns.length - 1]
+  return turn?.session_id === activeId.value ? turn : undefined
+})
+const latestTaskCount = computed(() => stream.items.value.filter(item =>
+  item.type === 'tool' && item.tool.turn_id === latestTurn.value?.turn_id,
+).length)
+const runStatus = computed(() => {
+  const turn = latestTurn.value
+  if (turn?.status === 'waiting') {
+    if (turn.wait_reason === 'question') return '等待你补充信息'
+    if (turn.wait_reason === 'secret') return '等待你提供所需的值'
+    return '等待你确认'
+  }
+  if (turn?.status === 'running') return '处理中'
+  if (turn?.status === 'pending') return '已接收'
+  if (turn?.status === 'failed') return '上一轮未完成'
+  if (turn?.status === 'canceled') return '上一轮已停止'
+  return ''
+})
+function jumpToTasks() {
+  const id = latestTurn.value?.turn_id
+  if (id) document.getElementById(`turn-${id}`)?.scrollIntoView({ block: 'start' })
+}
+const contextBudget = computed(() => {
+  const sample = latestTurn.value?.context_budget
+  if (!stream.running.value && nextModel.value && sample?.model_id && sample.model_id !== nextModel.value) return undefined
+  return sample
+})
+const contextPercent = computed(() => {
+  const sample = contextBudget.value
+  if (!sample || sample.unavailable || sample.window <= sample.output_reserve) return null
+  return (100 * sample.input_estimate) / (sample.window - sample.output_reserve)
+})
+const contextDetails = computed(() => {
+  const sample = contextBudget.value
+  const percent = contextPercent.value
+  if (!sample || percent === null) return '暂无可展示的请求预算'
+  const inputBudget = sample.window - sample.output_reserve
+  return `总窗口 ${sample.window.toLocaleString()} · 输出预留 ${sample.output_reserve.toLocaleString()} · 可用输入 ${inputBudget.toLocaleString()} · 估算已用 ${sample.input_estimate.toLocaleString()} · 约剩余 ${Math.max(0, Math.round(100 - percent))}%`
+})
 const stoppingSession = ref('')
+const branchOrigin = ref<BranchOrigin | null>(null)
+const branching = ref(false)
+let pendingBranch: { sessionId: string; turnId: string; key: string } | undefined
 const composerRef = ref<InstanceType<typeof ComposerBox> | null>(null)
 const auth = useAuthStore()
 const {clusters,refresh:loadScope}=useClusterAccess()
@@ -221,6 +278,50 @@ function selectSession(id: string): void {
   sessionStorage.setItem(ACTIVE_SESSION_KEY, id)
 }
 
+async function handleBranch(turnId: string) {
+  const source = activeId.value
+  if (!source || viewingOthersSession.value || branching.value || sending.value || stream.running.value) return
+  branching.value = true
+  try {
+    await ElMessageBox.confirm('仅继承截至此回复的历史问答，不继承审批、执行状态或工具输出。新会话不会自动执行操作。', '开启新会话')
+    if (activeId.value !== source) return
+    if (pendingBranch?.sessionId !== source || pendingBranch?.turnId !== turnId) {
+      pendingBranch = { sessionId: source, turnId, key: newIdempotencyKey() }
+    }
+    const result = await branchSession(source, turnId, pendingBranch.key)
+    pendingBranch = undefined
+    await loadSessions()
+    selectSession(result.sessionId)
+    ElMessage.success('已开启分支会话')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error instanceof Error ? error.message : '创建分支失败')
+    }
+  } finally {
+    branching.value = false
+  }
+}
+
+function openBranchSource() {
+  const origin = branchOrigin.value
+  if (!origin) return
+  if (!sessions.value.some(session => session.id === origin.sessionId && session.state !== 'restricted')) {
+    ElMessage.warning('来源会话不可访问')
+    return
+  }
+  selectSession(origin.sessionId)
+  const stop = watch(
+    () => stream.turns.value.some(turn => turn.session_id === origin.sessionId && turn.turn_id === origin.turnId),
+    (ready) => {
+      if (ready) {
+        document.getElementById(`turn-${origin.turnId}`)?.scrollIntoView({ block: 'center' })
+        stop()
+      }
+    }, { flush: 'post' },
+  )
+  window.setTimeout(stop, 5000)
+}
+
 function handleReconnect(): void {
   if (!activeId.value) {
     return
@@ -345,11 +446,14 @@ async function handleSend(): Promise<void> {
   try {
     await sendMessage(activeId.value, {
       query: cleaned || raw,
+      modelId: nextModel.value || undefined,
       skills: names,
       idempotencyKey: newIdempotencyKey(),
     })
   } catch (error) {
     sending.value = false
+    if (!input.value) input.value = raw
+    if (nextModel.value) void refreshModels()
     ElMessage.error(error instanceof Error ? error.message : '发送失败')
   }
 }
@@ -463,6 +567,7 @@ async function applyClusterEntry(): Promise<void> {
 }
 
 onMounted(async () => {
+  void refreshModels()
   await loadSessions()
   await loadScope()
   await applySessionEntry()
@@ -475,7 +580,11 @@ onMounted(async () => {
 watch(
   activeId,
   (id) => {
+    branchOrigin.value = null
     if (id) {
+      void getBranchOrigin(id).then(origin => {
+        if (activeId.value === id && origin?.sessionId && origin.turnId) branchOrigin.value = origin
+      }).catch(() => undefined)
       sending.value = false
       void stream.connect(id)
     } else {
@@ -564,6 +673,7 @@ watch(
           </span>
         </div>
         <div v-if="activeSession" class="chat-meta">
+          <el-button v-if="branchOrigin" text size="small" @click="openBranchSource">继承历史问答 · 查看来源</el-button>
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
             目标集群：{{ activeClusterName || '未绑定' }}
           </span>
@@ -614,6 +724,8 @@ watch(
             </section>
             <MessageTimeline
               :turns="stream.turns.value"
+              :can-branch="!viewingOthersSession && !sending && !stream.running.value && !branching"
+              @branch="handleBranch"
               :items="stream.items.value"
               :can-decide="canDecide"
               :cluster-name="activeClusterName"
@@ -641,7 +753,9 @@ watch(
         <ComposerBox
           ref="composerRef"
           v-model="input"
-          :model="activeSession?.model || ''"
+          :model="nextModel || activeSession?.model || ''"
+          :models="modelOptions"
+          @select-model="selectedModel = $event"
           :disabled="!activeSession"
           :sending="sending || stream.running.value"
           :stopping="stoppingSession === activeId"
@@ -649,12 +763,58 @@ watch(
           @send="handleSend"
           @stop="handleStop"
         />
+        <div v-if="activeSession" class="chat-budget">
+          <div class="chat-task-status">
+            <span v-if="runStatus" role="status">{{ runStatus }}</span>
+            <button v-if="latestTaskCount" type="button" class="chat-budget-button" @click="jumpToTasks">
+              {{ stream.running.value ? '本轮任务' : '上一轮任务' }} · {{ latestTaskCount }} 项
+            </button>
+          </div>
+          <el-tooltip :content="contextDetails" placement="top" :trigger="['hover', 'focus', 'click']">
+            <button type="button" class="chat-budget-button">
+              <span class="chat-budget-ring" aria-hidden="true"
+                :style="{ '--budget': `${Math.min(100, contextPercent ?? 0)}%` }" />
+              {{ stream.running.value ? '上下文预算' : '上下文预算（上次请求）' }} ·
+              {{ contextPercent === null ? '—' : `约 ${Math.round(contextPercent)}%` }}
+            </button>
+          </el-tooltip>
+        </div>
       </footer>
     </main>
   </section>
 </template>
 
 <style scoped>
+.chat-budget {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  padding-top: 4px;
+}
+.chat-task-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+.chat-budget-button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--app-muted);
+  font-size: 12px;
+  cursor: help;
+}
+.chat-budget-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: conic-gradient(currentColor var(--budget), var(--app-border) 0);
+  mask: radial-gradient(transparent 48%, black 53%);
+}
 .cluster-dialog-hint { color: var(--app-muted); margin: 0 0 14px; }
 .cluster-dialog-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; margin-top: 14px; }
 .cluster-dialog-option { display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 12px; border: 1px solid var(--app-hairline); border-radius: 8px; color: var(--app-text); background: var(--app-card-bg); cursor: pointer; text-align: left; }

@@ -89,6 +89,7 @@ function installFetch(
   },
   accessClusters?: unknown[],
   initial?: ChatSnapshot,
+  models: unknown[] = [],
 ): void {
   vi.stubGlobal(
     'fetch',
@@ -125,6 +126,9 @@ function installFetch(
       }
       if (url === '/api/v1/sessions' && (init.method ?? 'GET') === 'GET') {
         return new Response(JSON.stringify(sessions), { status: 200 })
+      }
+      if (url === '/api/v1/sessions/models') {
+        return new Response(JSON.stringify(models), { status: 200 })
       }
       if (url === '/api/v1/sessions' && init.method === 'POST') {
         return new Response(JSON.stringify(SESSION), { status: 200 })
@@ -246,7 +250,7 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
     expect(wrapper.text()).toContain('集群对象与命名空间分别授权')
   })
 
-  it('v2 流渲染审批卡，发送与审批回传字段正确', async () => {
+  it('v2 流渲染审批卡，运行中不允许重复发送，审批回传字段正确', async () => {
     const wrapper = await mountChat([
       {
         protocol_version: 2,
@@ -284,13 +288,7 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('审批请求'))
 
-    await wrapper.find('textarea').setValue('修复它')
-    const send = wrapper.findAll('button').find((btn) => btn.text() === '发送')!
-    await send.trigger('click')
-    await vi.waitFor(() => expect(postCallsSuffix('/send-message')).toHaveLength(1))
-    expect(postCallsSuffix('/send-message')[0].body).toEqual({ query: '修复它' })
-    const headers = new Headers(postCallsSuffix('/send-message')[0].headers)
-    expect(headers.get('Idempotency-Key')).toBeTruthy()
+    expect(wrapper.findAll('button').some((btn) => btn.text() === '发送')).toBe(false)
 
     const approve = wrapper.findAll('button').find((btn) => btn.text().includes('确认执行'))!
     await approve.trigger('click')
@@ -349,6 +347,26 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
     })
   })
 
+  it('将所选目录模型和幂等键一起提交', async () => {
+    installFetch([], [], [SESSION], undefined, undefined, undefined, [
+      { id: 'qwen-plus', context_window: 65536 },
+      { id: 'private-128k', context_window: 131072 },
+    ])
+    const wrapper = mount(ChatView, { attachTo: document.body })
+    await vi.waitFor(() => expect(wrapper.find('.session-item').exists()).toBe(true))
+    await wrapper.find('.session-item').trigger('click')
+    const composer = wrapper.findComponent(ComposerBox)
+    await vi.waitFor(() => expect(composer.props('models')).toContain('private-128k'))
+    composer.vm.$emit('select-model', 'private-128k')
+    await wrapper.find('textarea').setValue('检查资源')
+    const send = wrapper.findAll('button').find(button => button.text() === '发送')!
+    await send.trigger('click')
+    await vi.waitFor(() => expect(postCallsSuffix('/send-message')).toHaveLength(1))
+    const [request] = postCallsSuffix('/send-message')
+    expect(request.body).toEqual({ query: '检查资源', modelId: 'private-128k' })
+    expect(new Headers(request.headers).get('Idempotency-Key')).toBeTruthy()
+  })
+
   it('运行中的 Turn 驱动停止按钮，回传 cancel', async () => {
     const wrapper = await mountChat([
       {
@@ -362,11 +380,6 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
       },
     ])
     await vi.waitFor(() => expect(wrapper.text()).toContain('检查集群'))
-
-    await wrapper.find('textarea').setValue('检查集群')
-    const send = wrapper.findAll('button').find((btn) => btn.text() === '发送')!
-    await send.trigger('click')
-    await vi.waitFor(() => expect(postCallsSuffix('/send-message')).toHaveLength(1))
 
     const stop = wrapper.findAll('button').find((btn) => btn.text().includes('停止'))!
     await stop.trigger('click')
@@ -390,7 +403,7 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
         },
       },
     ])
-    await vi.waitFor(() => expect(wrapper.text()).toContain('28'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Token 用量46'))
   })
 
   it('P3.8.4：@技能名 从查询剥离并随 skills 字段提交', async () => {

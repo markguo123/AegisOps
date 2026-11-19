@@ -148,7 +148,16 @@ export type ChatItem =
   | { type: 'interaction'; item_order: number; interaction: ChatInteraction }
   | { type: 'notice'; item_order: number; notice: ChatNotice }
 
+export interface ChatContextBudget {
+  model_id?: string
+  window: number
+  output_reserve: number
+  input_estimate: number
+  unavailable?: boolean
+}
+
 export interface ChatTurn {
+  context_budget?: ChatContextBudget
   turn_id: string
   session_id: string
   input?: string

@@ -75,7 +75,8 @@ func (a *Agent) flowTurnStatus(ctx context.Context, status sse.TurnStatus, reaso
 		return
 	}
 	data := sse.TurnStatusData{
-		TurnID: a.turn.ID, SessionID: a.turn.SessionID,
+		ContextBudget: a.flowContextBudget,
+		TurnID:        a.turn.ID, SessionID: a.turn.SessionID,
 		Status: status, WaitReason: reason, Activity: activity,
 		Input: a.turn.Input, Error: a.turn.Error,
 		StartedAt: nilIfZero(a.turn.StartedAt), FinishedAt: a.turn.FinishedAt,

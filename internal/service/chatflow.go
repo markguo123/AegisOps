@@ -281,12 +281,13 @@ type flowFinish struct {
 
 // chatWriter 是单会话的有界顺序写者。
 type chatWriter struct {
-	flow      *chatFlow
-	sessionID string
-	cmds      chan flowCommand
-	stop      chan struct{}
-	done      chan struct{}
-	cancelMu  sync.Mutex
+	contextBudget *sse.ContextBudget
+	flow          *chatFlow
+	sessionID     string
+	cmds          chan flowCommand
+	stop          chan struct{}
+	done          chan struct{}
+	cancelMu      sync.Mutex
 
 	// runCancel 在输出无法可靠保存时取消本轮 Agent 运行（停止生成与新工具调度）。
 	runCancel func()
@@ -473,7 +474,8 @@ func (w *chatWriter) handleFinish(f *flowFinish) error {
 				},
 			}),
 			sse.NewEvent(w.sessionID, f.turn.ID, sse.EventTurnStatus, sse.TurnStatusData{
-				TurnID: f.turn.ID, SessionID: w.sessionID, Status: sse.TurnStatus(f.turn.Status),
+				ContextBudget: w.contextBudget,
+				TurnID:        f.turn.ID, SessionID: w.sessionID, Status: sse.TurnStatus(f.turn.Status),
 				Input: f.turn.Input, Error: f.turn.Error, StartedAt: timePtr(f.turn.StartedAt),
 				FinishedAt: f.turn.FinishedAt, FinalMessageID: f.finalMessageID,
 				Usage: sse.TokenUsage{
@@ -560,6 +562,7 @@ func (w *chatWriter) ingest(e sse.Event) error {
 		// 每个状态更新都同步 Turn 主记录：快照读取 turns 表时才能看到运行中的
 		// 回合与它名下的条目（否则刷新会丢掉进行中的过程内容）。
 		if d := asTurnStatus(e.Data); d != nil {
+			w.contextBudget = d.ContextBudget
 			w.turn = &session.Turn{
 				ID: d.TurnID, SessionID: w.sessionID, Status: session.TurnStatus(d.Status),
 				Input: redactText(d.Input), Error: redactText(d.Error),

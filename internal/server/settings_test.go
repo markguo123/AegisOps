@@ -130,6 +130,11 @@ func TestSettingsAdminOnly(t *testing.T) {
 		if resp, raw := p.do(t, http.MethodPatch, "/api/v1/settings/model", token, `{"max_tokens":2048}`); resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s 修改配置应 403, got %d: %s", role, resp.StatusCode, raw)
 		}
+		for _, action := range []string{"discover", "probe"} {
+			if resp, raw := p.do(t, http.MethodPost, "/api/v1/settings/model/"+action, token, `{}`); resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("%s 模型%s应 403, got %d: %s", role, action, resp.StatusCode, raw)
+			}
+		}
 	}
 }
 

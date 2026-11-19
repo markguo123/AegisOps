@@ -255,6 +255,12 @@ func newSessionWrite(sess *session.Session, limit int64) (sessionWrite, SessionS
 }
 
 func (st *sessionStore) Create(ctx context.Context, sess *session.Session) error {
+	return insertSession(ctx, st.s.db, sess, st.s.sessionMaxBytes)
+}
+
+func insertSession(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, sess *session.Session, maxBytes int64) error {
 	now := time.Now()
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = now
@@ -262,11 +268,11 @@ func (st *sessionStore) Create(ctx context.Context, sess *session.Session) error
 	if sess.LastModified.IsZero() {
 		sess.LastModified = now
 	}
-	w, _, err := newSessionWrite(sess, st.s.sessionMaxBytes)
+	w, _, err := newSessionWrite(sess, maxBytes)
 	if err != nil {
 		return err
 	}
-	_, err = st.s.db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO sessions (id, user_id, name, cluster_id, namespace, model, state, data, created_at, last_modified, pinned, message_count, title, data_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.UserID, w.row.Name, w.row.Cluster, w.row.Namespace, w.row.Model, w.row.State,

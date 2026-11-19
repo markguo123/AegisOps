@@ -17,9 +17,8 @@ import type { Skill } from '@/api/types'
 const props = withDefaults(
   defineProps<{
     modelValue: string
-    /** 当前会话模型名（只读展示，切换模型属配置中心能力）。 */
     model?: string
-    /** Secret 访问策略展示串（如 create_only）。 */
+    models?: string[]
     stopping?: boolean
     disabled?: boolean
     sending?: boolean
@@ -38,6 +37,7 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'send'): void
   (e: 'stop'): void
+  (e: 'select-model', value: string): void
 }>()
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -211,15 +211,19 @@ defineExpose({ focus, availableSkills })
       <el-tooltip
         content="只读检查按授权执行；需要确认的操作由你审批。读取指定 Secret 前会单独征得你的同意。"
         placement="top"
+        :trigger="['hover', 'focus', 'click']"
       >
-        <!-- P7.2：长安全文案降噪为小字入口，完整说明放 Tooltip 与 aria-label（信息不丢、可访问） -->
         <button type="button"
           class="composer-hint"
           ><el-icon><Lock /></el-icon> 人工审批</button
         >
       </el-tooltip>
       <span class="composer-actions">
-        <span class="composer-chip">{{ model || '默认模型' }}</span>
+        <el-select v-if="(models?.length ?? 0) > 1" :model-value="model" :disabled="disabled || sending"
+          aria-label="下一轮模型" class="composer-model" @change="emit('select-model', $event)">
+          <el-option v-for="entry in models" :key="entry" :label="entry" :value="entry" />
+        </el-select>
+        <span v-else class="composer-chip">{{ model || '默认模型' }}</span>
         <el-button
           v-if="!sending"
           type="primary"
@@ -389,6 +393,9 @@ defineExpose({ focus, availableSkills })
   justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
+}
+.composer-model {
+  width: min(180px, 35vw);
 }
 
 /* 发送/停止按钮对齐原型 .send-btn（30px 高、8px 圆角） */

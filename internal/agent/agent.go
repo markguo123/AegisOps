@@ -57,6 +57,7 @@ type SecretValueApprover interface {
 
 // Options 是 Agent 装配参数。
 type Options struct {
+	ModelID       string
 	LLM           llm.LLMClient
 	Tools         *tools.Registry
 	Session       *session.Session
@@ -97,8 +98,9 @@ type Options struct {
 
 // Agent 是 Agent 实例：消息总线 + 状态机 + Agentic Loop（P2）。
 type Agent struct {
-	ID    string
-	State AgentState
+	modelID string
+	ID      string
+	State   AgentState
 
 	// Output 是 Agent → UI 的消息流（CLI/Web 消费）。
 	Output chan Message
@@ -140,8 +142,9 @@ type Agent struct {
 	sensitiveValues map[string]struct{}
 	// flowMsg 是本次模型调用正在输出的消息；flowLastMessageID 记录最近一条
 	// 已收口消息，工具卡据此绑定发起它的消息。
-	flowMsg           *sse.Message
-	flowLastMessageID string
+	flowMsg            *sse.Message
+	flowLastMessageID  string
+	flowContextBudget  *sse.ContextBudget
 	flowFinalMessageID string
 }
 
@@ -175,6 +178,7 @@ func New(opts Options) *Agent {
 		HistoryTurns:    opts.HistoryTurns,
 		ContextWindow:   opts.ContextWindow,
 		OutputTokens:    opts.OutputTokens,
+		modelID:         opts.ModelID,
 		ResultStore:     opts.ResultStore,
 		sensitiveValues: map[string]struct{}{},
 	}

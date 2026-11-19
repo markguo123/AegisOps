@@ -177,6 +177,7 @@ var schemaV13Indexes = []indexSpec{
 	{name: "idx_chat_items_turn", table: "chat_items", cols: "session_id, turn_id"},
 	{name: "idx_chat_chunks_message", table: "chat_chunks", cols: "session_id, message_id"},
 	{name: "idx_chat_events_created", table: "chat_events", cols: "session_id, created_at"},
+	{name: "idx_chat_events_turn_status", table: "chat_events", cols: "session_id, turn_id, event_type, seq"},
 	{name: "idx_chat_commits_created", table: "chat_commits", cols: "created_at"},
 }
 

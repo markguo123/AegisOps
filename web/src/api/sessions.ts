@@ -130,11 +130,33 @@ export async function pinSession(
 /** 发起一轮 Chat（`POST /api/v1/sessions/{id}/send-message`），SSE 流随后推送事件。
  * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。
  * `idempotencyKey` 用于网络重试时复用同一个 turn，不创建第二轮。 */
+export function listChatModels() {
+  return sessionFetch<Array<{ id: string; context_window: number }>>('/api/v1/sessions/models')
+}
+
+export interface BranchOrigin {
+  sessionId: string
+  turnId: string
+}
+
+export function getBranchOrigin(id: string) {
+  return sessionFetch<BranchOrigin | null>(`/api/v1/sessions/${encodeURIComponent(id)}/branch`)
+}
+
+export function branchSession(id: string, turnId: string, requestKey: string) {
+  return sessionFetch<{ sessionId: string }>(`/api/v1/sessions/${encodeURIComponent(id)}/branch`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': requestKey },
+    body: JSON.stringify({ turnId }),
+  })
+}
+
 export async function sendMessage(
   id: string,
-  payload: { query: string; skills?: string[]; idempotencyKey?: string },
+  payload: { query: string; skills?: string[]; idempotencyKey?: string; modelId?: string },
 ): Promise<{ sessionId: string; turnId?: string; protocolVersion?: number; duplicate?: boolean }> {
   const body: Record<string, unknown> = { query: payload.query }
+  if (payload.modelId) body.modelId = payload.modelId
   // P3.8.4：显式 @skill 指定的名称只在非空时随请求提交，后端强校验。
   if (payload.skills && payload.skills.length > 0) {
     body.skills = payload.skills

@@ -77,7 +77,10 @@ func TestCommitChatSnapshotAndReplay(t *testing.T) {
 		Events: []sse.Event{
 			sse.NewEvent("s1", "t1", sse.EventMessageStarted, sse.MessageStartedData{Message: msg}),
 			sse.NewEvent("s1", "t1", sse.EventMessageDelta, sse.MessageDeltaData{MessageID: "m1", PartID: "p1", Index: 0, Delta: "第一段"}),
-			sse.NewEvent("s1", "t1", sse.EventTurnStatus, sse.TurnStatusData{TurnID: "t1", Status: sse.TurnRunning, Activity: sse.ActivityGenerating}),
+			sse.NewEvent("s1", "t1", sse.EventTurnStatus, sse.TurnStatusData{
+				TurnID: "t1", Status: sse.TurnRunning, Activity: sse.ActivityGenerating,
+				ContextBudget: &sse.ContextBudget{Window: 131072, OutputReserve: 4096, InputEstimate: 83804},
+			}),
 		},
 	})
 	if err != nil {
@@ -97,6 +100,9 @@ func TestCommitChatSnapshotAndReplay(t *testing.T) {
 	}
 	if len(snap.Turns) != 1 || snap.Turns[0].Status != sse.TurnRunning {
 		t.Fatalf("snapshot turn mismatch: %+v", snap.Turns)
+	}
+	if budget := snap.Turns[0].ContextBudget; budget == nil || *budget != (sse.ContextBudget{Window: 131072, OutputReserve: 4096, InputEstimate: 83804}) {
+		t.Fatalf("snapshot budget mismatch: %+v", budget)
 	}
 
 	// 2) 第二个增量 + 完成消息（块行回收）+ 终态。

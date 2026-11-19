@@ -354,19 +354,28 @@ type Notice struct {
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 }
 
+type ContextBudget struct {
+	ModelID       string `json:"model_id,omitempty"`
+	Window        int    `json:"window"`
+	OutputReserve int    `json:"output_reserve"`
+	InputEstimate int    `json:"input_estimate"`
+	Unavailable   bool   `json:"unavailable,omitempty"`
+}
+
 // TurnView 是快照与 turn.status 共用的完整 Turn 状态。
 type TurnView struct {
-	TurnID     string     `json:"turn_id"`
-	SessionID  string     `json:"session_id"`
-	Input      string     `json:"input,omitempty"`
-	Status     TurnStatus `json:"status"`
-	WaitReason WaitReason `json:"wait_reason,omitempty"`
-	Activity   Activity   `json:"activity,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	Usage      TokenUsage `json:"usage"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	Revision   uint64     `json:"revision"`
+	ContextBudget *ContextBudget `json:"context_budget,omitempty"`
+	TurnID        string         `json:"turn_id"`
+	SessionID     string         `json:"session_id"`
+	Input         string         `json:"input,omitempty"`
+	Status        TurnStatus     `json:"status"`
+	WaitReason    WaitReason     `json:"wait_reason,omitempty"`
+	Activity      Activity       `json:"activity,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	Usage         TokenUsage     `json:"usage"`
+	StartedAt     *time.Time     `json:"started_at,omitempty"`
+	FinishedAt    *time.Time     `json:"finished_at,omitempty"`
+	Revision      uint64         `json:"revision"`
 }
 
 // Item 是快照中的规范条目（带 type 判别）。
@@ -392,16 +401,17 @@ type Snapshot struct {
 
 // TurnStatusData 是 turn.status 事件载荷（完整 Turn 状态更新）。
 type TurnStatusData struct {
-	TurnID     string     `json:"turn_id"`
-	SessionID  string     `json:"session_id,omitempty"`
-	Status     TurnStatus `json:"status"`
-	WaitReason WaitReason `json:"wait_reason,omitempty"`
-	Activity   Activity   `json:"activity,omitempty"`
-	Input      string     `json:"input,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	Usage      TokenUsage `json:"usage"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	ContextBudget *ContextBudget `json:"context_budget,omitempty"`
+	TurnID        string         `json:"turn_id"`
+	SessionID     string         `json:"session_id,omitempty"`
+	Status        TurnStatus     `json:"status"`
+	WaitReason    WaitReason     `json:"wait_reason,omitempty"`
+	Activity      Activity       `json:"activity,omitempty"`
+	Input         string         `json:"input,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	Usage         TokenUsage     `json:"usage"`
+	StartedAt     *time.Time     `json:"started_at,omitempty"`
+	FinishedAt    *time.Time     `json:"finished_at,omitempty"`
 	// 终态时附带本轮最终回答所属 message_id（若存在），避免按卡片猜最终消息。
 	FinalMessageID string `json:"final_message_id,omitempty"`
 	Revision       uint64 `json:"revision,omitempty"`

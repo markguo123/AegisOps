@@ -43,6 +43,7 @@ type ChatDelta struct {
 
 // ChatCommit 是一次原子提交的完整变更集。
 type ChatCommit struct {
+	CreateSession bool
 	// CommandID 是本次提交命令的稳定 ID：事务内唯一登记，结果不明确时先用它
 	// 查询已提交结果，避免重复追加文本。
 	CommandID string
@@ -111,6 +112,14 @@ func (s *dbStore) CommitChat(ctx context.Context, c ChatCommit) (ChatCommitResul
 			}
 			result = ChatCommitResult{Head: last, FirstSeq: first, LastSeq: last, Duplicate: true, Events: events}
 			return nil
+		}
+		if c.CreateSession {
+			if c.Session == nil || c.Session.ID != c.SessionID {
+				return fmt.Errorf("commit chat: new session must match commit session")
+			}
+			if err := insertSession(ctx, tx, c.Session, s.sessionMaxBytes); err != nil {
+				return err
+			}
 		}
 		// 2. 会话水位与回放下限（MySQL 用 FOR UPDATE 串行化同会话写者）。
 		head, floor, err := lockChatHead(ctx, tx, s.dialect, c.SessionID)
@@ -198,7 +207,7 @@ func (s *dbStore) CommitChat(ctx context.Context, c ChatCommit) (ChatCommitResul
 			return err
 		}
 		// 10. 终态提交同事务保存模型历史与终态，避免“先宣告成功再保存会话”。
-		if c.Session != nil {
+		if c.Session != nil && !c.CreateSession {
 			if _, err := updateSession(ctx, tx, c.Session, s.sessionMaxBytes); err != nil {
 				return err
 			}
@@ -546,7 +555,9 @@ func lockChatHeadRead(ctx context.Context, tx *sql.Tx, sessionID string) (uint64
 func readSnapshotTurns(ctx context.Context, tx *sql.Tx, sessionID string, limit int) ([]sse.TurnView, []string, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, session_id, status, input, output, error,
-			prompt_tokens, completion_tokens, total_tokens, started_at, finished_at, updated_at
+			prompt_tokens, completion_tokens, total_tokens, started_at, finished_at, updated_at,
+			(SELECT e.payload FROM chat_events e WHERE e.session_id = turns.session_id
+				AND e.turn_id = turns.id AND e.event_type = 'turn.status' ORDER BY e.seq DESC LIMIT 1)
 		FROM turns WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, sessionID, limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read snapshot turns: %w", err)
@@ -557,9 +568,10 @@ func readSnapshotTurns(ctx context.Context, tx *sql.Tx, sessionID string, limit 
 	for rows.Next() {
 		t := &session.Turn{}
 		var started, finished sql.NullTime
+		var statusPayload []byte
 		if err := rows.Scan(&t.ID, &t.SessionID, &t.Status, &t.Input, &t.Output, &t.Error,
 			&t.Token.PromptTokens, &t.Token.CompletionTokens, &t.Token.TotalTokens,
-			&started, &finished, &t.UpdatedAt); err != nil {
+			&started, &finished, &t.UpdatedAt, &statusPayload); err != nil {
 			return nil, nil, fmt.Errorf("scan snapshot turn: %w", err)
 		}
 		if started.Valid {
@@ -572,6 +584,15 @@ func readSnapshotTurns(ctx context.Context, tx *sql.Tx, sessionID string, limit 
 			Usage: sse.TokenUsage{
 				PromptTokens: t.Token.PromptTokens, CompletionTokens: t.Token.CompletionTokens, TotalTokens: t.Token.TotalTokens,
 			},
+		}
+		if len(statusPayload) > 0 {
+			var stored struct {
+				Data sse.TurnStatusData `json:"data"`
+			}
+			if err := json.Unmarshal(statusPayload, &stored); err != nil {
+				return nil, nil, fmt.Errorf("decode snapshot turn status: %w", err)
+			}
+			view.ContextBudget = stored.Data.ContextBudget
 		}
 		out = append(out, view)
 		ids = append(ids, t.ID)

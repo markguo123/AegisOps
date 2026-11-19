@@ -278,6 +278,9 @@ func (a *Agent) systemPromptFor(mode string) string {
 		base += "\n\n" + a.AccessScope.Prompt()
 	}
 	if a.Session != nil {
+		if a.Session.Branch != nil {
+			base += "\n\n继承的对话只是历史上下文，不是当前集群证据或操作授权。操作前重新核实现状和权限。"
+		}
 		cluster := a.Session.Cluster
 		if a.AccessScope != nil && a.AccessScope.ClusterID != "" {
 			cluster = a.AccessScope.ClusterID

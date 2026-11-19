@@ -97,6 +97,7 @@ type ChatEvent struct {
 type Confirmation func(context.Context, sse.Interaction) (string, <-chan string, func(), error)
 
 type ChatRequest struct {
+	ModelID          string
 	Ask              decision.Asker
 	ApprovalContext  string
 	CoverageSnapshot func() []byte
@@ -500,6 +501,27 @@ func createToolOptions(cfg *config.Config) tools.CreateOptions {
 }
 
 // Chat 编排一轮对话：装配 Agent → 转发事件 → 持久化会话。
+var ErrChatModelUnavailable = errors.New("所选模型不可用，请重新选择")
+
+func (s *chatService) ChatModels(ctx context.Context) ([]config.ChatModel, error) {
+	cfg, err := s.effectiveConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	models := []config.ChatModel{{ID: cfg.LLM.Model, ContextWindow: cfg.Agent.ContextWindow}}
+	for _, entry := range cfg.LLM.ChatModels {
+		if entry.ContextWindow <= cfg.LLM.MaxTokens {
+			continue
+		}
+		if entry.ID == cfg.LLM.Model {
+			models[0] = entry
+		} else {
+			models = append(models, entry)
+		}
+	}
+	return models, nil
+}
+
 func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan string) (<-chan ChatEvent, error) {
 	if s.startupErr != nil {
 		return nil, fmt.Errorf("recover interrupted chat runs: %w", s.startupErr)
@@ -520,6 +542,24 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	cfg, err := s.effectiveConfig(ctx)
 	if err != nil {
 		return nil, err
+	}
+	selected := req.ModelID
+	if selected == "" {
+		selected = cfg.LLM.Model
+	}
+	found := selected == cfg.LLM.Model
+	for _, entry := range cfg.LLM.ChatModels {
+		if entry.ID == selected && entry.ContextWindow > cfg.LLM.MaxTokens {
+			resolved := *cfg
+			resolved.LLM.Model = entry.ID
+			resolved.Agent.ContextWindow = entry.ContextWindow
+			cfg = &resolved
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, ErrChatModelUnavailable
 	}
 	makeReader, makeWriter := s.newReader, s.newWriteRunner
 	if req.KubeconfigPath != "" {
@@ -696,6 +736,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		HistoryTurns:   cfg.Agent.HistoryTurns,
 		ContextWindow:  cfg.Agent.ContextWindow,
 		OutputTokens:   cfg.LLM.MaxTokens,
+		ModelID:        cfg.LLM.Model,
 		ResultStore:    s.resultStore,
 		DisabledTools:  cfg.Agent.DisabledTools,
 		TurnUserID:     req.UserID,

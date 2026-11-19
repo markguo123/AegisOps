@@ -85,13 +85,28 @@ function mountTimeline(props: {
   turns?: ChatTurn[]
   items?: ChatItem[]
   canDecide?: boolean
+  canBranch?: boolean
 }) {
   return mount(MessageTimeline, {
-    props: { turns: props.turns ?? [turn()], items: props.items ?? [], ...(props.canDecide === undefined ? {} : { canDecide: props.canDecide }) },
+    props: { turns: props.turns ?? [turn()], items: props.items ?? [], canBranch: props.canBranch, ...(props.canDecide === undefined ? {} : { canDecide: props.canDecide }) },
   })
 }
 
 describe('MessageTimeline（规范对象渲染）', () => {
+  it('只允许从已完成的最终回复发出分叉请求', async () => {
+    const wrapper = mountTimeline({
+      turns: [turn({ status: 'waiting' })],
+      items: items({ type: 'message', item_order: 1, message: message() }),
+      canBranch: true,
+    })
+    expect(wrapper.text()).not.toContain('从这里开启新会话')
+    await wrapper.setProps({ turns: [turn({ status: 'done' })] })
+    const action = wrapper.findAll('button').find(button => button.text() === '从这里开启新会话')!
+    await action.trigger('click')
+    expect(wrapper.emitted('branch')).toEqual([['t1']])
+    await wrapper.setProps({ canBranch: false })
+    expect(wrapper.text()).not.toContain('从这里开启新会话')
+  })
   it('同一消息的多段正文只渲染一块报告，最终回答单独标识', () => {
     const wrapper = mountTimeline({
       items: items({ type: 'message', item_order: 1, message: message() }),

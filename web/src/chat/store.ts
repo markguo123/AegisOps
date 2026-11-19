@@ -179,6 +179,7 @@ export function applyChatEvent(state: ChatState, event: ChatEvent): ApplyResult 
         session_id: String(data.session_id ?? event.session_id ?? ''),
         wait_reason: (data.wait_reason as ChatTurn['wait_reason']) ?? undefined,
         activity: (data.activity as ChatTurn['activity']) ?? undefined,
+        ...(data.context_budget ? { context_budget: data.context_budget as ChatTurn['context_budget'] } : {}),
         input: typeof data.input === 'string' ? data.input : undefined,
         error: typeof data.error === 'string' ? data.error : undefined,
         started_at: typeof data.started_at === 'string' ? data.started_at : undefined,

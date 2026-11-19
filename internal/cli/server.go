@@ -135,6 +135,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, SessionID: operation.SessionID, TurnID: operation.TurnID, StepID: operation.StepID, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
 			}
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
+				WithModelChecks(func(ctx context.Context) (*config.Config, error) {
+					return settingsSvc.ChatRuntimeConfig(ctx, cfg)
+				}).
 				WithPlatformAccess(platformAccess).
 				WithClusters(clusterSvc).
 				WithSkills(skillPlat).

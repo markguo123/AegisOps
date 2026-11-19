@@ -51,7 +51,31 @@ type KubernetesConfig struct {
 }
 
 // LLMConfig controls the OpenAI-compatible endpoint (FR-015).
+const ModelAPIChatCompletions = "openai-chat-completions"
+
+type ChatModel struct {
+	ID            string `json:"id" mapstructure:"id"`
+	ContextWindow int    `json:"context_window" mapstructure:"context_window"`
+}
+
+func ValidateChatModels(models []ChatModel) error {
+	if len(models) > 50 {
+		return fmt.Errorf("最多配置 50 个问诊模型")
+	}
+	seen := make(map[string]bool, len(models))
+	for _, entry := range models {
+		if entry.ID == "" || len(entry.ID) > 256 || strings.TrimSpace(entry.ID) != entry.ID || seen[entry.ID] ||
+			entry.ContextWindow < 8192 || entry.ContextWindow > 4194304 {
+			return fmt.Errorf("模型 ID 不能为空或重复，上下文窗口需在 8192 到 4194304 之间")
+		}
+		seen[entry.ID] = true
+	}
+	return nil
+}
+
 type LLMConfig struct {
+	APIFormat       string            `mapstructure:"api_format"`
+	ChatModels      []ChatModel       `mapstructure:"chat_models"`
 	Enabled         bool              `mapstructure:"enabled"`
 	Endpoint        string            `mapstructure:"endpoint"`
 	APIKey          string            `mapstructure:"api_key"`
@@ -390,6 +414,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("llm.enabled", true)
 	v.SetDefault("llm.endpoint", "http://localhost:8000/v1")
+	v.SetDefault("llm.api_format", ModelAPIChatCompletions)
 	v.SetDefault("llm.api_key", "")
 	v.SetDefault("llm.model", "qwen-plus")
 	v.SetDefault("llm.temperature", 0.1)
@@ -591,6 +616,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("scan.pod_logs_timeout must be > 0")
 	}
 	if c.LLM.Enabled {
+		if c.LLM.APIFormat != "" && c.LLM.APIFormat != ModelAPIChatCompletions {
+			return fmt.Errorf("unsupported llm.api_format")
+		}
+		if err := ValidateChatModels(c.LLM.ChatModels); err != nil {
+			return err
+		}
 		u, err := url.Parse(c.LLM.Endpoint)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("llm.endpoint must be a valid http(s) URL")

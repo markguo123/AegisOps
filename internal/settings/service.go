@@ -685,6 +685,16 @@ func normalize(def Definition, raw json.RawMessage) (string, error) {
 			return "", fmt.Errorf("需要合法 JSON")
 		}
 		switch def.Key {
+		case "chat_models":
+			var models []config.ChatModel
+			decoder := json.NewDecoder(strings.NewReader(trimmed))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&models); err != nil || models == nil {
+				return "", fmt.Errorf("问诊模型目录必须是包含 id 和 context_window 的数组")
+			}
+			if err := config.ValidateChatModels(models); err != nil {
+				return "", err
+			}
 		case "thinking", "scan_thinking":
 			return normalizeThinking(trimmed)
 		case "servers":

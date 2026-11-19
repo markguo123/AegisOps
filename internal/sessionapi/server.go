@@ -21,6 +21,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/config"
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
 	"github.com/k8s-ai/k8s-ai/internal/service"
@@ -162,6 +163,7 @@ type Server struct {
 	broadcasters map[string]*Broadcaster
 	pending      map[string]chan string        // sessionID → 当前 Chat 的审批响应通道
 	runs         map[string]context.CancelFunc // sessionID → 当前 Chat 运行取消函数
+	branching    map[string]bool
 	// idempotency 保存客户端请求幂等键 → 已分配的 turn_id 与请求安全指纹。
 	// 首版保存在进程内（24h TTL），重启后不再去重；展示事实与游标仍在数据库。
 	idempotency map[string]idempotencyEntry
@@ -225,6 +227,7 @@ func (s *Server) WithPlatformAccess(p *service.PlatformAccess) *Server { s.platf
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
+	mux.HandleFunc("GET /api/v1/sessions/models", s.handleChatModels)
 	mux.HandleFunc("POST /api/v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/rename", s.handleRenameSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/pin", s.handlePinSession)
@@ -236,6 +239,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/send-message", s.handleSendMessage)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/branch", s.handleBranch)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/branch", s.handleBranchOrigin)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/secret/reveal", s.handleRevealSecret)
 	return mux
 }
@@ -836,15 +841,36 @@ func (s *Server) canStream(r *http.Request, sess *session.Session) bool {
 	}
 	return s.platform == nil || principal.canReadAllSessions() || sess.UserID == principal.User.ID && s.covered(r.Context(), sess, principal.User.ID)
 }
+func (s *Server) handleChatModels(w http.ResponseWriter, r *http.Request) {
+	catalog, ok := s.chat.(interface {
+		ChatModels(context.Context) ([]config.ChatModel, error)
+	})
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "模型目录未接入"})
+		return
+	}
+	models, err := catalog.ChatModels(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法获取问诊模型"})
+		return
+	}
+	writeJSON(w, http.StatusOK, models)
+}
+
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Query string `json:"query"`
+		Query   string `json:"query"`
+		ModelID string `json:"modelId"`
 		// Skills 用户显式 @ 指定的 Skill 名称（P3.8.4），由 service 层强校验。
 		Skills []string `json:"skills"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(body.ModelID) > 256 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("modelId is too long"))
 		return
 	}
 	if body.Query == "" {
@@ -866,7 +892,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	fingerprint := ""
 	if idemKey != "" {
-		sum := sha256.Sum256([]byte(caller.User.ID + "\x00" + id + "\x00send-message\x00" + body.Query + "\x00" + strings.Join(body.Skills, ",")))
+		fingerprintBody, _ := json.Marshal(body)
+		sum := sha256.Sum256(append([]byte(caller.User.ID+"\x00"+id+"\x00send-message\x00"), fingerprintBody...))
 		fingerprint = fmt.Sprintf("%x", sum)
 		s.mu.Lock()
 		if entry, ok := s.idempotency[idemKey]; ok {
@@ -912,7 +939,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	s.mu.Lock()
-	if _, running := s.pending[id]; running {
+	if _, running := s.pending[id]; running || s.branching[id] {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, fmt.Errorf("a chat is already running for this session"))
 		return
@@ -1031,6 +1058,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		SessionID:       id,
 		TurnID:          turnID,
 		Query:           body.Query,
+		ModelID:         body.ModelID,
 		UserID:          principal.User.ID,
 		AllowAnySession: principal.canManageAllSessions(),
 		AccessScope:     accessScope,
@@ -1045,6 +1073,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			delete(s.idempotency, idemKey)
 		}
 		s.mu.Unlock()
+		if errors.Is(err, service.ErrChatModelUnavailable) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, settings.ErrModelNotConfigured) {
 			// 模型未配置是配置态问题，不是服务端故障：409 + 原提示，前端据此引导去
 			// 配置中心「模型」分组，而不是报 500 让用户以为后端坏了（P6.1）。

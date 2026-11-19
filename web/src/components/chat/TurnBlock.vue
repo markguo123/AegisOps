@@ -20,6 +20,7 @@ import copyText from '@/composables/useClipboard'
 const props = withDefaults(
   defineProps<{
     turn: TurnUiData
+    canBranch?: boolean
     /** P2.9 当前用户是否有权审批（本人自确认）。 */
     canDecide?: boolean
     /** P12.4 当前会话绑定的集群名称。 */
@@ -27,11 +28,13 @@ const props = withDefaults(
   }>(),
   {
     canDecide: true,
+    canBranch: false,
     clusterName: '',
   },
 )
 
 const emit = defineEmits<{
+  (e: 'branch', turnId: string): void
   (e: 'approve', value: string,id?:string): void
   (e: 'reject',id?:string): void
   (e: 'answer', payload: { interactionId: string; status: 'selected' | 'text' | 'skipped'; optionId?: string; text?: string }): void
@@ -177,7 +180,7 @@ function itemAnchor(item: { data: { key: string } }): string {
 </script>
 
 <template>
-  <section class="turn" :class="turn.status">
+  <section :id="`turn-${turn.key}`" class="turn" :class="turn.status">
     <header class="turn-head">
       <button type="button" class="turn-toggle" @click="open = !open" :aria-expanded="open">
         <el-icon class="turn-caret" :class="{ open }"><ArrowDown /></el-icon>
@@ -200,6 +203,7 @@ function itemAnchor(item: { data: { key: string } }): string {
         <div>
           <p class="question-text">{{ turn.input }}</p>
           <el-button text size="small" @click="copyText(turn.input)">复制</el-button>
+          <span v-if="turn.startedAt" class="turn-time" title="本轮开始时间">{{ timeLabel(turn.startedAt) }}</span>
         </div>
       </article>
 
@@ -285,6 +289,11 @@ function itemAnchor(item: { data: { key: string } }): string {
             </div>
             <MarkdownView :text="item.data.text" />
             <el-button v-if="item.data.purpose === 'final' && item.data.done" text size="small" @click="copyText(item.data.text)">复制</el-button>
+            <el-button v-if="canBranch && turn.status === 'completed' && item.data.purpose === 'final' && item.data.done && item.data.text.trim()"
+              text size="small" @click="emit('branch', turn.key)">从这里开启新会话</el-button>
+            <span v-if="item.data.purpose === 'final' && item.data.done && turn.completedAt" class="turn-time" title="本轮结束时间">
+              {{ timeLabel(turn.completedAt) }}
+            </span>
           </article>
         </template>
         </component>

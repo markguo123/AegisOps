@@ -24,6 +24,7 @@ import { parseJsonLoose } from './render/constants'
 const props = withDefaults(
   defineProps<{
     turns: ChatTurn[]
+    canBranch?: boolean
     items: ChatItem[]
     /** 当前用户是否有权审批：false 时审批卡收起操作区（后端仍强校验）。 */
     canDecide?: boolean
@@ -34,6 +35,7 @@ const props = withDefaults(
   }>(),
   {
     canDecide: true,
+    canBranch: false,
     clusterName: '',
     emptyTitle: '选择或新建一个会话',
     emptyHint: '提问后助手会先检查现场、再给出可复核的结论',
@@ -41,6 +43,7 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
+  (e: 'branch', turnId: string): void
   (e: 'approve', value: string, id?: string): void
   (e: 'reject', id?: string): void
   (
@@ -328,6 +331,7 @@ const uiTurns = computed<TurnUiData[]>(() => {
 /** P7.2 智能跟随：默认跟随最新输出；用户上滑离开底部后暂停跟随。 */
 const FOLLOW_THRESHOLD_PX = 24
 const following = ref(true)
+const unseenContent = ref(false)
 
 function distanceToBottom(el: HTMLElement): number {
   return el.scrollHeight - el.scrollTop - el.clientHeight
@@ -339,10 +343,12 @@ function onScroll(): void {
     return
   }
   following.value = distanceToBottom(el) <= FOLLOW_THRESHOLD_PX
+  if (following.value) unseenContent.value = false
 }
 
 function scrollToBottom(): void {
   if (!following.value) {
+    unseenContent.value = true
     return
   }
   void nextTick(() => {
@@ -354,6 +360,7 @@ function scrollToBottom(): void {
 
 function resumeFollow(): void {
   following.value = true
+  unseenContent.value = false
   void nextTick(() => {
     rollRef.value?.scrollTo({ top: rollRef.value.scrollHeight, behavior: 'smooth' })
   })
@@ -375,6 +382,8 @@ defineExpose({ uiTurns })
           :turn="turn"
           :can-decide="canDecide"
           :cluster-name="clusterName"
+          :can-branch="canBranch"
+          @branch="emit('branch', $event)"
           @approve="(v: string, id?: string) => emit('approve', v, id)"
           @reject="(id?: string) => emit('reject', id)"
           @answer="(payload) => emit('answer', payload)"
@@ -383,7 +392,7 @@ defineExpose({ uiTurns })
     </template>
     <TechEmptyState v-else :title="props.emptyTitle" :hint="props.emptyHint" />
     <button v-if="!following && uiTurns.length" type="button" class="follow-latest" @click="resumeFollow">
-      有新内容，回到底部
+      {{ unseenContent ? '有新内容，回到底部' : '回到底部' }}
     </button>
   </div>
 </template>

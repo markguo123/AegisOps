@@ -11,6 +11,8 @@ package settings
 import (
 	"fmt"
 	"time"
+
+	"github.com/k8s-ai/k8s-ai/internal/config"
 )
 
 // 配置分组（需求 v1.2 §15）。
@@ -71,9 +73,11 @@ var catalog = map[string][]Definition{
 	GroupModel: {
 		{Key: "enabled", Kind: KindBool, Default: true, Source: "llm.enabled", Desc: "是否启用模型调用"},
 		{Key: "provider", Kind: KindString, Default: "openai-compatible", Desc: "模型提供方类型"},
+		{Key: "api_format", Kind: KindString, Default: config.ModelAPIChatCompletions, Enum: []string{config.ModelAPIChatCompletions}, Source: "llm.api_format", Desc: "API 格式。目前仅支持 OpenAI 兼容 Chat Completions"},
 		{Key: "base_url", Kind: KindString, Default: "http://localhost:8000/v1", Example: "http://localhost:8000/v1", Source: "llm.endpoint", Desc: "OpenAI 兼容接口地址"},
 		{Key: "api_key", Kind: KindString, Default: "", Sensitive: true, Source: "llm.api_key", Desc: "接口密钥（不回显）"},
 		{Key: "model", Kind: KindString, Default: "qwen-plus", Source: "llm.model", Desc: "模型名"},
+		{Key: "chat_models", Kind: KindJSON, Default: []any{}, Source: "llm.chat_models", Example: `[{"id":"model-a","context_window":131072}]`, Desc: "同一提供方下启用的问诊模型，每个模型单独填写部署支持的上下文窗口"},
 		{Key: "temperature", Kind: KindFloat, Default: 0.1, Min: 0, Max: 2, Source: "llm.temperature", Desc: "采样温度"},
 		{Key: "max_tokens", Kind: KindInt, Default: 4096, Min: 1, Source: "llm.max_tokens", Desc: "单次回复上限"},
 		{Key: "max_input_tokens", Kind: KindInt, Default: 8192, Min: 1, Source: "llm.max_input_tokens", Desc: "单条输入上限"},

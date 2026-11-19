@@ -5,8 +5,16 @@
  * 只回 hasValue，永不回明文（P3.9 落库静态加密）；PATCH 只更新出现的键，
  * 成功返回整组最新视图。
  */
-import { apiGet, apiPatch } from './request'
+import { apiGet, apiPatch, apiPost } from './request'
 import type { SettingsGroupView } from './types'
+
+export async function checkModel(action: 'discover' | 'probe', model?: string) {
+  const response = await apiPost<{ models: string[]; checkedAt: string }>(
+    `/settings/model/${action}`, action === 'probe' ? { model } : {},
+  )
+  if (!response.data) throw new Error('未收到模型检测结果')
+  return response.data
+}
 
 /** 读取配置分组视图（敏感键 value 为 null，仅回 hasValue）。 */
 export async function getSettings(group: string): Promise<SettingsGroupView> {
