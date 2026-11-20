@@ -60,17 +60,25 @@ type ChatModel struct {
 }
 
 type ModelProfile struct {
-	ID            string `json:"id" mapstructure:"id"`
-	Name          string `json:"name" mapstructure:"name"`
-	Model         string `json:"model" mapstructure:"model"`
-	Endpoint      string `json:"endpoint" mapstructure:"endpoint"`
-	APIKey        string `json:"apiKey" mapstructure:"apiKey"`
-	APIFormat     string `json:"apiFormat" mapstructure:"apiFormat"`
-	ContextWindow int    `json:"contextWindow" mapstructure:"contextWindow"`
-	MaxTokens     int    `json:"maxTokens" mapstructure:"maxTokens"`
+	Temperature    *float64 `json:"temperature,omitempty" mapstructure:"temperature"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty" mapstructure:"timeoutSeconds"`
+	ThinkingMode   string   `json:"thinkingMode,omitempty" mapstructure:"thinkingMode"`
+	ID             string   `json:"id" mapstructure:"id"`
+	Name           string   `json:"name" mapstructure:"name"`
+	Model          string   `json:"model" mapstructure:"model"`
+	Endpoint       string   `json:"endpoint" mapstructure:"endpoint"`
+	APIKey         string   `json:"apiKey" mapstructure:"apiKey"`
+	APIFormat      string   `json:"apiFormat" mapstructure:"apiFormat"`
+	ContextWindow  int      `json:"contextWindow" mapstructure:"contextWindow"`
+	MaxTokens      int      `json:"maxTokens" mapstructure:"maxTokens"`
 }
 
 func ValidateModelProfiles(profiles []ModelProfile) error {
+	for _, p := range profiles {
+		if (p.Temperature != nil && (*p.Temperature < 0 || *p.Temperature > 2)) || p.TimeoutSeconds < 0 || p.TimeoutSeconds > 3600 || (p.ThinkingMode != "" && p.ThinkingMode != "enabled" && p.ThinkingMode != "disabled") {
+			return fmt.Errorf("模型高级参数超出范围")
+		}
+	}
 	if len(profiles) > 50 {
 		return fmt.Errorf("最多添加 50 个模型")
 	}
@@ -113,23 +121,24 @@ func ValidateChatModels(models []ChatModel) error {
 }
 
 type LLMConfig struct {
-	ModelProfiles   []ModelProfile    `mapstructure:"model_profiles"`
-	ProfilesOnly    bool              `mapstructure:"-"`
-	APIFormat       string            `mapstructure:"api_format"`
-	ChatModels      []ChatModel       `mapstructure:"chat_models"`
-	Enabled         bool              `mapstructure:"enabled"`
-	Endpoint        string            `mapstructure:"endpoint"`
-	APIKey          string            `mapstructure:"api_key"`
-	Model           string            `mapstructure:"model"`
-	Temperature     float64           `mapstructure:"temperature"`
-	MaxTokens       int               `mapstructure:"max_tokens"`
-	MaxInputTokens  int               `mapstructure:"max_input_tokens"`
-	MaxTotalTokens  int               `mapstructure:"max_total_tokens"`
-	MaxFindings     int               `mapstructure:"max_findings"`
-	Timeout         time.Duration     `mapstructure:"timeout"`
-	Stream          bool              `mapstructure:"stream"`           // chat 流式输出（true = SSE 逐 token 推送到终端/Web）
-	Thinking        map[string]string `mapstructure:"thinking"`         // 标准思考参数，例如 {type: enabled}
-	ReasoningFields []string          `mapstructure:"reasoning_fields"` // 可选：SSE delta 中的思考字段名
+	ModelProfiles    []ModelProfile    `mapstructure:"model_profiles"`
+	DefaultChatModel string            `mapstructure:"default_chat_model"`
+	ScanModel        string            `mapstructure:"scan_model"`
+	APIFormat        string            `mapstructure:"api_format"`
+	ChatModels       []ChatModel       `mapstructure:"chat_models"`
+	Enabled          bool              `mapstructure:"enabled"`
+	Endpoint         string            `mapstructure:"endpoint"`
+	APIKey           string            `mapstructure:"api_key"`
+	Model            string            `mapstructure:"model"`
+	Temperature      float64           `mapstructure:"temperature"`
+	MaxTokens        int               `mapstructure:"max_tokens"`
+	MaxInputTokens   int               `mapstructure:"max_input_tokens"`
+	MaxTotalTokens   int               `mapstructure:"max_total_tokens"`
+	MaxFindings      int               `mapstructure:"max_findings"`
+	Timeout          time.Duration     `mapstructure:"timeout"`
+	Stream           bool              `mapstructure:"stream"`           // chat 流式输出（true = SSE 逐 token 推送到终端/Web）
+	Thinking         map[string]string `mapstructure:"thinking"`         // 标准思考参数，例如 {type: enabled}
+	ReasoningFields  []string          `mapstructure:"reasoning_fields"` // 可选：SSE delta 中的思考字段名
 }
 
 // ScanConfig controls collection behaviour (FR-004, FR-022, FR-024).

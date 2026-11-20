@@ -84,6 +84,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					"reason", err.Error())
 			}
 			settingsSvc := settings.New(st, settingsOpts...)
+			if err := settingsSvc.MigrateModels(cmd.Context(), cfg); err != nil {
+				return fmt.Errorf("迁移模型配置: %w", err)
+			}
 			// P3.5：Skill 平台装配——先写内置种子，再从 Store 重建内存 registry。
 			skillPlat := service.NewSkillPlatform(st.Skills())
 			if err := skillPlat.SeedBuiltins(cmd.Context()); err != nil {
@@ -139,7 +142,7 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					return settingsSvc.LoadRuntimeConfig(ctx, cfg)
 				}).
 				WithModelChecks(func(ctx context.Context) (*config.Config, error) {
-					return settingsSvc.ChatRuntimeConfig(ctx, cfg)
+					return settingsSvc.LoadRuntimeConfig(ctx, cfg)
 				}).
 				WithPlatformAccess(platformAccess).
 				WithClusters(clusterSvc).
@@ -159,7 +162,18 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					} else if err != nil {
 						logger.Warn("scan baseline: runtime config unavailable, falling back to static config file", "error", err)
 					}
-					return scanOptionsFromConfig(base)
+					if base.LLM.ScanModel != "" {
+						if resolved, _, err := service.ResolveConfiguredModel(base, base.LLM.ScanModel); err == nil {
+							base = resolved
+						} else {
+							options := scanOptionsFromConfig(base)
+							options.LLM.Enabled = false
+							return options
+						}
+					}
+					options := scanOptionsFromConfig(base)
+					options.LLM.Enabled = options.LLM.Enabled && base.LLM.ScanModel != ""
+					return options
 				}).
 				WithReadiness(func(ctx context.Context) error { return store.IsReady(ctx, st) }).
 				Handler()

@@ -13,7 +13,6 @@ const loading = ref(false)
 const error = ref('')
 const dialogOpen = ref(false)
 const editing = ref<ModelProfile>()
-const statuses = ref<Record<string, string>>({})
 async function load() {
   loading.value = true
   error.value = ''
@@ -31,8 +30,7 @@ function open(profile?: ModelProfile) {
   dialogOpen.value = true
 }
 
-async function saved(id: string, status: string) {
-  statuses.value[id] = status
+async function saved() {
   dialogOpen.value = false
   await load()
 }
@@ -68,7 +66,6 @@ onMounted(load)
           <strong>{{ profile.name }}</strong>
           <p>OpenAI 兼容 · {{ profile.model }} · {{ profile.contextWindow.toLocaleString() }} Token</p>
         </div>
-        <small :class="{ ok: statuses[profile.id]?.startsWith('测试通过'), failed: statuses[profile.id]?.startsWith('测试失败') }">{{ statuses[profile.id] || '未测试' }}</small>
         <div v-if="canWrite">
           <el-button text @click="open(profile)">编辑</el-button>
           <el-button text type="danger" @click="remove(profile)">删除</el-button>
@@ -88,9 +85,6 @@ onMounted(load)
   border: 1px solid var(--app-border);
   border-radius: 8px;
 }
-small::before { content: "●"; margin-right: 5px; color: var(--app-muted); }
-small.ok::before { color: #26986b; }
-small.failed::before { color: #d65353; }
 header, li {
   display: flex;
   justify-content: space-between;

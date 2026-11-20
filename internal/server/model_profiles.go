@@ -23,12 +23,15 @@ func (s *Server) WithModelProfiles(load func(context.Context) (*config.Config, e
 }
 
 type modelProfileFields struct {
-	Name          string `json:"name"`
-	Model         string `json:"model"`
-	Endpoint      string `json:"endpoint"`
-	APIFormat     string `json:"apiFormat"`
-	ContextWindow int    `json:"contextWindow"`
-	MaxTokens     int    `json:"maxTokens"`
+	Temperature    *float64 `json:"temperature,omitempty" mapstructure:"temperature"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty" mapstructure:"timeoutSeconds"`
+	ThinkingMode   string   `json:"thinkingMode,omitempty" mapstructure:"thinkingMode"`
+	Name           string   `json:"name"`
+	Model          string   `json:"model"`
+	Endpoint       string   `json:"endpoint"`
+	APIFormat      string   `json:"apiFormat"`
+	ContextWindow  int      `json:"contextWindow"`
+	MaxTokens      int      `json:"maxTokens"`
 }
 
 func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +59,7 @@ func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
 		for _, profile := range profiles {
 			rows = append(rows, view{ID: profile.ID, HasKey: profile.APIKey != "", modelProfileFields: modelProfileFields{
 				Name: profile.Name, Model: profile.Model, Endpoint: profile.Endpoint, APIFormat: profile.APIFormat,
-				ContextWindow: profile.ContextWindow, MaxTokens: profile.MaxTokens,
+				ContextWindow: profile.ContextWindow, MaxTokens: profile.MaxTokens, Temperature: profile.Temperature, TimeoutSeconds: profile.TimeoutSeconds, ThinkingMode: profile.ThinkingMode,
 			}})
 		}
 		writeOK(w, r, http.StatusOK, rows)
@@ -74,6 +77,10 @@ func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if id == cfg.LLM.DefaultChatModel || id == cfg.LLM.ScanModel {
+			writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "请先调整默认问诊或体检模型")
+			return
+		}
 		profiles = append(profiles[:index], profiles[index+1:]...)
 	} else {
 		var input struct {
@@ -89,7 +96,7 @@ func (s *Server) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
 		profile := config.ModelProfile{
 			ID: id, Name: strings.TrimSpace(input.Name), Model: strings.TrimSpace(input.Model),
 			Endpoint: strings.TrimSpace(input.Endpoint), APIFormat: input.APIFormat,
-			ContextWindow: input.ContextWindow, MaxTokens: input.MaxTokens,
+			ContextWindow: input.ContextWindow, MaxTokens: input.MaxTokens, Temperature: input.Temperature, TimeoutSeconds: input.TimeoutSeconds, ThinkingMode: input.ThinkingMode,
 		}
 		if input.APIKey != nil {
 			profile.APIKey = strings.TrimSpace(*input.APIKey)

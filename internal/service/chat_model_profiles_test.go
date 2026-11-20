@@ -16,7 +16,7 @@ func TestResolveIndependentModelProfiles(t *testing.T) {
 		{ID: "profile_b", Name: "私有 B", Model: "shared-name", Endpoint: "https://b.example/v1", APIKey: "key-b", APIFormat: config.ModelAPIChatCompletions, ContextWindow: 65536, MaxTokens: 2048},
 	}
 	for _, profile := range base.LLM.ModelProfiles {
-		cfg, selected, err := resolveChatModel(base, profile.ID)
+		cfg, selected, err := ResolveConfiguredModel(base, profile.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -28,14 +28,19 @@ func TestResolveIndependentModelProfiles(t *testing.T) {
 	if base.LLM.Model != "scan-default" || base.LLM.Endpoint != "https://scan.example/v1" {
 		t.Fatal("chat selection changed global configuration")
 	}
-	base.LLM.ProfilesOnly = true
 	if catalog := configuredChatModels(base); len(catalog) != 2 || catalog[0].Name != "私有 A" {
 		t.Fatalf("unexpected catalog: %+v", catalog)
 	}
-	if _, selected, err := resolveChatModel(base, ""); selected != "profile_a" || err != nil {
+	if _, selected, err := ResolveConfiguredModel(base, ""); selected != "profile_a" || err != nil {
 		t.Fatalf("expected first independent model: %s, %v", selected, err)
 	}
-	if _, _, err := resolveChatModel(base, "profile_removed"); !errors.Is(err, ErrChatModelUnavailable) {
+	if _, _, err := ResolveConfiguredModel(base, "profile_removed"); !errors.Is(err, ErrChatModelUnavailable) {
 		t.Fatalf("unavailable model must not fall back: %v", err)
+	}
+
+	base.LLM.DefaultChatModel = "profile_b"
+	resolved, id, err := ResolveConfiguredModel(base, "")
+	if err != nil || id != "profile_b" || resolved.Agent.ContextWindow != 65536 || configuredChatModels(base)[0].ID != id {
+		t.Fatalf("configured default was not applied: %q, %v", id, err)
 	}
 }

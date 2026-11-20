@@ -15,6 +15,9 @@ export interface ModelProfileInput {
   apiFormat: string
   contextWindow: number
   maxTokens: number
+  temperature?: number
+  timeoutSeconds?: number
+  thinkingMode?: string
   apiKey?: string
 }
 

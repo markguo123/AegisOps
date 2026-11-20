@@ -71,6 +71,9 @@ type Definition struct {
 // 目的是让 P1.12 的旧配置导入做到"非默认值全部入库、默认值不落库"。
 var catalog = map[string][]Definition{
 	GroupModel: {
+		{Key: "models_migrated", Kind: KindBool, Default: false},
+		{Key: "default_chat_model", Kind: KindString, Default: "", Source: "llm.default_chat_model", Desc: "默认问诊模型"},
+		{Key: "scan_model", Kind: KindString, Default: "", Source: "llm.scan_model", Desc: "体检诊断模型"},
 		{Key: "enabled", Kind: KindBool, Default: true, Source: "llm.enabled", Desc: "是否启用模型调用"},
 		{Key: "provider", Kind: KindString, Default: "openai-compatible", Desc: "模型提供方类型"},
 		{Key: "api_format", Kind: KindString, Default: config.ModelAPIChatCompletions, Enum: []string{config.ModelAPIChatCompletions}, Source: "llm.api_format", Desc: "API 格式。目前仅支持 OpenAI 兼容 Chat Completions"},
@@ -154,7 +157,7 @@ var catalog = map[string][]Definition{
 		{Key: "agent_result_max_bytes", Kind: KindInt, Default: 8192, Min: 1, Source: "agent.result_max_bytes", Desc: "工具结果字节上限"},
 		{Key: "agent_turn_max_bytes", Kind: KindInt, Default: 32768, Min: 1, Source: "agent.turn_max_bytes", Desc: "单轮上下文字节上限"},
 		{Key: "agent_history_turns", Kind: KindInt, Default: 20, Min: 1, Source: "agent.history_turns", Desc: "携带历史轮数"},
-		{Key: "agent_context_window", Kind: KindInt, Default: 65536, Min: 8192, Max: 4194304, Source: "agent.context_window", Desc: "模型上下文窗口 Token 容量（含输出预留，保守字节估算）"},
+		{Key: "agent_context_window", Kind: KindInt, Default: 65536, Min: 8192, Max: 4194304, Source: "agent.context_window", Desc: "部署默认窗口（Token）。平台问诊使用所选模型的上下文窗口"},
 		{Key: "agent_session_dir", Kind: KindString, Default: "~/.aegisops/sessions", Example: "~/.aegisops/sessions", Source: "agent.session_dir", Desc: "会话目录（旧数据兼容）"},
 		{Key: "agent_audit_dir", Kind: KindString, Default: "~/.aegisops/audit", Example: "~/.aegisops/audit", Source: "agent.audit_dir", Desc: "审计文件目录"},
 		{Key: "agent_disabled_tools", Kind: KindStringList, Default: []string{}, Example: "kubectl_exec, port_forward", Source: "agent.disabled_tools", Desc: "停用的工具"},

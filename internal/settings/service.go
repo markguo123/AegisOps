@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -378,26 +379,69 @@ func (s *Service) LoadRuntimeConfig(ctx context.Context, base *config.Config) (*
 	return cfg, err
 }
 
-// ChatRuntimeConfig 是给 Chat/LLM 使用的运行时生效配置（P6.1）：在
-// LoadRuntimeConfig 之上再加一道"模型是否已配置"的门禁。
-//
-// 门禁口径：配置中心已存值或环境变量覆盖算"已配置"。文件里的 llm.endpoint 与
-// 内置默认在 Load 之后无法区分，因此把"生效端点与模型名同时等于目录默认值"判定为
-// 未配置并返回 ErrModelNotConfigured——容器里首次启动没配模型时必须明确报错，
-// 不允许静默去连本地默认地址。
+// ChatRuntimeConfig requires a configured model in the unified catalog.
 func (s *Service) ChatRuntimeConfig(ctx context.Context, base *config.Config) (*config.Config, error) {
-	cfg, configured, err := s.loadRuntime(ctx, base)
+	cfg, err := s.LoadRuntimeConfig(ctx, base)
 	if err != nil {
 		return nil, err
 	}
-	if s.modelExplicitlyConfigured(configured, cfg) {
-		return cfg, nil
+	if len(cfg.LLM.ModelProfiles) == 0 {
+		return nil, ErrModelNotConfigured
 	}
-	if len(cfg.LLM.ModelProfiles) > 0 {
-		cfg.LLM.ProfilesOnly = true
-		return cfg, nil
+	return cfg, nil
+}
+
+// MigrateModels imports the effective deployment connection once into the encrypted model catalog.
+func (s *Service) MigrateModels(ctx context.Context, base *config.Config) error {
+	marker, err := s.store.Settings().Get(ctx, GroupModel, "models_migrated")
+	if err == nil && marker.Value == "true" {
+		return s.deleteLegacyModelSettings(ctx)
 	}
-	return nil, fmt.Errorf("%w: 请在配置中心「模型」分组设置接口地址与模型名，或部署时注入 AEGISOPS_LLM_ENDPOINT / AEGISOPS_LLM_MODEL", ErrModelNotConfigured)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	cfg, configured, err := s.loadRuntime(ctx, base)
+	if err != nil {
+		return err
+	}
+	if !s.modelExplicitlyConfigured(configured, cfg) {
+		return nil
+	}
+	profiles := append([]config.ModelProfile{}, cfg.LLM.ModelProfiles...)
+	legacy := append([]config.ChatModel{{ID: cfg.LLM.Model, ContextWindow: cfg.Agent.ContextWindow}}, cfg.LLM.ChatModels...)
+	ids := map[string]string{}
+	for _, entry := range legacy {
+		if ids[entry.ID] != "" || entry.ContextWindow <= cfg.LLM.MaxTokens {
+			continue
+		}
+		id := "profile_legacy_" + fmt.Sprintf("%x", sha256.Sum256([]byte(entry.ID)))[:24]
+		ids[entry.ID] = id
+		profiles = append(profiles, config.ModelProfile{ID: id, Name: entry.ID, Model: entry.ID, Endpoint: cfg.LLM.Endpoint, APIKey: cfg.LLM.APIKey, APIFormat: config.ModelAPIChatCompletions, ContextWindow: entry.ContextWindow, MaxTokens: cfg.LLM.MaxTokens})
+	}
+	chatID, scanID := cfg.LLM.DefaultChatModel, cfg.LLM.ScanModel
+	if chatID == "" {
+		chatID = ids[cfg.LLM.Model]
+	}
+	if scanID == "" {
+		scanID = ids[cfg.LLM.Model]
+	}
+	patch := map[string]json.RawMessage{}
+	for key, value := range map[string]any{"model_profiles": profiles, "models_migrated": true, "default_chat_model": chatID, "scan_model": scanID} {
+		patch[key], _ = json.Marshal(value)
+	}
+	if _, err := s.PatchGroup(ctx, GroupModel, patch, Actor{}); err != nil {
+		return err
+	}
+	return s.deleteLegacyModelSettings(ctx)
+}
+
+func (s *Service) deleteLegacyModelSettings(ctx context.Context) error {
+	for _, key := range []string{"provider", "api_format", "base_url", "api_key", "model", "chat_models", "max_tokens"} {
+		if err := s.store.Settings().Delete(ctx, GroupModel, key); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("清理旧模型配置 %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // modelExplicitlyConfigured 判定模型接入是否已被显式配置。

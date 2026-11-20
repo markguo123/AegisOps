@@ -3,7 +3,7 @@ import { computed, ref, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { checkModel, describeSettingsError, saveModelProfile, type ModelProfile, type ModelProfileInput } from '@/api/settings'
 const props = defineProps<{ editing?: ModelProfile }>()
-const emit = defineEmits<{ close: []; saved: [id: string, status: string] }>()
+const emit = defineEmits<{ close: []; saved: [] }>()
 const saving = ref(false)
 const clearKey = ref(false)
 
@@ -18,7 +18,6 @@ const ready = computed(() => draft.value.name.trim() && draft.value.model.trim()
 const candidates = ref<string[]>([])
 const busy = ref('')
 const notice = ref('')
-const probe = ref('')
 let controller: AbortController | undefined
 onUnmounted(() => { revision++; controller?.abort() })
 let revision = 0
@@ -28,7 +27,6 @@ watch([() => draft.value.endpoint, () => draft.value.apiKey, clearKey, () => dra
   revision++
   busy.value = ''
   notice.value = ''
-  probe.value = ''
 }, { flush: 'sync' })
 watch([() => draft.value.endpoint, () => draft.value.apiKey, clearKey], () => { candidates.value = [] })
 
@@ -46,21 +44,19 @@ async function check(action: 'discover' | 'probe') {
       candidates.value = result.models
       notice.value = `获取到 ${result.models.length} 个候选模型`
     } else {
-      probe.value = '测试通过 · ' + new Date(result.checkedAt).toLocaleTimeString()
-      notice.value = probe.value
+      notice.value = '测试通过 · ' + new Date(result.checkedAt).toLocaleTimeString()
     }
   } catch (failure) {
     if (revision !== current) return
     notice.value = describeSettingsError('模型检测', failure)
-    if (action === 'probe') probe.value = '测试失败 · ' + new Date().toLocaleTimeString()
   } finally {
     if (revision === current) busy.value = ''
   }
 }
 
 if (props.editing) {
-    const { name, model, endpoint, apiFormat, contextWindow, maxTokens } = props.editing
-    draft.value = { name, model, endpoint, apiFormat, contextWindow, maxTokens, apiKey: '' }
+    const { name, model, endpoint, apiFormat, contextWindow, maxTokens, temperature, timeoutSeconds, thinkingMode } = props.editing
+    draft.value = { name, model, endpoint, apiFormat, contextWindow, maxTokens, temperature, timeoutSeconds, thinkingMode, apiKey: '' }
 }
 async function save() {
   if (!ready.value || saving.value) return
@@ -71,7 +67,7 @@ async function save() {
       ...input,
       ...(clearKey.value ? { apiKey: '' } : apiKey?.trim() ? { apiKey } : {}),
     }, props.editing?.id)
-    if (result.data) emit('saved', result.data.id, probe.value)
+    if (result.data) emit('saved')
     ElMessage.success('模型已保存')
   } catch (failure) {
     ElMessage.error(describeSettingsError('保存模型', failure))
@@ -107,8 +103,20 @@ async function save() {
           <el-input-number v-model="draft.maxTokens" :min="1" :precision="0" />
         </el-form-item>
         <el-button :loading="busy === 'discover'" :disabled="!!busy || !draft.endpoint" @click="check('discover')">获取候选模型</el-button>
-        <el-button :loading="busy === 'probe'" :disabled="!!busy || !draft.endpoint || !draft.model" @click="check('probe')">测试所选模型</el-button>
+        <el-button v-if="!editing" :loading="busy === 'probe'" :disabled="!!busy || !draft.endpoint || !draft.model" @click="check('probe')">测试所选模型</el-button>
         <p role="status">{{ notice }}</p>
+        <details>
+          <summary>高级设置</summary>
+          <el-form-item label="温度（留空继承全局）"><el-input-number v-model="draft.temperature" :min="0" :max="2" :step="0.1" /></el-form-item>
+          <el-form-item label="超时秒数（留空继承全局）"><el-input-number v-model="draft.timeoutSeconds" :min="0" :max="3600" :precision="0" /></el-form-item>
+          <el-form-item label="思考模式">
+            <el-select v-model="draft.thinkingMode" placeholder="继承全局">
+              <el-option value="" label="继承全局" />
+              <el-option value="enabled" label="启用" />
+              <el-option value="disabled" label="关闭" />
+            </el-select>
+          </el-form-item>
+        </details>
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="emit('close')">取消</el-button>

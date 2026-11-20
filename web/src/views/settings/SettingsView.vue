@@ -8,6 +8,8 @@ import ModelProfiles from './ModelProfiles.vue'
 import {
   describeSettingsError,
   getSettings,
+  listModelProfiles,
+  type ModelProfile,
   patchSettings,
 } from '@/api/settings'
 import type { SettingsGroupView, SettingsItem } from '@/api/types'
@@ -29,6 +31,19 @@ const GROUPS: Array<{ key: string; title: string; desc: string }> = [
 
 const canRead = computed(() => hasPermission(permissionsOf(auth.role), PERM.settingsRead))
 const canWrite = computed(() => hasPermission(permissionsOf(auth.role), PERM.settingsWrite))
+
+const modelChoices = ref<ModelProfile[]>([])
+const modelAdvanced = ref(false)
+const modelLimits = ref(false)
+const modelRoutingKeys = ['enabled', 'default_chat_model', 'scan_model']
+const legacyModelKeys = ['provider', 'api_format', 'base_url', 'api_key', 'model', 'chat_models', 'max_tokens']
+function visibleField(item: SettingsItem) {
+  if (activeGroup.value !== 'model') return true
+  if (modelRoutingKeys.includes(item.key)) return true
+  if (['model_profiles', 'models_migrated'].includes(item.key)) return false
+  if (['max_input_tokens', 'max_total_tokens', 'max_findings'].includes(item.key)) return modelLimits.value
+  return !legacyModelKeys.includes(item.key) && modelAdvanced.value
+}
 
 const activeGroup = ref('model')
 const view = ref<SettingsGroupView | null>(null)
@@ -290,6 +305,15 @@ function buildPatch(): Record<string, unknown> {
   return patch
 }
 
+async function refreshModels(open: boolean) {
+  if (!open) return
+  try {
+    modelChoices.value = await listModelProfiles()
+  } catch (error) {
+    ElMessage.error(describeSettingsError('读取模型列表', error))
+  }
+}
+
 async function loadGroup(): Promise<void> {
   loading.value = true
   savingError.value = ''
@@ -297,6 +321,7 @@ async function loadGroup(): Promise<void> {
     const next = await getSettings(activeGroup.value)
     view.value = next
     initDrafts(next)
+    if (activeGroup.value === 'model' && next.items.some(item => item.key === 'default_chat_model')) void refreshModels(true)
   } catch (error) {
     ElMessage.error(describeSettingsError('加载配置', error))
   } finally {
@@ -405,7 +430,7 @@ onMounted(loadGroup)
                   :loading="saving"
                   @click="handleSave"
                 >
-                  {{ activeGroup === 'model' ? '保存开关' : '保存' }}
+                  {{ activeGroup === 'model' ? '保存模型设置' : '保存' }}
                 </el-button>
               </div>
             </div>
@@ -421,10 +446,14 @@ onMounted(loadGroup)
                 title="敏感配置暂不可保存"
                 description="服务端尚未配置 AEGISOPS_ENC_KEY。请联系平台管理员完成加密密钥配置后再保存 API Key、kubeconfig 或 MCP 配置。"
               />
-              <div v-for="item in view?.items.filter(entry => activeGroup !== 'model' || entry.key === 'enabled') ?? []" :key="item.key" class="field">
+              <div v-if="activeGroup === 'model'" class="row">
+                <el-button text @click="modelAdvanced = !modelAdvanced">高级设置</el-button>
+                <el-button text @click="modelLimits = !modelLimits">用量与诊断限制</el-button>
+              </div>
+              <div v-for="item in view?.items.filter(entry => visibleField(entry)) ?? []" :key="item.key" class="field">
                 <div class="field-meta">
                   <div class="row field-label">
-                    <span class="mono strong">{{ item.key === 'enabled' && activeGroup === 'model' ? '启用模型调用' : item.key }}</span>
+                    <span class="mono strong">{{ activeGroup === 'model' && item.key === 'enabled' ? '启用模型调用' : activeGroup === 'model' && modelRoutingKeys.includes(item.key) ? item.desc : item.key }}</span>
                     <span v-if="item.sensitive" class="pill" :class="item.hasValue ? 'ok' : 'mute'">
                       <el-icon class="tiny"><Key /></el-icon>
                       {{ item.hasValue ? '已配置' : '未配置' }}
@@ -462,7 +491,14 @@ onMounted(loadGroup)
                 </div>
 
                 <div class="field-control">
-                  <template v-if="item.sensitive">
+                  <el-select v-if="activeGroup === 'model' && ['default_chat_model', 'scan_model'].includes(item.key)"
+                    :model-value="draftAsString(item.key)" :disabled="!canWrite" @visible-change="refreshModels"
+                    @update:model-value="(value: string) => setDraft(item.key, value)">
+                    <el-option value="" :label="item.key === 'scan_model' ? '仅规则体检' : '自动选择'" />
+                    <el-option v-for="model in modelChoices" :key="model.id" :label="model.name" :value="model.id" />
+                  </el-select>
+
+                  <template v-else-if="item.sensitive">
                     <div v-if="item.kind === 'json'" class="secret-textarea">
                       <el-input
                         :model-value="draftAsString(item.key)"

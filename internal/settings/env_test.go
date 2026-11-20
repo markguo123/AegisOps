@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/k8s-ai/k8s-ai/internal/store"
 	"strings"
 	"testing"
 
@@ -278,13 +279,24 @@ func TestChatRuntimeConfigRequiresExplicitModel(t *testing.T) {
 		t.Fatalf("空白环境变量不应算已配置, got %v", err)
 	}
 
-	// 只配 env 端点（模型名留默认）：算已配置，不再拦对话。
-	envOnly := New(newTestStore(t), WithEnvLookup(staticEnv(map[string]string{"AEGISOPS_LLM_ENDPOINT": "http://gw.internal/v1"})))
+	envOnly := New(newTestStore(t), WithCipher(testCipher{}), WithEnvLookup(staticEnv(map[string]string{"AEGISOPS_LLM_ENDPOINT": "http://gw.internal/v1"})))
+	if _, err := envOnly.PatchGroup(ctx, GroupModel, patch(t, `{"model":"DeepSeek-V4-Flash"}`), Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := envOnly.MigrateModels(ctx, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := envOnly.store.Settings().Get(ctx, GroupModel, "model"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("旧模型记录应已删除: %v", err)
+	}
 	cfg, err := envOnly.ChatRuntimeConfig(ctx, base)
 	if err != nil {
-		t.Fatalf("env 覆盖端点应算已配置: %v", err)
+		t.Fatal(err)
 	}
-	if cfg.LLM.Endpoint != "http://gw.internal/v1" {
-		t.Fatalf("env 端点未落到运行时配置, got %q", cfg.LLM.Endpoint)
+	if len(cfg.LLM.ModelProfiles) != 1 || cfg.LLM.ModelProfiles[0].Endpoint != "http://gw.internal/v1" ||
+		cfg.LLM.DefaultChatModel != cfg.LLM.ModelProfiles[0].ID || cfg.LLM.ScanModel != cfg.LLM.DefaultChatModel {
+		t.Fatal("旧连接应只导入一次，并保留问诊与体检的默认选择")
 	}
 }
