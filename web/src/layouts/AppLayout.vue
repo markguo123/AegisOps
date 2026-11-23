@@ -82,8 +82,7 @@ const displayName = computed(() => auth.loginName || '未登录')
 const displayRole = computed(() => auth.user?.role ?? 'user')
 const userInitial = computed(() => displayName.value.charAt(0).toUpperCase() || 'K')
 
-const PLATFORM_VERSION = 'v4.0.0-dev'
-const isAdmin = computed(() => auth.user?.role === 'admin')
+const PLATFORM_VERSION = 'v4.0.0'
 
 // P7.1：主题切换（light | dark | system），默认深色，选择持久化到 localStorage。
 const { mode: themeMode, setThemeMode } = useTheme()
@@ -113,8 +112,6 @@ async function handleUserCommand(command: string | number | object): Promise<voi
     router.push({ name: 'login' })
   } else if (command === 'password') {
     passwordDialogVisible.value = true
-  } else if (command === 'admin') {
-    router.push({ path: '/app/admin' })
   }
 }
 
@@ -249,12 +246,9 @@ async function submitPasswordChange(): Promise<void> {
                 </el-dropdown-item>
                 <el-dropdown-item disabled class="user-version">
                   <span>平台版本</span>
-                  <el-tag size="small" effect="plain" type="info">{{ PLATFORM_VERSION }}</el-tag>
+                  <span class="user-version-value">{{ PLATFORM_VERSION }}</span>
                 </el-dropdown-item>
-                <el-dropdown-item v-if="isAdmin" divided command="admin">
-                  管理控制台
-                </el-dropdown-item>
-                <el-dropdown-item command="identity">企业身份绑定</el-dropdown-item>
+                <el-dropdown-item divided command="identity">企业身份绑定</el-dropdown-item>
                 <el-dropdown-item divided command="password">修改密码</el-dropdown-item>
                 <el-dropdown-item command="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
@@ -667,6 +661,12 @@ async function submitPasswordChange(): Promise<void> {
   width: 100%;
   font-size: 12px;
   color: var(--app-muted);
+}
+
+.user-version-value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .app-body {

@@ -71,12 +71,6 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/users/UsersView.vue'),
         meta: { title: '用户与权限', permission: PERM.userManage },
       },
-      {
-        path: 'admin',
-        name: 'admin',
-        component: () => import('@/views/admin/AdminView.vue'),
-        meta: { title: '管理控制台', permission: PERM.userManage },
-      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/app/chat' },
