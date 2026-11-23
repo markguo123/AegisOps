@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -13,7 +14,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 15
+const schemaVersion = 16
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -71,6 +72,7 @@ var migrations = []migration{
 	{version: 13, name: "chat display entities and persistent event log", up: migrateV13},
 	{version: 14, name: "audit center bounded query indexes", up: migrateV14},
 	{version: 15, name: "report retention lifecycle", up: migrateV15},
+	{version: 16, name: "retention policy confirmation and memory indexes", up: migrateV16},
 }
 
 // schemaV14Indexes 是审计中心（P4.7 / 方案 28 §2/§3）的有界查询索引：
@@ -1066,6 +1068,66 @@ func migrateV15(ctx context.Context, tx *sql.Tx, d dialect) error {
 		if _, err := tx.ExecContext(ctx, d.createIndex(index.name, index.table, index.cols)); err != nil && !d.isDuplicateIndexErr(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+func migrateV16(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, col := range []column{
+		{name: "interval_minutes", kind: colInt, def: "60"},
+		{name: "version", kind: colInt, def: "1"},
+	} {
+		if _, err := tx.ExecContext(ctx, d.addColumn("report_retention_policies", col)); err != nil && !d.isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	table := tableSpec{
+		name: "report_retention_previews",
+		cols: []column{
+			{name: "token_hash", kind: colText},
+			{name: "expires_at", kind: colTime},
+			{name: "payload", kind: colLong},
+		},
+		primaryKey: []string{"token_hash"},
+	}
+	if _, err := tx.ExecContext(ctx, d.createTable(table)); err != nil {
+		return err
+	}
+	runs := tableSpec{
+		name: "report_retention_runs",
+		cols: []column{
+			{name: "id", kind: colText},
+			{name: "generation", kind: colInt},
+			{name: "lease_until", kind: colTime},
+			{name: "payload", kind: colLong},
+			{name: "position", kind: colInt, def: "0"},
+			{name: "deleted", kind: colInt, def: "0"},
+			{name: "failed", kind: colInt, def: "0"},
+			{name: "status", kind: colText, def: "'running'"},
+		},
+		primaryKey: []string{"id"},
+	}
+	if _, err := tx.ExecContext(ctx, d.createTable(runs)); err != nil {
+		return err
+	}
+	for _, index := range []indexSpec{
+		{name: "idx_report_retention_preview_expiry", table: "report_retention_previews", cols: "expires_at"},
+		{name: "idx_memories_owner_cluster", table: "memories", cols: "user_id, cluster_id"},
+	} {
+		if _, err := tx.ExecContext(ctx, d.createIndex(index.name, index.table, index.cols)); err != nil && !d.isDuplicateIndexErr(err) {
+			return err
+		}
+	}
+	var legacyQuota string
+	err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE group_name = 'memory' AND key_name = 'max_items'`).Scan(&legacyQuota)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if limit, err := strconv.Atoi(legacyQuota); err == nil && limit > MaxDiagnosticMemoryQuota {
+		if _, err := tx.ExecContext(ctx, `UPDATE settings SET value = ? WHERE group_name = 'memory' AND key_name = 'max_items'`, strconv.Itoa(MaxDiagnosticMemoryQuota)); err != nil {
+			return err
+		}
+		slog.Warn("legacy diagnostic memory quota normalized", "previous", limit, "current", MaxDiagnosticMemoryQuota)
 	}
 	return nil
 }

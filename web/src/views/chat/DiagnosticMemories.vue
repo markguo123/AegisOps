@@ -9,7 +9,11 @@ const props = defineProps<{
   clusters: ReadonlyArray<{ id: string; name: string }>
   namespace?: string
   referencedIds?: string[]
+  sessionId?: string
+  turnId?: string
 }>()
+
+const emit = defineEmits<{ source: [sessionId: string, turnId: string] }>()
 
 function clusterName(id?: string): string {
   if (!id) return '未绑定集群'
@@ -27,6 +31,8 @@ interface Memory {
   workload?: string
   text?: string
   unavailable?: boolean
+  sourceSessionId?: string
+  sourceTurnId?: string
 }
 
 const open = ref(false)
@@ -34,6 +40,7 @@ const busy = ref(false)
 const rows = ref<Memory[]>([])
 const draft = ref<Memory | null>(null)
 const related = ref('')
+const nextPage = ref('')
 
 async function run(action: () => Promise<void>) {
   busy.value = true
@@ -46,9 +53,18 @@ async function run(action: () => Promise<void>) {
   }
 }
 
-async function refresh() {
-  rows.value = (await apiGet<Memory[]>('/me/memories')).data ?? []
+async function refresh(after = '') {
+  const page = (await apiGet<Memory[]>('/me/memories', undefined, { after: after || undefined })).data ?? []
+  rows.value = after ? [...rows.value, ...page] : page
+  nextPage.value = page.length === 50 ? page[page.length - 1]?.id ?? '' : ''
 }
+
+function openSource(memory: Memory) {
+  if (!memory.sourceSessionId || !memory.sourceTurnId) return
+  open.value = false
+  emit('source', memory.sourceSessionId, memory.sourceTurnId)
+}
+
 
 function show() {
   open.value = true
@@ -72,7 +88,10 @@ function reviewSuggestion(suggestion?: DiagnosticMemoryDraft) {
   show()
   edit()
   if (suggestion && draft.value) {
-    Object.assign(draft.value, suggestion)
+    Object.assign(draft.value, suggestion, {
+      sourceSessionId: props.sessionId,
+      sourceTurnId: props.turnId,
+    })
     related.value = suggestion.relatedNamespaces.join(', ')
   }
 }
@@ -126,10 +145,14 @@ async function forget(id?: string) {
         <template v-else>
           <p>{{ clusterName(memory.clusterId) }} / {{ memory.namespace }} / {{ memory.workload }}</p>
           <p>{{ memory.text }}</p>
-          <el-button size="small" :disabled="busy" @click="edit(memory)">编辑</el-button>
+          <el-button size="small" :disabled="busy || Boolean(memory.expiresAt && Date.parse(memory.expiresAt) <= Date.now())" @click="edit(memory)">编辑</el-button>
+          <el-button v-if="memory.sourceSessionId && memory.sourceTurnId" text size="small" @click="openSource(memory)">
+            查看来源
+          </el-button>
         </template>
         <el-button size="small" :disabled="busy" @click="forget(memory.id)">遗忘</el-button>
       </div>
+      <el-button v-if="nextPage" :disabled="busy" text @click="run(() => refresh(nextPage))">加载更多</el-button>
       <el-form v-if="draft" label-position="top" :disabled="busy" @submit.prevent="save">
         <el-form-item label="集群"><el-input :model-value="clusterName(draft.clusterId)" readonly /></el-form-item>
         <el-form-item label="主命名空间"><el-input v-model="draft.namespace" /></el-form-item>

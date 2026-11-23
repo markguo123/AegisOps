@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
 // 配置分组（需求 v1.2 §15）。
@@ -32,7 +33,7 @@ const GroupMigration = "migration"
 
 // Groups 返回对外可见的配置分组（稳定顺序）。
 func Groups() []string {
-	return []string{GroupModel, GroupSkill, GroupApproval, GroupMemory, GroupRetention, GroupMCP, GroupOps}
+	return []string{GroupModel, GroupSkill, GroupApproval, GroupMemory, GroupMCP, GroupOps}
 }
 
 // Kind 是配置值类型，决定校验、存储编码与 API 回显形态。
@@ -111,16 +112,8 @@ var catalog = map[string][]Definition{
 		{Key: "secret_read_approval", Kind: KindString, Default: "always", Enum: []string{"always", "auto"}, Source: "agent.secret.read_approval", Desc: "Secret 明文读取必须逐次确认；auto 旧配置兼容为 always"},
 	},
 	GroupMemory: {
-		{Key: "enabled", Kind: KindBool, Default: false, Desc: "启用长期记忆（P5.2 消费）"},
-		{Key: "scope_user", Kind: KindBool, Default: true, Desc: "允许用户级记忆"},
-		{Key: "scope_namespace", Kind: KindBool, Default: true, Desc: "允许命名空间级记忆"},
-		{Key: "scope_cluster", Kind: KindBool, Default: true, Desc: "允许集群级记忆"},
-		{Key: "max_items", Kind: KindInt, Default: 200, Min: 1, Desc: "单作用域条目上限"},
-	},
-	GroupRetention: {
-		{Key: "enabled", Kind: KindBool, Default: false, Desc: "启用自动清理（P5.4 消费）"},
-		{Key: "default_retention_days", Kind: KindInt, Default: 90, Min: 0, Desc: "默认保留天数"},
-		{Key: "default_cleanup_mode", Kind: KindString, Default: "delete", Enum: []string{"delete", "archive"}, Desc: "默认清理方式"},
+		{Key: "enabled", Kind: KindBool, Default: false, Desc: "允许保存、编辑和跨会话召回个人诊断记忆"},
+		{Key: "max_items", Kind: KindInt, Default: store.DefaultDiagnosticMemoryQuota, Min: 1, Max: store.MaxDiagnosticMemoryQuota, Desc: "每位用户可保留的未到期记忆数，降低限额会保留现有记忆"},
 	},
 	GroupMCP: {
 		{Key: "enabled", Kind: KindBool, Default: false, Source: "mcp.enabled", Desc: "启用 MCP 外部工具"},

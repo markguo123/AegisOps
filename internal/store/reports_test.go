@@ -210,6 +210,11 @@ func TestReportRetentionRunsOnlyOnceAndKeepsUnfinalizedReports(t *testing.T) {
 	if err := st.Reports().SetReportRetentionPolicy(ctx, policy, "admin"); err != nil {
 		t.Fatal(err)
 	}
+	policies, err := st.Reports().ReportRetentionPolicies(ctx)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("policies = %+v, err = %v", policies, err)
+	}
+	policy = policies[0]
 	for _, want := range []int{1, 0} {
 		if deleted, err := st.Reports().RunReportRetention(ctx, policy, now); err != nil || deleted != want {
 			t.Fatalf("deleted = %d, want %d, err = %v", deleted, want, err)
@@ -226,5 +231,66 @@ func TestReportRetentionRunsOnlyOnceAndKeepsUnfinalizedReports(t *testing.T) {
 	events, err := st.Audit().List(ctx)
 	if err != nil || len(events) != 3 {
 		t.Fatalf("audit events = %+v, err = %v", events, err)
+	}
+}
+
+func TestReportRetentionLeaseTakeoverAndStopFence(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	reports := st.Reports().(*reportStore)
+	now := time.Now().UTC().Add(-time.Second).Truncate(time.Millisecond)
+	if err := st.Clusters().Create(ctx, &Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"first", "second", "protected"} {
+		at := now.AddDate(0, 0, -3)
+		if id == "protected" {
+			at = now
+		}
+		report := insertTestReport(t, st, id, "prod", "latest-md", "u1", at)
+		if err := reports.FinalizeRetentionScan(ctx, report.ScanID, "prod", "u1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := ReportRetentionPolicy{ClusterID: "prod", Kind: "latest-md", Days: 1, Minimum: 1, IntervalMinutes: 30, NextRun: now, Enabled: true}
+	if err := reports.SetReportRetentionPolicy(ctx, p, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := reports.ReportRetentionPolicies(ctx)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("policies = %+v, err = %v", policies, err)
+	}
+	p = policies[0]
+	first, err := reports.claimRetentionRun(ctx, p)
+	if err != nil || first == nil || len(first.candidates) != 2 {
+		t.Fatalf("initial claim = %+v, err = %v", first, err)
+	}
+	if other, err := reports.claimRetentionRun(ctx, p); err != nil || other != nil {
+		t.Fatalf("second claim while lease is active = %+v, err = %v", other, err)
+	}
+	if deleted, advanced, err := reports.runRetentionItem(ctx, p, first, false); err != nil || !deleted || !advanced {
+		t.Fatalf("first item deleted=%t advanced=%t err=%v", deleted, advanced, err)
+	}
+	if _, err := reports.s.db.ExecContext(ctx, `UPDATE report_retention_runs SET lease_until = ? WHERE id = ?`, now, first.id); err != nil {
+		t.Fatal(err)
+	}
+	next, err := reports.claimRetentionRun(ctx, p)
+	if err != nil || next == nil || next.position != 1 || next.generation <= first.generation {
+		t.Fatalf("resumed claim = %+v, err = %v", next, err)
+	}
+	first.position = next.position
+	if _, advanced, err := reports.runRetentionItem(ctx, p, first, false); err != nil || advanced {
+		t.Fatalf("stale owner advanced=%t err=%v", advanced, err)
+	}
+	stopped := p
+	stopped.Enabled = false
+	if err := reports.SetReportRetentionPolicy(ctx, stopped, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, advanced, err := reports.runRetentionItem(ctx, p, next, false); err != nil || advanced {
+		t.Fatalf("disabled policy advanced=%t err=%v", advanced, err)
+	}
+	if _, err := reports.Get(ctx, next.candidates[1][0]); err != nil {
+		t.Fatalf("remaining report disappeared: %v", err)
 	}
 }

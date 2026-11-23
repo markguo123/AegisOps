@@ -994,11 +994,10 @@ func TestReportRetentionPolicyRequiresRecentPreviewAndCanStop(t *testing.T) {
 	}
 	input := struct {
 		store.ReportRetentionPolicy
-		Cutoff   time.Time `json:"cutoff"`
-		Eligible int64     `json:"eligible"`
+		Token string `json:"token"`
 	}{
 		ReportRetentionPolicy: store.ReportRetentionPolicy{ClusterID: "prod", Kind: "latest-md", Days: 30, Minimum: 5, Enabled: true},
-		Cutoff:                preview.Data.Cutoff, Eligible: preview.Data.Eligible,
+		Token:                 preview.Data.Token,
 	}
 	for _, enabled := range []bool{true, false} {
 		input.Enabled = enabled
@@ -1008,6 +1007,11 @@ func TestReportRetentionPolicyRequiresRecentPreviewAndCanStop(t *testing.T) {
 		}
 		if status, _, raw := f.req(t, http.MethodPut, path, admin, string(encoded)); status != http.StatusOK {
 			t.Fatalf("enabled=%t: %d %s", enabled, status, raw)
+		}
+		if enabled {
+			if status, _, raw := f.req(t, http.MethodPut, path, admin, string(encoded)); status != http.StatusConflict {
+				t.Fatalf("replayed preview: %d %s", status, raw)
+			}
 		}
 	}
 	policies, err := f.st.Reports().ReportRetentionPolicies(context.Background())

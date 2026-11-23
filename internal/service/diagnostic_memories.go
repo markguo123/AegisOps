@@ -15,6 +15,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/security"
+	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/store"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -27,6 +28,8 @@ var (
 )
 
 type DiagnosticMemory struct {
+	SourceSessionID   string     `json:"sourceSessionId,omitempty"`
+	SourceTurnID      string     `json:"sourceTurnId,omitempty"`
 	RequestKey        string     `json:"requestKey,omitempty"`
 	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
 	Version           time.Time  `json:"version,omitempty"`
@@ -40,6 +43,7 @@ type DiagnosticMemory struct {
 }
 
 type DiagnosticMemories struct {
+	chat   *chatService
 	store  store.Store
 	grants *authz.Service
 }
@@ -126,6 +130,9 @@ func (s *DiagnosticMemories) save(ctx context.Context, owner string, m Diagnosti
 		if json.Unmarshal([]byte(existing.Content), &previous) != nil || !s.visible(ctx, owner, previous) {
 			return DiagnosticMemory{}, store.ErrNotFound
 		}
+		if previous.ExpiresAt != nil && !previous.ExpiresAt.After(time.Now()) {
+			return DiagnosticMemory{}, ErrInvalidMemory
+		}
 		if !existing.UpdatedAt.Equal(m.Version) {
 			return DiagnosticMemory{}, store.ErrMemoryConflict
 		}
@@ -137,7 +144,15 @@ func (s *DiagnosticMemories) save(ctx context.Context, owner string, m Diagnosti
 			m.ID = fmt.Sprintf("memory_%x", sum[:16])
 		}
 	}
-	m.Version = time.Now().UTC().Truncate(time.Microsecond)
+	if m.SourceSessionID != "" || m.SourceTurnID != "" {
+		if !s.validSource(ctx, owner, m) {
+			return DiagnosticMemory{}, store.ErrNotFound
+		}
+	}
+	m.Version = time.Now().UTC().Truncate(time.Millisecond)
+	if existing != nil && !m.Version.After(existing.UpdatedAt) {
+		m.Version = existing.UpdatedAt.Add(time.Millisecond).Truncate(time.Millisecond)
+	}
 	m.Unavailable = false
 	payload, err := json.Marshal(m)
 	if err != nil {
@@ -150,7 +165,7 @@ func (s *DiagnosticMemories) save(ctx context.Context, owner string, m Diagnosti
 	if existing != nil {
 		err = s.store.Memories().UpdateOwned(ctx, row, existing.Content)
 	} else {
-		err = s.store.Memories().Create(ctx, row)
+		err = s.store.Memories().CreateWithQuota(ctx, row)
 		if err != nil && requestKey != "" {
 			previous, lookupErr := s.store.Memories().Get(ctx, row.ID)
 			if lookupErr == nil && previous.UserID == owner && previous.Scope == row.Scope {
@@ -170,8 +185,8 @@ func (s *DiagnosticMemories) save(ctx context.Context, owner string, m Diagnosti
 	return m, err
 }
 
-func (s *DiagnosticMemories) List(ctx context.Context, owner string) ([]DiagnosticMemory, error) {
-	rows, err := s.store.Memories().ListOwned(ctx, owner, 200)
+func (s *DiagnosticMemories) List(ctx context.Context, owner, after string) ([]DiagnosticMemory, error) {
+	rows, err := s.store.Memories().ListOwnedPage(ctx, owner, confirmedDiagnosticMemory, after, 50)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +199,9 @@ func (s *DiagnosticMemories) List(ctx context.Context, owner string) ([]Diagnost
 		if json.Unmarshal([]byte(row.Content), &memory) != nil || memory.ID != row.ID ||
 			memory.ClusterID != row.ClusterID || memory.Namespace != row.Namespace || !s.visible(ctx, owner, memory) {
 			memory = DiagnosticMemory{ID: row.ID, Unavailable: true}
+		}
+		if memory.SourceSessionID != "" && !s.validSource(ctx, owner, memory) {
+			memory.SourceSessionID, memory.SourceTurnID = "", ""
 		}
 		memory.Version = row.UpdatedAt
 		result = append(result, memory)
@@ -204,7 +222,10 @@ func (s *DiagnosticMemories) Recall(ctx context.Context, owner, cluster, namespa
 		return "", nil
 	}
 	tokens := memoryQueryToken.FindAllString(strings.ToLower(query), -1)
-	rows, err := s.store.Memories().ListOwned(ctx, owner, 200)
+	for i := range tokens {
+		tokens[i] = strings.TrimRight(tokens[i], ".")
+	}
+	rows, err := s.store.Memories().ListOwnedForCluster(ctx, owner, cluster)
 	if err != nil {
 		return "", nil
 	}
@@ -256,5 +277,18 @@ func memoryWithinCoverage(memory DiagnosticMemory, check func(authz.Target) erro
 func BindDiagnosticMemories(chat ChatService, memories *DiagnosticMemories) {
 	if platformChat, ok := chat.(*chatService); ok {
 		platformChat.diagnosticMemories = memories
+		memories.chat = platformChat
 	}
+}
+
+func (s *DiagnosticMemories) validSource(ctx context.Context, owner string, memory DiagnosticMemory) bool {
+	if memory.SourceSessionID == "" || memory.SourceTurnID == "" {
+		return false
+	}
+	source, err := s.store.Sessions().Get(ctx, memory.SourceSessionID)
+	if err != nil || source.UserID != owner || source.Cluster != memory.ClusterID {
+		return false
+	}
+	turn, err := s.store.Turns().Get(ctx, memory.SourceTurnID)
+	return err == nil && turn.SessionID == source.ID && turn.UserID == owner && turn.Status == session.TurnDone
 }

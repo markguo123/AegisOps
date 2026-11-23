@@ -26,11 +26,6 @@ import {
   getReportSummary,
   getStorageHealth,
   listReports,
-  previewReportRetention,
-  listReportRetentionPolicies,
-  saveReportRetentionPolicy,
-  type ReportRetentionPolicy,
-  type ReportRetentionPreview,
 } from '@/api/reports'
 import {
   SCAN_FORMATS,
@@ -64,79 +59,6 @@ import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
-
-const retentionOpen = ref(false)
-const retentionPolicies = ref<ReportRetentionPolicy[]>([])
-const retentionLoading = ref(false)
-const retentionResult = ref<ReportRetentionPreview | null>(null)
-const retentionCluster = ref('')
-const retentionKind = ref('latest-md')
-const retentionDays = ref(90)
-const retentionMinimum = ref(5)
-const canPreviewRetention = computed(() => auth.user?.role === 'admin')
-
-async function openRetentionPreview() {
-  retentionCluster.value = filterCluster.value
-  retentionResult.value = null
-  retentionOpen.value = true
-  retentionPolicies.value = []
-  try {
-    retentionPolicies.value = await listReportRetentionPolicies()
-  } catch (err) {
-    ElMessage.error(describeReportError('读取保留策略', err))
-  }
-}
-
-async function changeRetentionPolicy(enabled: boolean, saved?: ReportRetentionPolicy) {
-  if (retentionLoading.value || (enabled && !retentionResult.value)) return
-  const preview = retentionResult.value ?? undefined
-  const policy = saved ?? {
-    clusterId: retentionCluster.value,
-    kind: retentionKind.value,
-    days: retentionDays.value,
-    minimum: retentionMinimum.value,
-  }
-  retentionLoading.value = true
-  try {
-    if (enabled) {
-      try {
-        await ElMessageBox.confirm(
-          '启用后将定时删除符合策略的报告引用，范围包含所选集群和类型下各用户的报告。',
-          '启用报告自动清理',
-          { confirmButtonText: '启用', type: 'warning' },
-        )
-      } catch {
-        return
-      }
-    }
-    await saveReportRetentionPolicy({ ...policy, enabled }, preview)
-    retentionResult.value = null
-    ElMessage.success(enabled ? '已启用报告自动清理' : '已停用报告自动清理')
-    retentionPolicies.value = await listReportRetentionPolicies()
-  } catch (err) {
-    ElMessage.error(describeReportError('更新保留策略', err))
-  } finally {
-    retentionLoading.value = false
-  }
-}
-
-async function loadRetentionPreview() {
-  if (retentionLoading.value) return
-  retentionLoading.value = true
-  retentionResult.value = null
-  try {
-    retentionResult.value = await previewReportRetention(
-      retentionCluster.value,
-      retentionKind.value,
-      retentionDays.value,
-      retentionMinimum.value,
-    )
-  } catch (err) {
-    ElMessage.error(describeReportError('计算保留预览', err))
-  } finally {
-    retentionLoading.value = false
-  }
-}
 
 const reports = ref<ReportView[]>([])
 const clusters = ref<Cluster[]>([])
@@ -907,51 +829,6 @@ onBeforeUnmount(stopPolling)
 
 <template>
   <section class="report-page">
-    <el-dialog v-if="canPreviewRetention" v-model="retentionOpen" title="报告保留策略" width="min(500px, 92vw)">
-      <el-form label-position="top" :disabled="retentionLoading" @submit.prevent="loadRetentionPreview">
-        <el-form-item label="集群">
-          <el-select v-model="retentionCluster" filterable @change="retentionResult = null">
-            <el-option v-for="cluster in clusters" :key="cluster.id" :label="cluster.name" :value="cluster.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="报告类型">
-          <el-select v-model="retentionKind" @change="retentionResult = null">
-            <el-option label="Markdown" value="latest-md" />
-            <el-option label="JSON" value="latest-json" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="保留天数">
-          <el-input-number v-model="retentionDays" :min="1" :max="36500" :precision="0" @change="retentionResult = null" />
-        </el-form-item>
-        <el-form-item label="至少保留最近份数">
-          <el-input-number v-model="retentionMinimum" :min="1" :max="1000000" :precision="0" @change="retentionResult = null" />
-        </el-form-item>
-        <el-button native-type="submit" type="primary" :loading="retentionLoading"
-          :disabled="!retentionCluster || !retentionDays || !retentionMinimum">
-          计算预览
-        </el-button>
-      </el-form>
-      <div v-if="retentionResult" aria-live="polite">
-        <p>共 {{ retentionResult.total }} 份，按策略保护 {{ retentionResult.protected }} 份，可清理 {{ retentionResult.eligible }} 份，无法确认扫描终态 {{ retentionResult.excluded }} 份。</p>
-        <el-button type="danger" :disabled="retentionLoading" @click="changeRetentionPolicy(true)">
-          启用自动清理
-        </el-button>
-        <p>到期截止时间 {{ retentionResult.cutoff }}</p>
-        <p>包含该集群和报告类型下各用户的报告。扫描终态无法确认的报告会保留。</p>
-      </div>
-      <div v-for="policy in retentionPolicies" :key="policy.clusterId + ':' + policy.kind">
-        <p>
-          {{ clusters.find(cluster => cluster.id === policy.clusterId)?.name || '集群名称不可用' }}
-          · {{ policy.kind === 'latest-md' ? 'Markdown' : 'JSON' }}
-          · {{ policy.enabled ? '已启用' : '已停用' }}
-          · {{ policy.days }} 天 / 至少 {{ policy.minimum }} 份
-        </p>
-        <p v-if="policy.enabled">下次执行 {{ new Date(policy.nextRun).toLocaleString() }}</p>
-        <p v-if="policy.lastRun">上次清理 {{ new Date(policy.lastRun).toLocaleString() }}，删除 {{ policy.lastDeleted }} 份</p>
-        <el-button v-if="policy.enabled" size="small" :disabled="retentionLoading"
-          @click="changeRetentionPolicy(false, policy)">停用</el-button>
-      </div>
-    </el-dialog>
     <div class="page-head">
       <h2 class="title">智能体检中心</h2>
       <span class="desc"> 开始体检并查看根因分析、故障关联分析与证据；报告正文按需从对象存储取回 </span>
@@ -974,7 +851,8 @@ onBeforeUnmount(stopPolling)
         >
           开始体检
         </el-button>
-        <el-button v-if="canPreviewRetention" @click="openRetentionPreview">
+        <el-button v-if="auth.user?.role === 'admin'"
+          @click="router.push({ name: 'settings', query: { tab: 'retention', clusterId: filterCluster, kind: filterKind } })">
           报告保留
         </el-button>
         <el-button :icon="Refresh" :loading="loading" @click="refreshAll">刷新</el-button>

@@ -21,7 +21,8 @@ import (
 //
 // Tx 不提供 ExecContext 之类的逃生口：一旦开了口子，「事务里随便写」就等于没有边界。
 type Tx struct {
-	tx *sql.Tx
+	tx      *sql.Tx
+	dialect dialect
 	// sessionMaxBytes 由 dbStore 在开事务时带入：会话正文的容量闸门必须对事务路径同样
 	// 生效，否则 Chat 的主写入（就在 WithTx 回调里）能绕过上限（P8.6）。
 	sessionMaxBytes int64
@@ -44,7 +45,7 @@ func (s *dbStore) WithTx(ctx context.Context, fn func(*Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	t := &Tx{tx: sqlTx, sessionMaxBytes: s.sessionMaxBytes}
+	t := &Tx{tx: sqlTx, dialect: s.dialect, sessionMaxBytes: s.sessionMaxBytes}
 	if err := fn(t); err != nil {
 		if rbErr := sqlTx.Rollback(); rbErr != nil {
 			return fmt.Errorf("%w (rollback failed: %v)", err, rbErr)
