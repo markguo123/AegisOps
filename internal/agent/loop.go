@@ -152,7 +152,11 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			budget.InputEstimate = EstimateRequestTokens(req.Messages, req.Tools)
 		}
 		a.flowContextBudget = budget
-		a.audit(ctx, audit.ActionLLMRequest, map[string]any{"mode": mode, "messages": len(msgs), "tools": len(req.Tools)})
+		requestAudit := map[string]any{"mode": mode, "messages": len(msgs), "tools": len(req.Tools)}
+		if len(memoryIDs) > 0 {
+			requestAudit["memory_ids"] = memoryIDs
+		}
+		a.audit(ctx, audit.ActionLLMRequest, requestAudit)
 		// 每次模型调用有自己的消息与 invocation_id；正文先建立 part 再接收增量。
 		a.beginFlowMessage(ctx)
 		a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityGenerating, "")

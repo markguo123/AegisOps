@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { apiPost } from '@/api/request'
 import DiagnosticMemories from './DiagnosticMemories.vue'
-import { parseDiagnosticMemoryDraft } from './diagnosticMemoryDraft'
+import { parseDiagnosticMemoryDraft, type DiagnosticMemoryDraft } from './diagnosticMemoryDraft'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -336,17 +337,25 @@ async function handleBranch(turnId: string) {
 
 function openBranchSource() {
   const origin = branchOrigin.value
-  if (!origin) return
-  if (!sessions.value.some(session => session.id === origin.sessionId && session.state !== 'restricted')) {
+  if (origin) openMemorySource(origin.sessionId, origin.turnId)
+}
+
+function openMemorySource(sessionId: string, turnId: string) {
+  if (!sessions.value.some(session => session.id === sessionId && session.state !== 'restricted')) {
     ElMessage.warning('来源会话不可访问')
     return
   }
-  selectSession(origin.sessionId)
+  const element = activeId.value === sessionId ? document.getElementById(`turn-${turnId}`) : null
+  if (element) {
+    element.scrollIntoView({ block: 'center' })
+    return
+  }
+  selectSession(sessionId)
   const stop = watch(
-    () => stream.turns.value.some(turn => turn.session_id === origin.sessionId && turn.turn_id === origin.turnId),
+    () => stream.turns.value.some(turn => turn.session_id === sessionId && turn.turn_id === turnId),
     (ready) => {
       if (ready) {
-        document.getElementById(`turn-${origin.turnId}`)?.scrollIntoView({ block: 'center' })
+        document.getElementById(`turn-${turnId}`)?.scrollIntoView({ block: 'center' })
         stop()
       }
     }, { flush: 'post' },
@@ -472,8 +481,29 @@ async function handleSend(): Promise<void> {
     return
   }
   if (diagnosticMemories.value && /^(?:请)?(?:帮我)?(?:记住|保留|保存)(?:刚才|这次|本轮)(?:的)?(?:排查方法|排查经验|诊断经验)[。！!]?$/u.test(raw)) {
-    reviewMemorySuggestion()
     input.value = ''
+    const turn = latestTurn.value
+    if (memorySuggestion.value || !turn || turn.status !== 'done') {
+      reviewMemorySuggestion()
+      return
+    }
+    sending.value = true
+    try {
+      const env = await apiPost<DiagnosticMemoryDraft>('/me/memories/draft', {
+        sourceSessionId: turn.session_id,
+        sourceTurnId: turn.turn_id,
+      })
+      if (activeId.value !== turn.session_id) return
+      diagnosticMemories.value?.reviewSuggestion(env.data ?? undefined)
+      if (!env.data) ElMessage.info('本轮没有可自动提炼的经验，可手工填写。')
+    } catch (error) {
+      if (activeId.value === turn.session_id) {
+        diagnosticMemories.value?.reviewSuggestion()
+        ElMessage.warning(error instanceof Error ? error.message : '暂无法生成草稿，可手工填写。')
+      }
+    } finally {
+      sending.value = false
+    }
     return
   }
   const available = composerRef.value?.availableSkills ?? []
@@ -731,7 +761,8 @@ watch(
         </div>
         <div v-if="activeSession" class="chat-meta">
           <DiagnosticMemories v-if="!viewingOthersSession" ref="diagnosticMemories" :cluster-id="activeSession.clusterId" :clusters="clusters"
-            :referenced-ids="contextBudget?.memory_ids" />
+            :referenced-ids="contextBudget?.memory_ids" :session-id="activeSession.id"
+            :turn-id="latestTurn?.turn_id" @source="openMemorySource" />
           <el-button v-if="branchOrigin" text size="small" @click="openBranchSource">继承历史问答 · 查看来源</el-button>
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
             目标集群：{{ activeClusterName || '未绑定' }}

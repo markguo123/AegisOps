@@ -2,50 +2,36 @@ package service
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
-func (p *ReportPlatform) PreviewReportRetention(ctx context.Context, clusterID, kind string, days, minimum int) (store.ReportRetentionPreview, error) {
-	if _, err := p.st.Clusters().Get(ctx, clusterID); err != nil {
+func (p *ReportPlatform) PreviewReportRetention(ctx context.Context, policy store.ReportRetentionPolicy, actor string) (store.ReportRetentionPreview, error) {
+	if _, err := p.st.Clusters().Get(ctx, policy.ClusterID); err != nil {
 		return store.ReportRetentionPreview{}, err
 	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -days)
-	return p.st.Reports().PreviewRetention(ctx, clusterID, kind, cutoff, minimum)
+	cutoff := time.Now().UTC().AddDate(0, 0, -policy.Days)
+	return p.st.Reports().IssueRetentionPreview(ctx, policy, actor, cutoff)
 }
 
 func (p *ReportPlatform) FinalizeReportRetentionScan(ctx context.Context, scanID, clusterID, ownerID string) error {
 	return p.st.Reports().FinalizeRetentionScan(ctx, scanID, clusterID, ownerID)
 }
 
-var ErrRetentionPreviewRequired = errors.New("report retention preview has expired or changed")
-
 func (p *ReportPlatform) ReportRetentionPolicies(ctx context.Context) ([]store.ReportRetentionPolicy, error) {
 	return p.st.Reports().ReportRetentionPolicies(ctx)
 }
 
-func (p *ReportPlatform) SetReportRetentionPolicy(ctx context.Context, policy store.ReportRetentionPolicy, cutoff time.Time, eligible int64, actor string) error {
-	now := time.Now().UTC()
+func (p *ReportPlatform) SetReportRetentionPolicy(ctx context.Context, policy store.ReportRetentionPolicy, token, actor string) error {
+	policy.NextRun = time.Now().UTC().Truncate(time.Millisecond)
 	if policy.Enabled {
 		if _, err := p.st.Clusters().Get(ctx, policy.ClusterID); err != nil {
 			return err
 		}
-		expected := now.AddDate(0, 0, -policy.Days)
-		if cutoff.Before(expected.Add(-10*time.Minute)) || cutoff.After(expected) {
-			return ErrRetentionPreviewRequired
-		}
-		actual, err := p.st.Reports().PreviewRetention(ctx, policy.ClusterID, policy.Kind, cutoff, policy.Minimum)
-		if err != nil {
-			return err
-		}
-		if actual.Eligible != eligible {
-			return ErrRetentionPreviewRequired
-		}
+		return p.st.Reports().ActivateReportRetention(ctx, policy, token, actor)
 	}
-	policy.NextRun = now.Truncate(time.Millisecond)
 	return p.st.Reports().SetReportRetentionPolicy(ctx, policy, actor)
 }
 
@@ -67,6 +53,13 @@ func (p *ReportPlatform) RunReportRetentionScheduler(ctx context.Context, logger
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				logger.Warn("report retention batch failed", "cluster_id", policy.ClusterID, "kind", policy.Kind, "error", err)
+				auditCtx, finish := context.WithTimeout(ctx, 3*time.Second)
+				_ = p.st.Audit().Write(auditCtx, &store.AuditEvent{
+					ClusterID: policy.ClusterID, Action: "report.retention.run", EventType: store.AuditEventReport,
+					ResourceKind: "ReportRetentionPolicy", ResourceName: policy.Kind,
+					Status: "error", ResultSummary: "Cleanup transaction failed and will be retried",
+				})
+				finish()
 			}
 		}
 		select {

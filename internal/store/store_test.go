@@ -686,3 +686,37 @@ func TestStoresSQLite(t *testing.T) {
 	s := newTestStore(t)
 	runAllStoreCRUD(t, s)
 }
+
+func TestDiagnosticMemoryQuotaIsEnforcedWithoutCountingExpired(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	if err := st.Users().Create(ctx, &User{ID: "quota-owner", Username: "quota-owner"}); err != nil {
+		t.Fatal(err)
+	}
+	setLimit := func(value string) {
+		t.Helper()
+		if err := st.Settings().Set(ctx, &Settings{Group: "memory", Key: "max_items", Value: value}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create := func(id, content string) error {
+		return st.Memories().CreateWithQuota(ctx, &Memory{
+			ID: id, UserID: "quota-owner", Scope: "diagnostic-v1", ClusterID: "prod",
+			Namespace: "payment", Content: content, UpdatedAt: time.Now(),
+		})
+	}
+	setLimit("1")
+	if err := create("expired", `{"expiresAt":"2020-01-01T00:00:00Z"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := create("first", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := create("second", "{}"); !errors.Is(err, ErrMemoryQuota) {
+		t.Fatalf("expected quota error, got %v", err)
+	}
+	setLimit("2")
+	if err := create("second", "{}"); err != nil {
+		t.Fatal(err)
+	}
+}

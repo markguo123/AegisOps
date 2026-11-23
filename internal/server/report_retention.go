@@ -7,18 +7,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/store"
 )
 
 type reportRetentionPreviewer interface {
-	PreviewReportRetention(context.Context, string, string, int, int) (store.ReportRetentionPreview, error)
+	PreviewReportRetention(context.Context, store.ReportRetentionPolicy, string) (store.ReportRetentionPreview, error)
 }
 
 func (s *Server) handleReportRetentionPreview(w http.ResponseWriter, r *http.Request) {
-	scope, _, err := s.reportScopeFor(r.Context())
+	scope, user, err := s.reportScopeFor(r.Context())
 	if err != nil {
 		writeReportScopeError(w, r, err)
 		return
@@ -37,12 +36,19 @@ func (s *Server) handleReportRetentionPreview(w http.ResponseWriter, r *http.Req
 	kind := query.Get("kind")
 	days, daysErr := strconv.Atoi(query.Get("days"))
 	minimum, minimumErr := strconv.Atoi(query.Get("minimum"))
+	interval := 60
+	if value := query.Get("intervalMinutes"); value != "" {
+		interval, _ = strconv.Atoi(value)
+	}
 	if clusterID == "" || (kind != service.ReportKindLatestMD && kind != service.ReportKindLatestJSON) ||
-		daysErr != nil || days < 1 || days > 36500 || minimumErr != nil || minimum < 1 {
+		daysErr != nil || days < 1 || days > 36500 || minimumErr != nil || minimum < 1 || minimum > 1_000_000 || !validRetentionInterval(interval) {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid report retention policy")
 		return
 	}
-	result, err := previewer.PreviewReportRetention(r.Context(), clusterID, kind, days, minimum)
+	w.Header().Set("Cache-Control", "no-store")
+	result, err := previewer.PreviewReportRetention(r.Context(), store.ReportRetentionPolicy{
+		ClusterID: clusterID, Kind: kind, Days: days, Minimum: minimum, IntervalMinutes: interval,
+	}, user.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, r, http.StatusNotFound, codeNotFound, "cluster not found")
@@ -55,7 +61,7 @@ func (s *Server) handleReportRetentionPreview(w http.ResponseWriter, r *http.Req
 
 type reportRetentionPolicies interface {
 	ReportRetentionPolicies(context.Context) ([]store.ReportRetentionPolicy, error)
-	SetReportRetentionPolicy(context.Context, store.ReportRetentionPolicy, time.Time, int64, string) error
+	SetReportRetentionPolicy(context.Context, store.ReportRetentionPolicy, string, string) error
 }
 
 func (s *Server) handleReportRetentionPolicies(w http.ResponseWriter, r *http.Request) {
@@ -84,8 +90,7 @@ func (s *Server) handleReportRetentionPolicies(w http.ResponseWriter, r *http.Re
 	}
 	var input struct {
 		store.ReportRetentionPolicy
-		Cutoff   time.Time `json:"cutoff"`
-		Eligible int64     `json:"eligible"`
+		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&input); err != nil ||
 		strings.TrimSpace(input.ClusterID) == "" || len(input.ClusterID) > 191 ||
@@ -94,9 +99,16 @@ func (s *Server) handleReportRetentionPolicies(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid report retention policy")
 		return
 	}
-	err = policies.SetReportRetentionPolicy(r.Context(), input.ReportRetentionPolicy, input.Cutoff, input.Eligible, user.ID)
+	if input.IntervalMinutes == 0 {
+		input.IntervalMinutes = 60
+	}
+	if !validRetentionInterval(input.IntervalMinutes) {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid retention interval")
+		return
+	}
+	err = policies.SetReportRetentionPolicy(r.Context(), input.ReportRetentionPolicy, input.Token, user.ID)
 	switch {
-	case errors.Is(err, service.ErrRetentionPreviewRequired):
+	case errors.Is(err, store.ErrRetentionPreviewRequired):
 		writeError(w, r, http.StatusConflict, "CONFLICT", "report retention preview has expired or changed")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, r, http.StatusNotFound, codeNotFound, "cluster not found")
@@ -104,5 +116,14 @@ func (s *Server) handleReportRetentionPolicies(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "report retention policy update failed")
 	default:
 		writeOK(w, r, http.StatusOK, nil)
+	}
+}
+
+func validRetentionInterval(interval int) bool {
+	switch interval {
+	case 15, 30, 60, 360, 1440:
+		return true
+	default:
+		return false
 	}
 }

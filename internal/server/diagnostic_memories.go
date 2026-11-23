@@ -31,12 +31,16 @@ func (s *Server) handleDiagnosticMemories(w http.ResponseWriter, r *http.Request
 	status := http.StatusOK
 	switch r.Method {
 	case http.MethodGet:
-		result, err = s.memories.List(r.Context(), user.ID)
+		result, err = s.memories.List(r.Context(), user.ID, r.URL.Query().Get("after"))
 	case http.MethodPost, http.MethodPatch:
 		var input service.DiagnosticMemory
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&input) != nil {
 			writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid diagnostic memory")
 			return
+		}
+		if r.URL.Path == "/api/v1/me/memories/draft" {
+			result, err = s.memories.Draft(r.Context(), user.ID, input.SourceSessionID, input.SourceTurnID)
+			break
 		}
 		if r.Method == http.MethodPatch {
 			result, err = s.memories.Update(r.Context(), user.ID, r.PathValue("id"), input)
@@ -52,6 +56,8 @@ func (s *Server) handleDiagnosticMemories(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid diagnostic memory")
 	case errors.Is(err, service.ErrMemoryDisabled):
 		writeError(w, r, http.StatusForbidden, codeForbidden, "diagnostic memory is disabled")
+	case errors.Is(err, store.ErrMemoryQuota):
+		writeError(w, r, http.StatusConflict, "MEMORY_QUOTA", "已达到诊断记忆上限，请先整理现有记忆")
 	case errors.Is(err, store.ErrMemoryConflict):
 		writeError(w, r, http.StatusConflict, "CONFLICT", "diagnostic memory has changed")
 	case errors.Is(err, store.ErrNotFound):
@@ -59,7 +65,9 @@ func (s *Server) handleDiagnosticMemories(w http.ResponseWriter, r *http.Request
 	case err != nil:
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "diagnostic memory request failed")
 	default:
-		s.recordDiagnosticMemoryChange(r, user.ID, result)
+		if r.URL.Path != "/api/v1/me/memories/draft" {
+			s.recordDiagnosticMemoryChange(r, user.ID, result)
+		}
 		writeOK(w, r, status, result)
 	}
 }

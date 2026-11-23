@@ -117,6 +117,7 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/reports/cleanup", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "GET", Path: "/api/v1/me/memories", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "POST", Path: "/api/v1/me/memories", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "POST", Path: "/api/v1/me/memories/draft", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "DELETE", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "GET", Path: "/api/v1/report-retention/preview", Access: permission.AccessPermission, Permission: "*"},

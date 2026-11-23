@@ -280,6 +280,7 @@ export default {
 }
 
 export interface ReportRetentionPreview {
+  token: string
   total: number
   protected: number
   potential: number
@@ -293,12 +294,14 @@ export async function previewReportRetention(
   kind: string,
   days: number,
   minimum: number,
+  intervalMinutes: number,
 ): Promise<ReportRetentionPreview> {
   const env = await apiGet<ReportRetentionPreview>('/report-retention/preview', undefined, {
     clusterId,
     kind,
     days,
     minimum,
+    intervalMinutes,
   })
   if (!env.data) throw new Error('报告保留预览无结果')
   return env.data
@@ -309,6 +312,8 @@ export interface ReportRetentionPolicy {
   kind: string
   days: number
   minimum: number
+  intervalMinutes: number
+  version: number
   enabled: boolean
   nextRun: string
   lastRun?: string
@@ -320,11 +325,11 @@ export async function listReportRetentionPolicies(): Promise<ReportRetentionPoli
 }
 
 export async function saveReportRetentionPolicy(
-  policy: Pick<ReportRetentionPolicy, 'clusterId' | 'kind' | 'days' | 'minimum' | 'enabled'>,
+  policy: Pick<ReportRetentionPolicy, 'clusterId' | 'kind' | 'days' | 'minimum' | 'intervalMinutes' | 'enabled'>,
   preview?: ReportRetentionPreview,
 ): Promise<void> {
   await request('/report-retention/policies', {
     method: 'PUT',
-    body: { ...policy, cutoff: preview?.cutoff, eligible: preview?.eligible },
+    body: { ...policy, token: preview?.token },
   })
 }

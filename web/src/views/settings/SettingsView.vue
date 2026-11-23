@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, InfoFilled, Key, Lock, Promotion, Refresh, Setting } from '@element-plus/icons-vue'
 
 import TechEmptyState from '@/components/TechEmptyState.vue'
 import ModelProfiles from './ModelProfiles.vue'
+import ReportRetentionSettings from './ReportRetentionSettings.vue'
 import {
   describeSettingsError,
   getSettings,
@@ -17,13 +19,15 @@ import { useAuthStore } from '@/stores/auth'
 import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 
 const auth = useAuthStore()
+const route = useRoute()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 /** 配置分组目录（后端 settings.Groups() 稳定顺序）。 */
 const GROUPS: Array<{ key: string; title: string; desc: string }> = [
   { key: 'model', title: '模型', desc: 'LLM 提供方与调用参数' },
   { key: 'skill', title: 'Skill', desc: '内置与自定义 Skill、创建通道' },
   { key: 'approval', title: '审批', desc: '写操作审批模式与安全闸门' },
-  { key: 'memory', title: '记忆', desc: '长期记忆作用域与容量' },
+  { key: 'memory', title: '记忆', desc: '个人诊断经验与跨会话召回' },
   { key: 'retention', title: '保留', desc: '自动清理策略' },
   { key: 'mcp', title: 'MCP', desc: '外部工具接入' },
   { key: 'ops', title: '运维', desc: 'Kubernetes 集群与扫描参数' },
@@ -45,7 +49,8 @@ function visibleField(item: SettingsItem) {
   return !legacyModelKeys.includes(item.key) && modelAdvanced.value
 }
 
-const activeGroup = ref('model')
+const availableGroups = computed(() => GROUPS.filter(group => group.key !== 'retention' || isAdmin.value))
+const activeGroup = ref(route.query.tab === 'retention' && isAdmin.value ? 'retention' : 'model')
 const view = ref<SettingsGroupView | null>(null)
 const loading = ref(false)
 const saving = ref(false)
@@ -315,6 +320,7 @@ async function refreshModels(open: boolean) {
 }
 
 async function loadGroup(): Promise<void> {
+  if (activeGroup.value === 'retention') return
   loading.value = true
   savingError.value = ''
   try {
@@ -373,6 +379,10 @@ async function handleSave(): Promise<void> {
   }
 }
 
+watch([() => route.query.tab, isAdmin], ([tab, admin]) => {
+  if (tab === 'retention' && admin) activeGroup.value = 'retention'
+  else if (activeGroup.value === 'retention' && !admin) activeGroup.value = 'model'
+})
 watch(activeGroup, loadGroup)
 onMounted(loadGroup)
 </script>
@@ -399,7 +409,7 @@ onMounted(loadGroup)
       <div class="settings-layout">
         <aside class="settings-rail" aria-label="配置分组">
           <button
-            v-for="group in GROUPS"
+            v-for="group in availableGroups"
             :key="group.key"
             type="button"
             class="rail-item"
@@ -412,7 +422,8 @@ onMounted(loadGroup)
         </aside>
 
         <div class="settings-content">
-          <div class="card form-card">
+          <ReportRetentionSettings v-if="activeGroup === 'retention' && isAdmin" />
+          <div v-else-if="activeGroup !== 'retention'" class="card form-card">
             <div class="form-head">
               <div class="row form-head-row">
                 <div class="grow">
@@ -453,7 +464,7 @@ onMounted(loadGroup)
               <div v-for="item in view?.items.filter(entry => visibleField(entry)) ?? []" :key="item.key" class="field">
                 <div class="field-meta">
                   <div class="row field-label">
-                    <span class="mono strong">{{ activeGroup === 'model' && item.key === 'enabled' ? '启用模型调用' : activeGroup === 'model' && modelRoutingKeys.includes(item.key) ? item.desc : item.key }}</span>
+                    <span class="mono strong">{{ activeGroup === 'memory' && item.key === 'enabled' ? '启用诊断记忆' : activeGroup === 'memory' && item.key === 'max_items' ? '每人记忆上限' : activeGroup === 'model' && item.key === 'enabled' ? '启用模型调用' : activeGroup === 'model' && modelRoutingKeys.includes(item.key) ? item.desc : item.key }}</span>
                     <span v-if="item.sensitive" class="pill" :class="item.hasValue ? 'ok' : 'mute'">
                       <el-icon class="tiny"><Key /></el-icon>
                       {{ item.hasValue ? '已配置' : '未配置' }}
