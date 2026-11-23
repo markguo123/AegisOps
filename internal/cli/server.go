@@ -139,6 +139,17 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				operation := audit.OperationFrom(ctx)
 				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, SessionID: operation.SessionID, TurnID: operation.TurnID, StepID: operation.StepID, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
 			}
+			reports := service.NewReportPlatform(st, blobGW)
+			retentionCtx, stopRetention := context.WithCancel(cmd.Context())
+			retentionDone := make(chan struct{})
+			go func() {
+				defer close(retentionDone)
+				reports.RunReportRetentionScheduler(retentionCtx, logger)
+			}()
+			defer func() {
+				stopRetention()
+				<-retentionDone
+			}()
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
 				WithModelProfiles(func(ctx context.Context) (*config.Config, error) {
 					return settingsSvc.LoadRuntimeConfig(ctx, cfg)
@@ -151,7 +162,7 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				WithSkills(skillPlat).
 				WithAuthz(authzSvc).
 				WithDiagnosticMemories(diagnosticMemories).
-				WithReports(service.NewReportPlatform(st, blobGW)).
+				WithReports(reports).
 				WithStorage(blobGW).
 				// P4.7：审计中心只读查询面，与写入口共用同一 Store。
 				WithAuditQuery(service.NewAuditQueryService(st)).

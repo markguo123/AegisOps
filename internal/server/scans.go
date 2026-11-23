@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -402,7 +403,17 @@ func (s *Server) runJob(job *ScanJob, ctx context.Context, opts model.ScanOption
 		job.Status = StatusSucceeded
 		job.Result = result
 	}
+	state := job.Status
 	s.mu.Unlock()
+	if finalizer, ok := s.reportSvc.(interface {
+		FinalizeReportRetentionScan(context.Context, string, string, string) error
+	}); ok && state == StatusSucceeded {
+		finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := finalizer.FinalizeReportRetentionScan(finalizeCtx, job.ID, job.ClusterID, job.Owner); err != nil {
+			slog.Warn("report retention lifecycle could not be finalized", "scan_id", job.ID, "error", err)
+		}
+	}
 	// Run 收尾阶段（写报告、归档）是最后才进阶段账的，落一份完整快照，页面刷一次就能
 	// 看到和报告「诊断信息」区块一模一样的十步。
 	if result != nil {

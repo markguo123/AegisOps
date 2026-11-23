@@ -10,7 +10,7 @@
  *  3. presign 返回的签名 URL 等同一条临时凭据：只在调用方内存里停留，绝不落
  *     localStorage / store / 日志 / SSE。
  */
-import {
+import request, {
   API_BASE,
   ApiRequestError,
   apiErrorFrom,
@@ -283,6 +283,8 @@ export interface ReportRetentionPreview {
   total: number
   protected: number
   potential: number
+  eligible: number
+  excluded: number
   cutoff: string
 }
 
@@ -300,4 +302,29 @@ export async function previewReportRetention(
   })
   if (!env.data) throw new Error('报告保留预览无结果')
   return env.data
+}
+
+export interface ReportRetentionPolicy {
+  clusterId: string
+  kind: string
+  days: number
+  minimum: number
+  enabled: boolean
+  nextRun: string
+  lastRun?: string
+  lastDeleted: number
+}
+
+export async function listReportRetentionPolicies(): Promise<ReportRetentionPolicy[]> {
+  return (await apiGet<ReportRetentionPolicy[]>('/report-retention/policies')).data ?? []
+}
+
+export async function saveReportRetentionPolicy(
+  policy: Pick<ReportRetentionPolicy, 'clusterId' | 'kind' | 'days' | 'minimum' | 'enabled'>,
+  preview?: ReportRetentionPreview,
+): Promise<void> {
+  await request('/report-retention/policies', {
+    method: 'PUT',
+    body: { ...policy, cutoff: preview?.cutoff, eligible: preview?.eligible },
+  })
 }

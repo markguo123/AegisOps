@@ -82,6 +82,10 @@ type ReportStats struct {
 // 删除同理：只有 Tx.DeleteReport，且必须与 Tx.Release 同一事务（P8.14，方案 15 §13.1）——
 // 脱离了 Release 的删行就是永久悬空引用，对象再也回收不掉。
 type ReportStore interface {
+	ReportRetentionPolicies(ctx context.Context) ([]ReportRetentionPolicy, error)
+	SetReportRetentionPolicy(ctx context.Context, policy ReportRetentionPolicy, actor string) error
+	RunReportRetention(ctx context.Context, policy ReportRetentionPolicy, now time.Time) (int, error)
+	FinalizeRetentionScan(ctx context.Context, scanID, clusterID, ownerID string) error
 	PreviewRetention(ctx context.Context, clusterID, kind string, cutoff time.Time, minimum int) (ReportRetentionPreview, error)
 	// List 按归属与过滤条件分页列出报告，返回值同时给出同条件下的总行数（分页 total）。
 	List(ctx context.Context, q ReportQuery) ([]*Report, int64, error)

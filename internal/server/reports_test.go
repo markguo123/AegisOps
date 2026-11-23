@@ -974,3 +974,44 @@ func TestDiagnosticMemoryAPIOwnerIsolation(t *testing.T) {
 		t.Fatal("forgotten memory was recalled")
 	}
 }
+
+func TestReportRetentionPolicyRequiresRecentPreviewAndCanStop(t *testing.T) {
+	f := newReportFixture(t, nil)
+	if err := f.st.Clusters().Create(context.Background(), &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	admin := f.adminToken(t)
+	path := "/api/v1/report-retention/policies"
+	body := `{"clusterId":"prod","kind":"latest-md","days":30,"minimum":5,"enabled":true}`
+	if status, _, raw := f.req(t, http.MethodPut, path, admin, body); status != http.StatusConflict {
+		t.Fatalf("no preview: %d %s", status, raw)
+	}
+	previewPath := "/api/v1/report-retention/preview?clusterId=prod&kind=latest-md&days=30&minimum=5"
+	status, _, raw := f.req(t, http.MethodGet, previewPath, admin, "")
+	var preview struct{ Data store.ReportRetentionPreview }
+	if status != http.StatusOK || json.Unmarshal([]byte(raw), &preview) != nil {
+		t.Fatalf("preview: %d %s", status, raw)
+	}
+	input := struct {
+		store.ReportRetentionPolicy
+		Cutoff   time.Time `json:"cutoff"`
+		Eligible int64     `json:"eligible"`
+	}{
+		ReportRetentionPolicy: store.ReportRetentionPolicy{ClusterID: "prod", Kind: "latest-md", Days: 30, Minimum: 5, Enabled: true},
+		Cutoff:                preview.Data.Cutoff, Eligible: preview.Data.Eligible,
+	}
+	for _, enabled := range []bool{true, false} {
+		input.Enabled = enabled
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status, _, raw := f.req(t, http.MethodPut, path, admin, string(encoded)); status != http.StatusOK {
+			t.Fatalf("enabled=%t: %d %s", enabled, status, raw)
+		}
+	}
+	policies, err := f.st.Reports().ReportRetentionPolicies(context.Background())
+	if err != nil || len(policies) != 1 || policies[0].Enabled {
+		t.Fatalf("stopped retention policy: %+v, %v", policies, err)
+	}
+}

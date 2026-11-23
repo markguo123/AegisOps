@@ -13,7 +13,7 @@ import (
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 14
+const schemaVersion = 15
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -70,6 +70,7 @@ var migrations = []migration{
 	{version: 12, name: "cluster identity and last check metadata", up: migrateV12},
 	{version: 13, name: "chat display entities and persistent event log", up: migrateV13},
 	{version: 14, name: "audit center bounded query indexes", up: migrateV14},
+	{version: 15, name: "report retention lifecycle", up: migrateV15},
 }
 
 // schemaV14Indexes 是审计中心（P4.7 / 方案 28 §2/§3）的有界查询索引：
@@ -1031,6 +1032,40 @@ func (s *dbStore) Migrate(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV15(ctx context.Context, tx *sql.Tx, d dialect) error {
+	policies := tableSpec{
+		name: "report_retention_policies",
+		cols: []column{
+			{name: "cluster_id", kind: colText},
+			{name: "kind", kind: colText},
+			{name: "days", kind: colInt},
+			{name: "minimum", kind: colInt},
+			{name: "enabled", kind: colInt, def: "0"},
+			{name: "next_run", kind: colTime},
+			{name: "last_run", kind: colTimeOrNull},
+			{name: "last_deleted", kind: colInt, def: "0"},
+		},
+		primaryKey: []string{"cluster_id", "kind"},
+	}
+	if _, err := tx.ExecContext(ctx, d.createTable(policies)); err != nil {
+		return err
+	}
+	finalized := column{name: "retention_finalized", kind: colInt, def: "0"}
+	if _, err := tx.ExecContext(ctx, d.addColumn("reports", finalized)); err != nil && !d.isDuplicateColumnErr(err) {
+		return err
+	}
+	indexes := []indexSpec{
+		{name: "idx_reports_retention_order", table: "reports", cols: "cluster_id, kind, created_at, id"},
+		{name: "idx_reports_retention_scan", table: "reports", cols: "scan_id, cluster_id, created_by"},
+	}
+	for _, index := range indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(index.name, index.table, index.cols)); err != nil && !d.isDuplicateIndexErr(err) {
+			return err
+		}
 	}
 	return nil
 }

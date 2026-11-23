@@ -120,6 +120,8 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "PATCH", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "DELETE", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "GET", Path: "/api/v1/report-retention/preview", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "GET", Path: "/api/v1/report-retention/policies", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "PUT", Path: "/api/v1/report-retention/policies", Access: permission.AccessPermission, Permission: "*"},
 		// 对象存储健康：权限复用 settings.read（已代表「能看平台运行形态」），不新增权限位。
 		permission.Rule{Method: "GET", Path: "/api/v1/storage/health", Access: permission.AccessPermission, Permission: permission.SettingsRead},
 	)

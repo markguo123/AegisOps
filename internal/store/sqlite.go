@@ -441,6 +441,12 @@ func scanAudit(row interface{ Scan(...any) error }) (*AuditEvent, error) {
 // Write 落一条审计事件。EventType 缺省时由 Action 推导；payload 与两个摘要列
 // 在写库前脱敏，确保 Secret 值 / kubeconfig / API Key 明文永不入库（AGENTS.md）。
 func (st *auditStore) Write(ctx context.Context, e *AuditEvent) error {
+	return writeAuditEvent(ctx, st.s.db, e)
+}
+
+func writeAuditEvent(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, e *AuditEvent) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
@@ -449,7 +455,7 @@ func (st *auditStore) Write(ctx context.Context, e *AuditEvent) error {
 	}
 	payload := redactJSONPayload(e.Payload)
 	e.Payload = payload
-	res, err := st.s.db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO audit_events (timestamp, request_id, session_id, turn_id, step_id,
 			user_id, cluster_id, action, payload, event_type, resource_kind, resource_name,
 			operation, risk, decision, approval_id, grant_id, match_reason,

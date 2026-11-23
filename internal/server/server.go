@@ -258,6 +258,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/reports/{id}", s.handleDeleteReport)
 	mux.HandleFunc("POST /api/v1/reports/cleanup", s.handleCleanupReports)
 	mux.HandleFunc("GET /api/v1/report-retention/preview", s.handleReportRetentionPreview)
+	mux.HandleFunc("GET /api/v1/report-retention/policies", s.handleReportRetentionPolicies)
+	mux.HandleFunc("PUT /api/v1/report-retention/policies", s.handleReportRetentionPolicies)
 	mux.HandleFunc("GET /api/v1/me/memories", s.handleDiagnosticMemories)
 	mux.HandleFunc("POST /api/v1/me/memories", s.handleDiagnosticMemories)
 	mux.HandleFunc("PATCH /api/v1/me/memories/{id}", s.handleDiagnosticMemories)

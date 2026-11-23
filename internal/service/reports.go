@@ -299,6 +299,9 @@ func (p *ReportPlatform) Delete(ctx context.Context, id string, scope ReportScop
 
 	var missingReference bool
 	err = p.st.WithTx(ctx, func(tx *store.Tx) error {
+		if err := tx.LockReportRetentionPolicy(ctx, row.ClusterID, row.Kind); err != nil {
+			return err
+		}
 		changed, missing, err := tx.DeleteReportReference(ctx, row.ID, row.BlobKey)
 		if err != nil {
 			return err
