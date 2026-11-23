@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import type { DiagnosticMemoryDraft } from './diagnosticMemoryDraft'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/request'
 
@@ -56,6 +57,17 @@ function edit(memory?: Memory) {
   }
   related.value = memory?.relatedNamespaces?.join(', ') ?? ''
 }
+
+function reviewSuggestion(suggestion?: DiagnosticMemoryDraft) {
+  show()
+  edit()
+  if (suggestion && draft.value) {
+    Object.assign(draft.value, suggestion)
+    related.value = suggestion.relatedNamespaces.join(', ')
+  }
+}
+
+defineExpose({ reviewSuggestion })
 
 async function save() {
   const memory = draft.value

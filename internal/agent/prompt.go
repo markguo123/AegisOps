@@ -297,3 +297,19 @@ func (a *Agent) systemPromptFor(mode string) string {
 	}
 	return base
 }
+
+const diagnosticMemorySuggestionGuide = `
+When delivering a final diagnostic answer, optionally end with one reusable diagnostic note.
+Suggest it only when current tool evidence established a specific, repeatable investigation
+method beyond routine checks. Use the actual primary namespace, related namespaces verified
+during this turn, and exact workload name. Omit the note when scope or evidence is uncertain,
+when the turn handled secrets, or when diagnosing has not finished. The note is a suggestion
+for human review. Never include credentials, raw outputs, previous approvals, a command to
+execute, or a claim that a historical root cause applies next time.
+If suitable, append exactly these five plain Markdown lines in Chinese, one value per line.
+### 可保留的排查经验
+主命名空间：<name>
+关联命名空间：<comma-separated names or ->
+工作负载：<name>
+经验：<one concise sentence describing what evidence to compare>
+`

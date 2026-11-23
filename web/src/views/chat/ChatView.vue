@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import DiagnosticMemories from './DiagnosticMemories.vue'
+import { parseDiagnosticMemoryDraft } from './diagnosticMemoryDraft'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -61,6 +62,29 @@ const latestTurn = computed(() => {
   const turn = turns[turns.length - 1]
   return turn?.session_id === activeId.value ? turn : undefined
 })
+const diagnosticMemories = ref<InstanceType<typeof DiagnosticMemories> | null>(null)
+const memorySuggestion = computed(() => {
+  const turn = latestTurn.value
+  if (!turn || turn.status !== 'done') return
+  const items = stream.items.value
+  if (!items.some(item => item.type === 'tool' && item.tool.turn_id === turn.turn_id &&
+    item.tool.status === 'succeeded')) return
+  if (items.some(item => item.type === 'interaction' &&
+    item.interaction.turn_id === turn.turn_id && item.interaction.kind === 'secret_read')) return
+  const final = [...items].reverse().find(item => item.type === 'message' &&
+    item.message.turn_id === turn.turn_id && item.message.role === 'assistant' &&
+    item.message.purpose === 'final' && item.message.status === 'completed')
+  if (final?.type !== 'message') return
+  return parseDiagnosticMemoryDraft(final.message.parts
+    .filter(part => part.type === 'text').map(part => part.text ?? '').join(''))
+})
+const reviewedMemoryTurn = ref('')
+function reviewMemorySuggestion() {
+  if (!diagnosticMemories.value) return
+  diagnosticMemories.value.reviewSuggestion(memorySuggestion.value)
+  reviewedMemoryTurn.value = latestTurn.value?.turn_id ?? ''
+}
+
 const latestTools = computed<ChatToolCall[]>((previous) => {
   const turnId = latestTurn.value?.turn_id
   const tools = stream.items.value.flatMap(item =>
@@ -447,6 +471,11 @@ async function handleSend(): Promise<void> {
   if (!activeId.value || !raw || sending.value || stream.running.value) {
     return
   }
+  if (diagnosticMemories.value && /^(?:请)?(?:帮我)?(?:记住|保留|保存)(?:刚才|这次|本轮)(?:的)?(?:排查方法|排查经验|诊断经验)[。！!]?$/u.test(raw)) {
+    reviewMemorySuggestion()
+    input.value = ''
+    return
+  }
   const available = composerRef.value?.availableSkills ?? []
   const { cleaned, names } = extractSkillMentions(raw, available)
   sending.value = true
@@ -701,7 +730,7 @@ watch(
           </span>
         </div>
         <div v-if="activeSession" class="chat-meta">
-          <DiagnosticMemories v-if="!viewingOthersSession" :cluster-id="activeSession.clusterId"
+          <DiagnosticMemories v-if="!viewingOthersSession" ref="diagnosticMemories" :cluster-id="activeSession.clusterId"
             :referenced-ids="contextBudget?.memory_ids" />
           <el-button v-if="branchOrigin" text size="small" @click="openBranchSource">继承历史问答 · 查看来源</el-button>
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
@@ -765,6 +794,13 @@ watch(
               @reject="handleReject"
               @answer="handleAnswer"
             />
+            <el-button
+              v-if="!viewingOthersSession && !stream.running.value && memorySuggestion &&
+                reviewedMemoryTurn !== latestTurn?.turn_id"
+              text size="small" @click="reviewMemorySuggestion"
+            >
+              保留这条排查经验
+            </el-button>
           </main>
         </template>
         <template v-else>

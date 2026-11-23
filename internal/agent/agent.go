@@ -78,8 +78,9 @@ type Options struct {
 	AccessScope *tools.AccessScope
 	// SkillContext 是命中用户自定义 procedural Skill 的方法论附录（P3.8.4），
 	// 由 service 层意图检索后注入 system prompt，正文视为不可信文本只作文本参考。
-	SkillContext string
-	RecallMemory func(context.Context) (string, []string)
+	SkillContext  string
+	SuggestMemory bool
+	RecallMemory  func(context.Context) (string, []string)
 	// ApprovalPolicy 是统一的写操作审批决策；nil 时采用 strict + 要求审批（等价 v1）。
 	ApprovalPolicy *approval.Policy
 
@@ -123,6 +124,7 @@ type Agent struct {
 	TurnID             string
 	AccessScope        *tools.AccessScope
 	SkillContext       string
+	suggestMemory      bool
 	recallMemory       func(context.Context) (string, []string)
 
 	MaxIterations  int
@@ -171,6 +173,7 @@ func New(opts Options) *Agent {
 		TurnID:          opts.TurnID,
 		AccessScope:     opts.AccessScope,
 		SkillContext:    opts.SkillContext,
+		suggestMemory:   opts.SuggestMemory,
 		recallMemory:    opts.RecallMemory,
 		MaxIterations:   opts.MaxIterations,
 		MaxToolCalls:    opts.MaxToolCalls,

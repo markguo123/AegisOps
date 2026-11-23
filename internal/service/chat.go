@@ -745,8 +745,10 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		}
 	}
 	var recallMemory func(context.Context) (string, []string)
+	var suggestMemory bool
 	if s.diagnosticMemories != nil && req.UserID != "" && req.UserID == sess.UserID && req.AccessScope != nil {
 		clusterID, namespace := sess.Cluster, sess.Namespace
+		suggestMemory, _ = s.diagnosticMemories.enabled(ctx)
 		recallMemory = func(ctx context.Context) (string, []string) {
 			ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 			defer cancel()
@@ -766,6 +768,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	}
 	ag := agent.New(agent.Options{
 		RecallMemory:   recallMemory,
+		SuggestMemory:  suggestMemory,
 		LLM:            client,
 		Tools:          reg,
 		Session:        sess,
