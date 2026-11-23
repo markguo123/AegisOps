@@ -35,7 +35,7 @@ describe('auth API（P6.12 自助改密契约）', () => {
       newPassword: 'new-pass-123',
     })
     const headers = init.headers as Headers
-    expect(headers.get('Authorization')).toBe('Bearer tok-demo')
+    expect(headers.get('Authorization')).toBeNull()
   })
 
   it('旧密码错误（401）时原样抛出，不清会话、不跳转登录页', async () => {
@@ -73,6 +73,6 @@ describe('auth API（P6.12 自助改密契约）', () => {
     await expect(myScope()).resolves.toEqual(scope)
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/auth/scope')
-    expect((init.headers as Headers).get('Authorization')).toBe('Bearer tok-demo')
+    expect((init.headers as Headers).get('Authorization')).toBeNull()
   })
 })

@@ -38,7 +38,7 @@ import (
 const (
 	adminUsername = "admin"
 	adminPassword = "platform-test-admin-pw"
-	// encKey 是测试用的 32 字节凭据加密密钥（等价生产 K8S_AI_ENC_KEY）。
+	// encKey 是测试用的 32 字节凭据加密密钥（等价生产 AEGISOPS_ENC_KEY）。
 	encKey = "0123456789abcdef0123456789abcdef"
 )
 
@@ -90,6 +90,8 @@ func newHarness(t *testing.T) *harness {
 		WithClusters(clusterSvc).
 		WithSkills(skillPlat).
 		WithAuthz(authzSvc).
+		// P4.7：审计中心查询面按生产装配方式接入，端到端套件与平台进程同构。
+		WithAuditQuery(service.NewAuditQueryService(st)).
 		Handler()
 	chatAPI := sessionapi.New(newStoreChat(st), "test-model").
 		WithAudit(auditSvc.Record).

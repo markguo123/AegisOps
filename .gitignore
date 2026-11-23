@@ -1,14 +1,21 @@
-.k8s-ai-test
+.aegisops-test
 bin/
 go-cache/
 go-path/
-k8s-ai.exe
+aopsctl.exe
 reports/
 coverage.out
 *.test
 .DS_Store
+aegisops-test.yaml
+aegisops-v4.yaml
+local-test/
+.planning
+
+# 旧品牌本地测试配置与产物：仅本地存在，避免误提交
 k8s-ai-test.yaml
 k8s-ai-v4.yaml
+k8s-ai.exe
 
 # deploy/install.sh 的运行日志默认落在执行目录，不入库
 install-*.log
@@ -17,3 +24,9 @@ install-*.log
 deploy/kubectl/*
 !deploy/kubectl/.gitkeep
 !deploy/kubectl/README.md
+
+# Versioned deployment release artifacts
+dist-install/
+
+.dshcheck/
+.plannning/

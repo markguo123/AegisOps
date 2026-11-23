@@ -1,0 +1,6 @@
+apiVersion: v2
+name: aegisops
+description: AegisOps Kubernetes inspection and operations platform
+type: application
+version: 0.1.0
+appVersion: "unreleased"

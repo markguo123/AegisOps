@@ -65,7 +65,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*store.Cluster
 	if s.cipher == nil {
 		return nil, fmt.Errorf("%w: encryption not configured", ErrInvalid)
 	}
-	info, err := s.connector.Inspect(ctx, []byte(req.Kubeconfig))
+	// 显式 context 必须被固定到 current-context；未提供时沿用文件里的
+	// current-context（界面接入流程始终显式选择，API 直用保留兼容）。
+	data := []byte(req.Kubeconfig)
+	if strings.TrimSpace(req.Context) != "" {
+		selected, _, err := selectContext(data, req.Context)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		data = selected
+	}
+	info, err := s.connector.Inspect(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -80,17 +90,21 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*store.Cluster
 		return nil, err
 	}
 	now := s.now().UTC()
+	checked := now
 	c := &store.Cluster{
-		ID:        newID(),
-		Name:      name,
-		Context:   info.Context,
-		Server:    info.Server,
-		Version:   info.Version,
-		Status:    string(StatusConnected),
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           newID(),
+		Name:         name,
+		Context:      info.Context,
+		Server:       info.Server,
+		Version:      info.Version,
+		Status:       string(StatusConnected),
+		Identity:     info.Identity,
+		CheckedAt:    &checked,
+		CheckSummary: checkSuccessSummary,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
-	secret, err := s.cipher.Encrypt([]byte(req.Kubeconfig))
+	secret, err := s.cipher.Encrypt(data)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +150,28 @@ func (s *Service) Test(ctx context.Context, req TestRequest) (*Info, error) {
 	if strings.TrimSpace(req.Kubeconfig) == "" {
 		return nil, fmt.Errorf("%w: kubeconfig is required", ErrInvalid)
 	}
-	return s.connector.Inspect(ctx, []byte(req.Kubeconfig))
+	data := []byte(req.Kubeconfig)
+	if strings.TrimSpace(req.Context) != "" {
+		selected, _, err := selectContext(data, req.Context)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		data = selected
+	}
+	return s.connector.Inspect(ctx, data)
+}
+
+// Contexts 只解析 kubeconfig 列出可选 context（P12.4 接入流程：
+// 导入 → 选择明确 context → 连测 → 保存）。
+func (s *Service) Contexts(ctx context.Context, req ContextsRequest) (*ContextsView, error) {
+	if strings.TrimSpace(req.Kubeconfig) == "" {
+		return nil, fmt.Errorf("%w: kubeconfig is required", ErrInvalid)
+	}
+	view, err := ParseContexts([]byte(req.Kubeconfig))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	return view, nil
 }
 
 // List 返回受管集群元数据（不含凭据）。
@@ -192,25 +227,144 @@ func (s *Service) Refresh(ctx context.Context, id string) (*StatusView, error) {
 		}
 		return nil, fmt.Errorf("cluster: load credential: %w", err)
 	}
+	updater, ok := s.clusters.(store.ClusterCheckUpdater)
+	if !ok {
+		return nil, errors.New("cluster: storage does not support safe check updates")
+	}
+	saveCheck := func() error {
+		c.UpdatedAt = s.now().UTC()
+		if err := updater.UpdateClusterCheck(ctx, c, cred.ID, cred.KubeconfigSecret); err != nil {
+			return fmt.Errorf("cluster: check result not saved; credential may have changed, retry: %w", err)
+		}
+		return nil
+	}
 	plain, err := s.decrypt(cred)
 	if err != nil {
+		now := s.now().UTC()
 		c.Status = string(StatusError)
-		_ = s.clusters.Update(ctx, c)
+		c.CheckedAt = &now
+		c.CheckSummary = "凭据解密失败"
+		if updateErr := saveCheck(); updateErr != nil {
+			return nil, updateErr
+		}
 		return nil, err
 	}
 	info, err := s.connector.Inspect(ctx, plain)
+	now := s.now().UTC()
+	c.CheckedAt = &now
 	if err != nil {
 		c.Status = string(StatusDisconnected)
-		_ = s.clusters.Update(ctx, c)
+		c.CheckSummary = CheckSummary(err)
+		if updateErr := saveCheck(); updateErr != nil {
+			return nil, fmt.Errorf("cluster: update status: %w", updateErr)
+		}
 		return &StatusView{Cluster: c, Info: Info{Context: c.Context, Server: c.Server, Health: "down"}}, nil
 	}
 	c.Version = info.Version
 	c.Status = string(StatusConnected)
-	c.UpdatedAt = s.now().UTC()
-	if err := s.clusters.Update(ctx, c); err != nil {
+	c.CheckSummary = checkSuccessSummary
+	// 不在此处补记历史集群身份：旧记录缺失身份时必须走重新接入/人工核对，
+	// 不能因为一次连测就把当前候选目标“认领”为原 ClusterID。
+	c.UpdatedAt = now
+	if err := saveCheck(); err != nil {
 		return nil, fmt.Errorf("cluster: update status: %w", err)
 	}
 	return &StatusView{Cluster: c, Info: *info}, nil
+}
+
+// Update 原位替换同一逻辑集群的凭据（P12.3）。
+//
+// 顺序不可换：先解析/连测候选凭据（失败不碰旧值）→ 核对已记录身份与候选身份
+// 一致 → 加密候选密文 → 在同一事务内替换凭据与元数据。身份缺失或读不到时
+// 拒绝原位替换，要求单独接入并人工核对，禁止把另一集群静默继承为原 ClusterID。
+func (s *Service) Update(ctx context.Context, id string, req UpdateRequest) (*StatusView, error) {
+	if strings.TrimSpace(req.Kubeconfig) == "" {
+		return nil, fmt.Errorf("%w: kubeconfig is required", ErrInvalid)
+	}
+	if s.cipher == nil {
+		return nil, fmt.Errorf("%w: encryption not configured", ErrInvalid)
+	}
+	old, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	data := []byte(req.Kubeconfig)
+	if strings.TrimSpace(req.Context) != "" {
+		selected, _, err := selectContext(data, req.Context)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		data = selected
+	}
+	info, err := s.connector.Inspect(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(old.Identity) == "" || strings.TrimSpace(info.Identity) == "" {
+		return nil, fmt.Errorf("%w: 集群身份未记录或候选凭据无权读取身份对象（kube-system namespace UID）；"+
+			"为防把另一集群替换进原 ClusterID，已拒绝原位更新。请删除后重新接入并人工核对，旧会话/报告/审批不会随之迁移", ErrIdentityUnverified)
+	}
+	if old.Identity != info.Identity {
+		return nil, fmt.Errorf("%w: 候选凭据指向另一个集群（身份 %s → %s），已拒绝原位更新；"+
+			"如需管理新集群请走独立接入", ErrIdentityMismatch, shortIdentity(old.Identity), shortIdentity(info.Identity))
+	}
+	if strings.TrimSpace(old.Server) != "" && info.Server != old.Server && !req.ConfirmServerChange {
+		return nil, fmt.Errorf("%w: API Server 地址将从 %s 变为 %s；确认是同一集群的入口变更后请显式确认，已保留旧凭据",
+			ErrServerChanged, old.Server, info.Server)
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = old.Name
+	}
+	if !strings.EqualFold(name, old.Name) {
+		if err := s.ensureUniqueName(ctx, name); err != nil {
+			return nil, err
+		}
+	}
+	cred, err := s.credentials.GetByCluster(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("%w: cluster %q has no credential", ErrNotFound, id)
+		}
+		return nil, fmt.Errorf("cluster: load credential: %w", err)
+	}
+	secret, err := s.cipher.Encrypt(data)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UTC()
+	updated := *old
+	updated.Name = name
+	updated.Context = info.Context
+	updated.Server = info.Server
+	updated.Version = info.Version
+	updated.Status = string(StatusConnected)
+	updated.Identity = old.Identity
+	updated.CheckedAt = &now
+	updated.CheckSummary = checkSuccessSummary
+	updated.UpdatedAt = now
+	next := *cred
+	next.KubeconfigSecret = secret
+	next.UpdatedAt = now
+	rotator, ok := s.credentials.(store.ClusterCredentialRotator)
+	if !ok {
+		return nil, fmt.Errorf("%w: 存储层不支持凭据原子替换，已保留旧凭据", ErrInvalid)
+	}
+	if err := rotator.RotateClusterCredential(ctx, &updated, &next); err != nil {
+		return nil, fmt.Errorf("cluster: replace credential: %w", err)
+	}
+	s.recordChange(ctx, "update-credential", &updated, fmt.Sprintf(
+		`{"name":%q,"context":%q,"server":%q,"identityChanged":false}`,
+		updated.Name, updated.Context, updated.Server))
+	return &StatusView{Cluster: &updated, Info: *info}, nil
+}
+
+// shortIdentity 只展示身份摘要的前 8 位，避免把完整 UID 写进错误文案/日志。
+func shortIdentity(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // Delete 删除集群元数据与加密凭据，并写 cluster.change 审计（P1.11 补齐）。

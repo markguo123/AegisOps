@@ -4,17 +4,25 @@
 package sessionapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
+	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -43,8 +51,9 @@ type PrincipalResolver func(ctx context.Context, token string) (*store.User, *st
 type ScopeResolver func(ctx context.Context, user *store.User, role *store.Role) (*tools.AccessScope, error)
 
 type requestPrincipal struct {
-	User *store.User
-	Role *store.Role
+	recheck func(context.Context) (*store.User, *store.Role, error)
+	User    *store.User
+	Role    *store.Role
 }
 
 type principalContextKey struct{}
@@ -66,12 +75,29 @@ func (p requestPrincipal) canManageAllSessions() bool {
 	return p.Role != nil && permission.HasPermission(p.Role.Permissions, permission.ChatManageAll)
 }
 
-// sseEmitter 是可为 ChatService 挂载统一事件广播的可选接口。
+// sseEmitter 是可为 ChatService 挂载提交后广播与终止帧钩子的可选接口。
 type sseEmitter interface {
 	SetSink(sink func(sse.Event))
 }
 
-// Broadcaster 每会话一个，SSE 消息扇出（设计借鉴 kubectl-ai）。
+type fatalEmitter interface {
+	SetFatal(fn func(sessionID string, data sse.FatalData))
+}
+
+// chatDisplay 是 ChatService 的可选展示读取能力（规范快照与游标补齐）。
+type chatDisplay interface {
+	Snapshot(ctx context.Context, sessionID string, turnLimit int, target ...string) (sse.Snapshot, error)
+	EventsAfter(ctx context.Context, sessionID string, cursor uint64, limit int) ([]sse.Event, error)
+	Head(ctx context.Context, sessionID string) (head, floor uint64, err error)
+}
+
+// chatMigrator 把旧会话按需转换为规范展示对象（幂等）。
+type chatMigrator interface {
+	EnsureChatDisplay(ctx context.Context, sessionID string) error
+}
+
+// Broadcaster 每会话一个：只负责唤醒与扇出“已提交”的 SSE 帧。
+// 业务事实以数据库事件日志为准，丢失一次唤醒不影响收尾（心跳核对 head）。
 type Broadcaster struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
@@ -82,7 +108,7 @@ func newBroadcaster() *Broadcaster {
 }
 
 func (b *Broadcaster) add() chan []byte {
-	ch := make(chan []byte, 256)
+	ch := make(chan []byte, 128)
 	b.mu.Lock()
 	b.clients[ch] = struct{}{}
 	b.mu.Unlock()
@@ -95,40 +121,62 @@ func (b *Broadcaster) remove(ch chan []byte) {
 	b.mu.Unlock()
 }
 
-func (b *Broadcaster) broadcast(msg []byte) {
+// broadcast 投递一帧；缓冲满时直接断连（关闭通道），由客户端带游标重连补齐，
+// 不静默丢弃后继续使用残缺内容。
+func (b *Broadcaster) broadcast(frame []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for ch := range b.clients {
 		select {
-		case ch <- msg:
+		case ch <- frame:
 		default:
-			// 客户端消费慢则丢消息（SSE 重连时以历史快照兜底）。
+			close(ch)
+			delete(b.clients, ch)
 		}
 	}
 }
 
 // Server 是 Web chat HTTP 服务。
+type confirmationTicket struct {
+	operation audit.Operation
+	id        string
+	expires   time.Time
+	reply     chan string
+}
+
 type Server struct {
-	chat  chatService
-	model string
-	scope ScopeResolver
+	questions     map[string]*decision.Pending
+	questionViews map[string]decision.Question
+	tickets       map[string]confirmationTicket
+	chat          chatService
+	model         string
+	platform      *service.PlatformAccess
+	scope         ScopeResolver
 	// audit 写跨用户会话操作留痕（U-06）；nil 时跳过，不影响业务请求。
 	audit AuditSink
+	// ownerNames 仅在管理员跨用户读列表时解析 owner 展示名；nil 或失败时前端
+	// 回退到稳定 ownerId，不影响列表本身。
+	ownerNames func(context.Context) (map[string]string, error)
 
 	mu           sync.Mutex
+	approvalMu   sync.Mutex
 	broadcasters map[string]*Broadcaster
 	pending      map[string]chan string        // sessionID → 当前 Chat 的审批响应通道
 	runs         map[string]context.CancelFunc // sessionID → 当前 Chat 运行取消函数
-	eventSeq     map[string]uint64
-	eventLogs    map[string][]bufferedEvent
+	branching    map[string]bool
+	// idempotency 保存客户端请求幂等键 → 已分配的 turn_id 与请求安全指纹。
+	// 首版保存在进程内（24h TTL），重启后不再去重；展示事实与游标仍在数据库。
+	idempotency map[string]idempotencyEntry
 }
 
-type bufferedEvent struct {
-	seq uint64
-	raw []byte
+type idempotencyEntry struct {
+	fingerprint string
+	sessionID   string
+	turnID      string
+	expires     time.Time
 }
 
-const maxBufferedEventsPerSession = 512
+const idempotencyTTL = 24 * time.Hour
 
 // New 创建会话 API 服务。
 func New(chat chatService, model string) *Server {
@@ -136,39 +184,26 @@ func New(chat chatService, model string) *Server {
 		chat:         chat,
 		model:        model,
 		broadcasters: map[string]*Broadcaster{},
-		pending:      map[string]chan string{},
-		runs:         map[string]context.CancelFunc{},
-		eventSeq:     map[string]uint64{},
-		eventLogs:    map[string][]bufferedEvent{},
+		tickets:      map[string]confirmationTicket{}, pending: map[string]chan string{},
+		runs:        map[string]context.CancelFunc{},
+		idempotency: map[string]idempotencyEntry{},
 	}
-	// 服务端事件路由：统一事件按 session_id 扇出到对应 Broadcaster；
-	// 旧 ChatEvent JSON 仍在 handleSendMessage 里并行广播，两者不互相覆盖。
+	// 只广播已提交的语义事件：事件 id 与 seq 由存储事务分配，广播层不改写。
 	if em, ok := chat.(sseEmitter); ok {
 		em.SetSink(func(e sse.Event) {
-			// 事件日志只保留当前运行回合，供重连时补齐工具/审批流；
-			// 新一回合开始或会话重新发消息时清空旧日志，避免与历史快照重复。
-			s.mu.Lock()
-			id := e.SessionID
-			if e.EventType == sse.EventSessionCreated || e.EventType == sse.EventTurnStarted {
-				s.eventLogs[id] = nil
-			}
-			s.eventSeq[id]++
-			e.Seq = s.eventSeq[id]
-			raw, err := json.Marshal(e)
-			if err != nil {
-				s.mu.Unlock()
-				slog.Warn("sessionapi: 统一事件序列化失败", "error", err)
+			if e.SessionID == "" {
 				return
 			}
-			if id != "" {
-				logs := append(s.eventLogs[id], bufferedEvent{seq: e.Seq, raw: raw})
-				if len(logs) > maxBufferedEventsPerSession {
-					logs = logs[len(logs)-maxBufferedEventsPerSession:]
-				}
-				s.eventLogs[id] = logs
+			s.broadcaster(e.SessionID).broadcast(sse.EventFrame(e))
+		})
+	}
+	// 输出无法可靠保存：发送非持久 stream.fatal 并断开订阅者，由客户端重新同步。
+	if fm, ok := chat.(fatalEmitter); ok {
+		fm.SetFatal(func(sessionID string, data sse.FatalData) {
+			if sessionID == "" {
+				return
 			}
-			s.mu.Unlock()
-			s.broadcaster(e.SessionID).broadcast(raw)
+			s.broadcaster(sessionID).broadcast(sse.ControlFrameBytes(sse.NewFatalFrame(sessionID, data)))
 		})
 	}
 	return s
@@ -180,18 +215,33 @@ func (s *Server) WithScopeResolver(resolve ScopeResolver) *Server {
 	return s
 }
 
+// WithOwnerNames 注入会话 owner 展示名解析（仅用于管理员跨用户列表）。
+func (s *Server) WithOwnerNames(resolve func(context.Context) (map[string]string, error)) *Server {
+	s.ownerNames = resolve
+	return s
+}
+
+func (s *Server) WithPlatformAccess(p *service.PlatformAccess) *Server { s.platform = p; return s }
+
 // Handler 返回路由。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
+	mux.HandleFunc("GET /api/v1/sessions/models", s.handleChatModels)
 	mux.HandleFunc("POST /api/v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/rename", s.handleRenameSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/pin", s.handlePinSession)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/stream", s.handleStream)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/timeline", s.handleTimeline)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/question", s.handleQuestion)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/question", s.handleQuestion)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/send-message", s.handleSendMessage)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/branch", s.handleBranch)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/branch", s.handleBranchOrigin)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/secret/reveal", s.handleRevealSecret)
 	return mux
 }
 
@@ -204,13 +254,15 @@ func (s *Server) AuthenticatedHandler(resolve PrincipalResolver) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		user, role, err := resolve(r.Context(), bearerToken(r))
+		token := bearerToken(r)
+		recheck := func(ctx context.Context) (*store.User, *store.Role, error) { return resolve(ctx, token) }
+		user, role, err := recheck(r.Context())
 		if err != nil || user == nil || role == nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), requestPrincipal{
-			User: user,
+			recheck: recheck, User: user,
 			Role: role,
 		})))
 	})
@@ -231,6 +283,12 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
+	if s.platform != nil && principal.canReadAllSessions() {
+		if s.audit == nil || s.audit(r.Context(), store.AuditEvent{Action: actionAdminSessionRead, EventType: store.AuditEventSession, UserID: principal.User.ID, ResourceKind: "SessionList", Status: "success"}) != nil {
+			writeError(w, 503, fmt.Errorf("audit unavailable"))
+			return
+		}
+	}
 	var (
 		list []session.Session
 		err  error
@@ -245,6 +303,10 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type item struct {
+		ClusterID string `json:"clusterId,omitempty"`
+		OwnerID   string `json:"ownerId,omitempty"`
+		// OwnerName 仅管理员跨用户读列表时回填展示名；缺失时前端用 ownerId 兜底。
+		OwnerName    string    `json:"ownerName,omitempty"`
 		ID           string    `json:"id"`
 		Name         string    `json:"name"`
 		State        string    `json:"state"`
@@ -263,11 +325,26 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		return list[i].LastModified.After(list[j].LastModified)
 	})
+	ownerNames := map[string]string{}
+	if s.ownerNames != nil && principal.canReadAllSessions() {
+		// 展示名解析失败只影响标签，不能阻断列表；前端会用稳定 ownerId 兜底。
+		if resolved, err := s.ownerNames(r.Context()); err == nil {
+			ownerNames = resolved
+		}
+	}
 	out := make([]item, 0, len(list))
 	for _, sess := range list {
+		if s.platform != nil && !principal.canReadAllSessions() {
+			full, e := s.chat.GetSession(sess.ID)
+			if e != nil || !s.covered(r.Context(), full, principal.User.ID) {
+				out = append(out, item{ID: sess.ID, Name: "权限已变化", State: "restricted", LastModified: sess.LastModified})
+				continue
+			}
+		}
 		out = append(out, item{
-			ID:           sess.ID,
-			Name:         sessionTitle(sess),
+			ID:   sess.ID,
+			Name: sessionTitle(sess), ClusterID: sess.Cluster, OwnerID: sess.UserID,
+			OwnerName:    ownerNames[sess.UserID],
 			State:        sess.State,
 			Model:        sess.Model,
 			MessageCount: sess.TotalMessages(),
@@ -297,7 +374,7 @@ func (s *Server) ownedSession(r *http.Request, id string) (*session.Session, err
 
 // createOwnedSession 创建或获取会话。admin 可通过已存在的 session ID
 // 获取任意会话并继续操作。
-func (s *Server) createOwnedSession(r *http.Request, id string) (*session.Session, error) {
+func (s *Server) createOwnedSession(r *http.Request, id, cluster string) (*session.Session, error) {
 	principal, ok := principalFrom(r)
 	if !ok {
 		return nil, session.ErrForbidden
@@ -307,10 +384,30 @@ func (s *Server) createOwnedSession(r *http.Request, id string) (*session.Sessio
 		if !principal.canManageAllSessions() && sess.UserID != principal.User.ID {
 			return nil, session.ErrNotFound
 		}
-		return sess, nil
+		if cluster != "" && cluster != sess.Cluster {
+			return nil, session.ErrForbidden
+		}
+		return s.readableSession(r, id)
 	}
 	if !errors.Is(err, session.ErrNotFound) {
 		return nil, err
+	}
+	if s.platform != nil {
+		a, e := s.platform.Grants.EffectiveAccess(r.Context(), principal.User.ID, cluster)
+		if e != nil || len(a.Coverage().Targets) == 0 {
+			return nil, session.ErrForbidden
+		}
+		creator, ok := s.chat.(interface {
+			NewClusterSession(string, string, string, string, []byte) (*session.Session, error)
+		})
+		if !ok {
+			return nil, session.ErrForbidden
+		}
+		data, e := json.Marshal(a.Coverage())
+		if e != nil {
+			return nil, e
+		}
+		return creator.NewClusterSession(id, principal.User.ID, cluster, s.model, data)
 	}
 	sess, err = s.chat.GetOrCreateSessionForUser(id, principal.User.ID, "", s.model)
 	if errors.Is(err, session.ErrForbidden) {
@@ -330,12 +427,23 @@ func (s *Server) readableSession(r *http.Request, id string) (*session.Session, 
 	if err != nil {
 		return nil, err
 	}
+	if !principal.canReadAllSessions() && s.platform != nil && !s.covered(r.Context(), sess, principal.User.ID) {
+		return nil, session.ErrNotFound
+	}
 	if principal.canReadAllSessions() || principal.canManageAllSessions() || sess.UserID == principal.User.ID {
 		return sess, nil
 	}
 	return nil, session.ErrNotFound
 }
 
+func (s *Server) covered(ctx context.Context, sess *session.Session, uid string) bool {
+	var c authz.Coverage
+	if json.Unmarshal(sess.Coverage, &c) != nil || c.ClusterID != sess.Cluster {
+		return false
+	}
+	a, err := s.platform.Grants.EffectiveAccess(ctx, uid, c.ClusterID)
+	return err == nil && c.CoveredBy(a)
+}
 func writeSessionAccessError(w http.ResponseWriter, err error) {
 	if errors.Is(err, session.ErrNotFound) || errors.Is(err, session.ErrForbidden) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
@@ -372,17 +480,21 @@ func (s *Server) sessionToken(sessionID string) *session.TokenUsage {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ClusterID string `json:"clusterId"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
-	sess, err := s.createOwnedSession(r, body.ID)
+	sess, err := s.createOwnedSession(r, body.ID, body.ClusterID)
 	if err != nil {
 		writeSessionAccessError(w, err)
 		return
 	}
 	// admin 经 chat.manage.all 续用他人会话同样要留痕。
-	s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil)
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if body.Name != "" && body.Name != sess.Name {
 		if err := s.chat.RenameSession(sess.ID, body.Name); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -411,11 +523,14 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRename, store.AuditEventSession, map[string]any{"name": body.Name}) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.RenameSession(id, body.Name); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.recordCrossUserAction(r, sess, actionAdminSessionRename, store.AuditEventSession, map[string]any{"name": body.Name})
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "name": body.Name})
 }
 
@@ -434,11 +549,14 @@ func (s *Server) handlePinSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionPin, store.AuditEventSession, map[string]any{"pinned": body.Pinned}) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.PinSession(id, body.Pinned); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.recordCrossUserAction(r, sess, actionAdminSessionPin, store.AuditEventSession, map[string]any{"pinned": body.Pinned})
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "pinned": body.Pinned})
 }
 
@@ -449,12 +567,15 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionDelete, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	if err := s.chat.DeleteSession(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	// 审计在内存态清理前写：删除后已无法从会话里取回 owner。
-	s.recordCrossUserAction(r, sess, actionAdminSessionDelete, store.AuditEventSession, nil)
 	s.mu.Lock()
 	if cancel, ok := s.runs[id]; ok {
 		cancel()
@@ -462,13 +583,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	delete(s.broadcasters, id)
 	delete(s.pending, id)
 	delete(s.runs, id)
-	delete(s.eventSeq, id)
-	delete(s.eventLogs, id)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
-// handleStream 以 SSE 推送会话事件：先发历史快照，再转发实时事件。
+// handleStream 以协议 v2 推送会话事件：无游标先发规范快照，有游标先补齐日志再订阅。
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	flusher, ok := w.(http.Flusher)
@@ -476,65 +595,282 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
 		return
 	}
+	// 旧协议客户端明确拒绝，不混发旧帧（方案 25 §9.1）。
+	if r.URL.Query().Get("protocol") != "2" {
+		writeUpgradeRequired(w)
+		return
+	}
 	sess, err := s.readableSession(r, id)
 	if err != nil {
 		writeSessionAccessError(w, err)
 		return
 	}
-	// admin 读取他人会话的历史快照/事件流属于跨用户读取，必须留痕。
-	s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil)
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
+	display, ok := s.chat.(chatDisplay)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("chat display store unavailable"))
+		return
+	}
+	// 旧会话在首次读取时按需转换（幂等，失败不阻塞读取：仍可退化为空快照）。
+	if migrator, ok := s.chat.(chatMigrator); ok {
+		if err := migrator.EnsureChatDisplay(r.Context(), id); err != nil {
+			slog.Warn("sessionapi: 旧会话展示转换失败", "session", id, "error", err)
+		}
+	}
+	cursor, hasCursor, err := requestedCursor(r, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
-	// 反向代理（Nginx 等）默认缓冲响应体，会把 SSE 攒成一段一段；显式关闭本响应的
-	// 缓冲，代理配置遗漏时也能正常推流（P6.11）。
 	w.Header().Set("X-Accel-Buffering", "no")
 	b := s.broadcaster(id)
 	ch := b.add()
 	defer b.remove(ch)
-	snapshot, _ := json.Marshal(map[string]any{
-		"type":      "history",
-		"sessionId": sess.ID,
-		"state":     sess.State,
-		"messages":  sess.Messages,
-		// Token 为会话级累计用量（P2.13）：刷新/重开会话后右下角统计仍可读。
-		"token": s.sessionToken(sess.ID),
-	})
-	fmt.Fprintf(w, "data: %s\n\n", snapshot)
-	flusher.Flush()
 
-	// 运行中回合的事件日志先补齐，再消费实时通道。客户端按 seq 去重，
-	// 因此这里与快照之后到达的实时帧重叠也不会产生重复卡片。
-	if sess.State == "running" || sess.State == "waiting" {
-		s.mu.Lock()
-		logs := append([]bufferedEvent(nil), s.eventLogs[id]...)
-		s.mu.Unlock()
-		for _, item := range logs {
-			fmt.Fprintf(w, "data: %s\n\n", item.raw)
-			flusher.Flush()
+	write := func(frame []byte) bool {
+		if len(frame) == 0 {
+			return true
+		}
+		if _, err := w.Write(frame); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	installSnapshot := func() bool {
+		snap, err := display.Snapshot(r.Context(), id, 30)
+		if err != nil {
+			slog.Warn("sessionapi: 读取规范快照失败", "session", id, "error", err)
+			write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{
+				Code: "SNAPSHOT_UNAVAILABLE", Message: "无法读取会话快照", Retryable: true,
+			})))
+			return false
+		}
+		cursor = snap.Cursor
+		hasCursor = true
+		return write(sse.ControlFrameBytes(sse.NewSnapshotFrame(snap)))
+	}
+	if !hasCursor {
+		if !installSnapshot() {
+			return
 		}
 	}
+	// 登记订阅之后再读日志：通知只负责唤醒，事实永远来自数据库。
+	if hasCursor {
+		head, floor, err := display.Head(r.Context(), id)
+		if err != nil {
+			write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{Code: "HEAD_UNAVAILABLE", Message: "无法读取会话水位", Retryable: true})))
+			return
+		}
+		if cursor < floor || cursor > head {
+			write(sse.ControlFrameBytes(sse.NewResetRequiredFrame(id, sse.ResetRequiredData{Reason: "cursor_out_of_replay_window", Cursor: head})))
+			if !installSnapshot() {
+				return
+			}
+		}
+	}
+	catchUp := func() bool {
+		for {
+			if !s.canStream(r, sess) {
+				return false
+			}
+			events, err := display.EventsAfter(r.Context(), id, cursor, 200)
+			if err != nil {
+				if errors.Is(err, store.ErrChatReplayUnavailable) {
+					write(sse.ControlFrameBytes(sse.NewResetRequiredFrame(id, sse.ResetRequiredData{Reason: "cursor_out_of_replay_window"})))
+					return installSnapshot()
+				}
+				slog.Warn("sessionapi: 读取事件日志失败", "session", id, "error", err)
+				write(sse.ControlFrameBytes(sse.NewFatalFrame(id, sse.FatalData{Code: "REPLAY_UNAVAILABLE", Message: "读取会话事件失败", Retryable: true})))
+				return false
+			}
+			if len(events) == 0 {
+				return true
+			}
+			for _, e := range events {
+				if !write(sse.EventFrame(e)) {
+					return false
+				}
+				cursor = e.Seq
+			}
+			if len(events) < 200 {
+				return true
+			}
+		}
+	}
+	if !catchUp() {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case msg := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
+		case frame, ok := <-ch:
+			if !ok {
+				// 慢客户端缓冲已满：断开让客户端带游标重连补齐。
+				return
+			}
+			if !s.canStream(r, sess) {
+				return
+			}
+			// 只把通知当作“有新事件”的信号，事实仍从日志读取并校验游标。
+			if bytes.Contains(frame, []byte(`"event_type":"stream.fatal"`)) {
+				write(frame)
+				return
+			}
+			if !catchUp() {
+				return
+			}
+		case <-heartbeat.C:
+			if !s.canStream(r, sess) {
+				return
+			}
+			head, _, err := display.Head(r.Context(), id)
+			if err == nil && head > cursor {
+				if !catchUp() {
+					return
+				}
+				continue
+			}
+			if !write(sse.Heartbeat()) {
+				return
+			}
 		}
 	}
 }
 
+// handleTimeline 返回规范展示对象、当前 Turn/Interaction 与水位（历史首屏）。
+func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, err := s.readableSession(r, id)
+	if err != nil {
+		writeSessionAccessError(w, err)
+		return
+	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionRead, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
+	display, ok := s.chat.(chatDisplay)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("chat display store unavailable"))
+		return
+	}
+	if migrator, ok := s.chat.(chatMigrator); ok {
+		if err := migrator.EnsureChatDisplay(r.Context(), id); err != nil {
+			slog.Warn("sessionapi: 旧会话展示转换失败", "session", id, "error", err)
+		}
+	}
+	limit := 30
+	if raw := r.URL.Query().Get("turn_limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > 100 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("turn_limit must be 1..100"))
+			return
+		}
+		limit = n
+	}
+	snap, err := display.Snapshot(r.Context(), id, limit, r.URL.Query().Get("turn_id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// requestedCursor 解析 ?after= 与 Last-Event-ID；两者同时出现且不一致时 400。
+func requestedCursor(r *http.Request, sessionID string) (uint64, bool, error) {
+	after := strings.TrimSpace(r.URL.Query().Get("after"))
+	lastID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	if after != "" && lastID != "" && after != lastID {
+		return 0, false, fmt.Errorf("after and Last-Event-ID conflict")
+	}
+	raw := after
+	if raw == "" {
+		raw = lastID
+	}
+	if raw == "" {
+		return 0, false, nil
+	}
+	if sid, seq, ok := sse.ParseSSEID(raw); ok {
+		if sid != sessionID {
+			return 0, false, fmt.Errorf("cursor belongs to another session")
+		}
+		return seq, true, nil
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid cursor")
+	}
+	return n, true, nil
+}
+
+// writeUpgradeRequired 拒绝旧 Chat 流契约客户端（426 + 升级提示）。
+func writeUpgradeRequired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUpgradeRequired)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":            "chat stream protocol v2 required",
+		"code":             "UPGRADE_REQUIRED",
+		"protocol_version": sse.ProtocolVersion,
+		"upgrade":          "refresh the web client; old event streams are no longer served",
+	})
+}
+
 // handleSendMessage 发起一轮 Chat 并把事件广播到会话的 SSE 客户端。
+func (s *Server) canStream(r *http.Request, sess *session.Session) bool {
+	principal, ok := principalFrom(r)
+	if !ok {
+		return false
+	}
+	if principal.recheck != nil {
+		user, role, err := principal.recheck(r.Context())
+		if err != nil || user == nil || role == nil {
+			return false
+		}
+		principal.User = user
+		principal.Role = role
+	}
+	return s.platform == nil || principal.canReadAllSessions() || sess.UserID == principal.User.ID && s.covered(r.Context(), sess, principal.User.ID)
+}
+func (s *Server) handleChatModels(w http.ResponseWriter, r *http.Request) {
+	catalog, ok := s.chat.(interface {
+		ChatModels(context.Context) ([]config.ChatModel, error)
+	})
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "模型目录未接入"})
+		return
+	}
+	models, err := catalog.ChatModels(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法获取问诊模型"})
+		return
+	}
+	writeJSON(w, http.StatusOK, models)
+}
+
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Query string `json:"query"`
+		Query   string `json:"query"`
+		ModelID string `json:"modelId"`
 		// Skills 用户显式 @ 指定的 Skill 名称（P3.8.4），由 service 层强校验。
 		Skills []string `json:"skills"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(body.ModelID) > 256 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("modelId is too long"))
 		return
 	}
 	if body.Query == "" {
@@ -546,16 +882,81 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeSessionAccessError(w, err)
 		return
 	}
+	caller, _ := principalFrom(r)
+	if caller.User == nil || sess.UserID != caller.User.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the session owner can perform this action"})
+		return
+	}
+	// 请求幂等：同一操作者 + 会话 + 动作 + 内容指纹在 24h 内复用同一个 turn_id，
+	// 重复键不创建第二轮；键相同但内容变化返回 409。
+	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	fingerprint := ""
+	if idemKey != "" {
+		fingerprintBody, _ := json.Marshal(body)
+		sum := sha256.Sum256(append([]byte(caller.User.ID+"\x00"+id+"\x00send-message\x00"), fingerprintBody...))
+		fingerprint = fmt.Sprintf("%x", sum)
+		s.mu.Lock()
+		if entry, ok := s.idempotency[idemKey]; ok {
+			if time.Now().Before(entry.expires) {
+				s.mu.Unlock()
+				if entry.fingerprint != fingerprint || entry.sessionID != id {
+					writeError(w, http.StatusConflict, fmt.Errorf("idempotency key reused with different content"))
+					return
+				}
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"sessionId": id, "turnId": entry.turnID, "protocolVersion": sse.ProtocolVersion, "duplicate": true,
+				})
+				return
+			}
+			delete(s.idempotency, idemKey)
+		}
+		s.mu.Unlock()
+	}
+	turnID := "turn_" + rand.Text()
+	var bound *service.BoundRun
+	if s.platform != nil {
+		var c authz.Coverage
+		if json.Unmarshal(sess.Coverage, &c) != nil || c.ClusterID != sess.Cluster {
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
+		bound, err = s.platform.Bind(r.Context(), caller.User.ID, c, func(ctx context.Context) error {
+			u, role, e := caller.recheck(ctx)
+			if e != nil || u == nil || role == nil || u.ID != caller.User.ID {
+				return session.ErrForbidden
+			}
+			return nil
+		})
+		if err != nil {
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
+	}
+	handedOff := false
+	defer func() {
+		if bound != nil && !handedOff {
+			bound.Close()
+		}
+	}()
 	s.mu.Lock()
-	if _, running := s.pending[id]; running {
+	if _, running := s.pending[id]; running || s.branching[id] {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, fmt.Errorf("a chat is already running for this session"))
 		return
 	}
 	respond := make(chan string, 1)
 	chatCtx, cancelChat := context.WithCancel(context.Background())
+	if bound != nil {
+		go bound.Watch(chatCtx, cancelChat)
+	}
 	s.pending[id] = respond
 	s.runs[id] = cancelChat
+	if idemKey != "" {
+		s.idempotency[idemKey] = idempotencyEntry{
+			fingerprint: fingerprint, sessionID: id, turnID: turnID,
+			expires: time.Now().Add(idempotencyTTL),
+		}
+	}
 	s.mu.Unlock()
 
 	// Chat 生命周期独立于 HTTP 请求：请求返回后 SSE 仍需持续推送。
@@ -581,11 +982,83 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		if resolved == nil {
+			cancelChat()
+			s.mu.Lock()
+			delete(s.pending, id)
+			delete(s.runs, id)
+			s.mu.Unlock()
+			writeError(w, 403, session.ErrForbidden)
+			return
+		}
 		accessScope = resolved
+		accessScope.Refresh = func(ctx context.Context) (*tools.AccessScope, error) {
+			u, role, err := principal.recheck(ctx)
+			if err != nil || u == nil || role == nil {
+				return nil, session.ErrForbidden
+			}
+			return s.scope(ctx, u, role)
+		}
 	}
-	events, err := s.chat.Chat(chatCtx, service.ChatRequest{
+	var kubePath string
+	var check func(*http.Request) error
+	var targetCheck func(context.Context) error
+	if bound != nil {
+		targetCheck = func(ctx context.Context) error {
+			_, e := bound.Access(ctx)
+			return e
+		}
+		refresh := func(ctx context.Context) (*tools.AccessScope, error) {
+			a, e := bound.Access(ctx)
+			if e != nil {
+				return nil, e
+			}
+			return &tools.AccessScope{Policy: a, ClusterID: a.ClusterID}, nil
+		}
+		accessScope = &tools.AccessScope{Policy: &authz.EffectiveAccess{ClusterID: sess.Cluster}, ClusterID: sess.Cluster, Refresh: refresh}
+		if fresh, e := refresh(r.Context()); e == nil {
+			accessScope.Policy = fresh.Policy
+		}
+		kubePath = bound.Path
+		check = bound.CheckRequest
+	}
+	var confirm service.Confirmation
+	if s.platform != nil {
+		confirm = func(ctx context.Context, data sse.Interaction) (string, <-chan string, func(), error) {
+			if s.audit == nil {
+				return "", nil, nil, fmt.Errorf("audit unavailable")
+			}
+			operation := audit.OperationFrom(ctx)
+			key, ch, done := s.newConfirmation(id, data.InteractionID, operation)
+			raw, _ := json.Marshal(data)
+			payload, _ := json.Marshal(map[string]any{"planSHA256": fmt.Sprintf("%x", sha256.Sum256(raw)), "sessionVersion": principal.User.SessionVersion, "credentialVersion": bound.CredentialVersion, "expiresAt": time.Now().UTC().Add(5 * time.Minute), "target": data.Target})
+			event := store.AuditEvent{Action: "approval.request", EventType: store.AuditEventApproval, SessionID: id, TurnID: operation.TurnID, StepID: operation.StepID, UserID: principal.User.ID, ClusterID: sess.Cluster, ApprovalID: key, Payload: string(payload), Operation: data.Operation, Risk: data.Risk, Status: "pending"}
+			if data.Target != nil {
+				event.ResourceKind, event.ResourceName = data.Target.Kind, data.Target.Name
+				if data.Target.Namespace != "" && event.ResourceName != "" {
+					event.ResourceName = data.Target.Namespace + "/" + event.ResourceName
+				}
+			}
+			if e := s.audit(ctx, event); e != nil {
+				done()
+				return "", nil, nil, e
+			}
+			return key, ch, done, nil
+		}
+	}
+	var coverageSnapshot func() []byte
+	if bound != nil {
+		coverageSnapshot = bound.CoverageSnapshot
+	}
+	approvalContext := ""
+	if bound != nil {
+		approvalContext = fmt.Sprintf("%x", sha256.Sum256([]byte(bound.CredentialVersion+":"+bearerToken(r))))
+	}
+	events, err := s.chat.Chat(chatCtx, service.ChatRequest{ApprovalContext: approvalContext, CoverageSnapshot: coverageSnapshot, Confirmation: confirm, Ask: s.askQuestion, KubeconfigPath: kubePath, RequestCheck: check, TargetCheck: targetCheck,
 		SessionID:       id,
+		TurnID:          turnID,
 		Query:           body.Query,
+		ModelID:         body.ModelID,
 		UserID:          principal.User.ID,
 		AllowAnySession: principal.canManageAllSessions(),
 		AccessScope:     accessScope,
@@ -596,7 +1069,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.pending, id)
 		delete(s.runs, id)
+		if idemKey != "" {
+			delete(s.idempotency, idemKey)
+		}
 		s.mu.Unlock()
+		if errors.Is(err, service.ErrChatModelUnavailable) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, settings.ErrModelNotConfigured) {
 			// 模型未配置是配置态问题，不是服务端故障：409 + 原提示，前端据此引导去
 			// 配置中心「模型」分组，而不是报 500 让用户以为后端坏了（P6.1）。
@@ -610,7 +1090,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// 只记身份，不记 query 内容。
 	s.recordCrossUserAction(r, sess, actionAdminSessionMessage, store.AuditEventSession, nil)
 	b := s.broadcaster(id)
+	handedOff = true
 	go func() {
+		if bound != nil {
+			defer bound.Close()
+		}
 		defer cancelChat()
 		defer func() {
 			s.mu.Lock()
@@ -627,7 +1111,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			b.broadcast(raw)
 		}
 	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"sessionId": id})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"sessionId": id, "turnId": turnID, "protocolVersion": sse.ProtocolVersion,
+	})
 }
 
 // handleCancel 取消当前会话正在执行的 Chat 运行。
@@ -645,35 +1131,97 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Errorf("no active run for session %s", id))
 		return
 	}
+	if !s.recordCrossUserAction(r, sess, actionAdminSessionCancel, store.AuditEventSession, nil) {
+		writeError(w, 503, fmt.Errorf("audit unavailable"))
+		return
+	}
 	cancel()
-	s.recordCrossUserAction(r, sess, actionAdminSessionCancel, store.AuditEventSession, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": id})
 }
 
 // handleApprove 把审批选择回传给当前 Chat 的 respond 通道。
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
 	id := r.PathValue("id")
 	var body struct {
-		Choice string `json:"choice"`
+		ApprovalID       string `json:"approvalId"`
+		InteractionID    string `json:"interactionId"`
+		Choice           string `json:"choice"`
+		ExpectedRevision uint64 `json:"expectedRevision"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if body.ApprovalID == "" {
+		body.ApprovalID = body.InteractionID
 	}
 	sess, err := s.ownedSession(r, id)
 	if err != nil {
 		writeSessionAccessError(w, err)
 		return
 	}
+	caller, _ := principalFrom(r)
+	if caller.User == nil || sess.UserID != caller.User.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the session owner can perform this action"})
+		return
+	}
 	s.mu.Lock()
 	respond, ok := s.pending[id]
+	var operation audit.Operation
+	if s.platform != nil {
+		ticket, exists := s.tickets[id]
+		ok = ok && exists && body.ApprovalID == ticket.id && time.Now().Before(ticket.expires)
+		if ok {
+			respond = ticket.reply
+			operation = ticket.operation
+		}
+	}
 	s.mu.Unlock()
 	if !ok {
 		writeError(w, http.StatusConflict, fmt.Errorf("no pending approval for session %s", id))
 		return
 	}
+	var answerEvent store.AuditEvent
+	if s.platform != nil {
+		decision := "confirmed"
+		if body.Choice == "no" {
+			decision = "rejected"
+		}
+		answerEvent = store.AuditEvent{Action: "approval.answer.attempt", EventType: store.AuditEventApproval, SessionID: id, TurnID: operation.TurnID, StepID: operation.StepID, ClusterID: sess.Cluster, UserID: caller.User.ID, ApprovalID: body.ApprovalID, Decision: decision, Status: "pending"}
+		if s.audit == nil || s.audit(r.Context(), answerEvent) != nil {
+			writeError(w, 503, fmt.Errorf("audit unavailable"))
+			return
+		}
+	}
+	if committer, exists := s.chat.(interface {
+		CommitApproval(context.Context, string, string, string, uint64) error
+	}); exists {
+		if err := committer.CommitApproval(r.Context(), id, body.ApprovalID, body.Choice, body.ExpectedRevision); err != nil {
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, store.ErrChatHeadConflict) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, fmt.Errorf("approval decision was not accepted"))
+			return
+		}
+	}
 	select {
 	case respond <- body.Choice:
+		if s.platform != nil {
+			answerEvent.Action, answerEvent.Status = "approval.answer", "success"
+			auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+			defer cancelAudit()
+			if err := s.audit(auditCtx, answerEvent); err != nil {
+				slog.Warn("approval outcome audit failed", "approval_id", body.ApprovalID, "error", err)
+			}
+		}
+		s.mu.Lock()
+		if ticket, exists := s.tickets[id]; exists && ticket.id == body.ApprovalID {
+			delete(s.tickets, id)
+		}
+		s.mu.Unlock()
 		// 不回显 choice：Secret 值经此通道提交，响应体必须原样返回会话 id。
 		// 同理，跨用户审批审计只记身份，绝不记 choice 值。
 		s.recordCrossUserAction(r, sess, actionAdminSessionApprove, store.AuditEventApproval, nil)
@@ -683,6 +1231,26 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) newConfirmation(sessionID, interactionID string, operations ...audit.Operation) (string, <-chan string, func()) {
+	id := interactionID
+	if id == "" {
+		id = rand.Text()
+	}
+	ticket := confirmationTicket{id: id, expires: time.Now().Add(5 * time.Minute), reply: make(chan string, 1)}
+	if len(operations) != 0 {
+		ticket.operation = operations[0]
+	}
+	s.mu.Lock()
+	s.tickets[sessionID] = ticket
+	s.mu.Unlock()
+	return ticket.id, ticket.reply, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.tickets[sessionID].id == ticket.id {
+			delete(s.tickets, sessionID)
+		}
+	}
+}
 func (s *Server) broadcaster(id string) *Broadcaster {
 	s.mu.Lock()
 	defer s.mu.Unlock()

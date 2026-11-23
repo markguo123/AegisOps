@@ -13,13 +13,13 @@ import (
 )
 
 // envCipherKey 是平台主进程读取凭据加密密钥的环境变量（P6.12：敏感值只从环境变量读取）。
-const envCipherKey = "K8S_AI_ENC_KEY"
+const envCipherKey = "AEGISOPS_ENC_KEY"
 
 // cipherPrefix 标识当前密文格式版本。
 const cipherPrefix = "v1:"
 
 // ErrCipherKeyRequired 表示未配置凭据加密密钥。
-var ErrCipherKeyRequired = errors.New("cluster: encryption key is required (set K8S_AI_ENC_KEY to a 32-byte hex or base64 key)")
+var ErrCipherKeyRequired = errors.New("cluster: encryption key is required (set AEGISOPS_ENC_KEY to a 32-byte hex or base64 key)")
 
 // Cipher 是凭据的 AES-256-GCM 加密/解密器（P3.1：kubeconfig 加密落库）。
 // 密钥永不落库、永不写日志；解密后的明文在调用方使用完毕后即丢弃。
@@ -32,6 +32,20 @@ type Cipher struct {
 func NewCipherFromEnv() (*Cipher, error) {
 	raw := strings.TrimSpace(os.Getenv(envCipherKey))
 	if raw == "" {
+		return nil, ErrCipherKeyRequired
+	}
+	key, err := decodeCipherKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	return NewCipher(key)
+}
+
+// NewCipherFromKeyString 用环境变量/命令行传入的密钥串构造密码机（P6.12）。
+// raw 接受 64 位 hex 或 base64 编码的 32 字节随机密钥，与 NewCipherFromEnv
+// 走同一个解码器，供离线运维工具（aopsmig）与 Server 保持同一加解密口径。
+func NewCipherFromKeyString(raw string) (*Cipher, error) {
+	if strings.TrimSpace(raw) == "" {
 		return nil, ErrCipherKeyRequired
 	}
 	key, err := decodeCipherKey(raw)

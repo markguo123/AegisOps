@@ -1,5 +1,5 @@
 // Package session 实现二期会话：可插拔 Store（memory/file）与 Manager。
-// 设计逻辑借鉴 kubectl-ai 的 Store/Manager 模式，类型按 k8s-ai 重新实现。
+// 设计逻辑借鉴 kubectl-ai 的 Store/Manager 模式，类型按 AegisOps 重新实现。
 package session
 
 import (
@@ -36,13 +36,21 @@ type Message struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+type BranchOrigin struct {
+	SessionID string `json:"sessionId"`
+	TurnID    string `json:"turnId"`
+}
+
 // Session 是一个对话会话。
 type Session struct {
-	ID string `json:"id"`
+	Branch          *BranchOrigin `json:"branch,omitempty"`
+	ApprovalContext string        `json:"approvalContext,omitempty"`
+	ID              string        `json:"id"`
 	// UserID 是会话所有者。空值表示三期历史会话或 CLI 会话；管理员可读取
 	// 这类会话，普通用户/操作员不得认领或访问。
 	UserID         string           `json:"userId,omitempty"`
 	Name           string           `json:"name"`
+	Coverage       json.RawMessage  `json:"coverage,omitempty"`
 	Cluster        string           `json:"cluster,omitempty"`
 	Namespace      string           `json:"namespace,omitempty"`
 	Model          string           `json:"model,omitempty"`

@@ -16,7 +16,7 @@ import (
 // /healthz 保持进程级（依赖故障时 liveness 不能把容器杀成重启风暴）。
 func TestReadyzReflectsReadinessCheck(t *testing.T) {
 	notReady := func(context.Context) error {
-		return fmt.Errorf("%w: schema version 0 < expected 4 (run k8s-ai db migrate)", store.ErrNotReady)
+		return fmt.Errorf("%w: schema version 0 < expected 4 (run aopsctl db migrate)", store.ErrNotReady)
 	}
 	srv := New(&fakeScan{}).WithReadiness(notReady)
 	ts := httptest.NewServer(srv.Handler())
@@ -83,7 +83,9 @@ func TestReadyzTimesOut(t *testing.T) {
 // deny-by-default），本批不放宽也不改语义。
 func TestUnregisteredAPIRoutesReturnJSONError(t *testing.T) {
 	ts, token, _, _ := newAuthedScanServer(t, &fakeScan{})
-	paths := []string{"/api/v1/nope", "/api/v1/audit/events", "/api/v1/skills/missing/preview"}
+	// /api/v1/audit/events 已是登记路由（P4.7），这里换成同前缀下未登记的路径，
+	// 继续锁"未登记 = 403 + JSON 错误体"的 deny-by-default 基线。
+	paths := []string{"/api/v1/nope", "/api/v1/audit/unknown", "/api/v1/skills/missing/preview"}
 	for _, p := range paths {
 		r := authedGet(t, ts, p, token)
 		if r.StatusCode != http.StatusForbidden {

@@ -16,6 +16,12 @@ import (
 var serverTemplateKeys = []string{
 	"agent.audit_dir",
 	"agent.audit_file_copy",
+	"agent.exec_pod.enabled",
+	"agent.exec_pod.max_concurrent_per_instance",
+	"agent.exec_pod.max_concurrent_per_user",
+	"agent.exec_pod.max_output_bytes",
+	"agent.exec_pod.max_timeout_seconds",
+	"agent.exec_pod.timeout_seconds",
 	"agent.session_dir",
 	"agent.session_max_bytes",
 	"platform.auth.admin_username",
@@ -55,16 +61,24 @@ var serverTemplateKeys = []string{
 var cliTemplateKeys = []string{
 	"agent.approval_mode",
 	"agent.audit_dir",
+	"agent.context_window",
 	"agent.create.allow_kinds",
 	"agent.create.cluster_kinds",
 	"agent.create.deny_kinds",
 	"agent.create.enabled",
 	"agent.create.max_manifest_bytes",
 	"agent.create.max_objects_per_call",
+	"agent.exec_pod.enabled",
+	"agent.exec_pod.max_concurrent_per_instance",
+	"agent.exec_pod.max_concurrent_per_user",
+	"agent.exec_pod.max_output_bytes",
+	"agent.exec_pod.max_timeout_seconds",
+	"agent.exec_pod.timeout_seconds",
 	"agent.max_iterations",
 	"agent.max_tool_calls",
 	"agent.require_approval",
 	"agent.secret.access",
+	"agent.secret.read_approval",
 	"agent.session_dir",
 	"agent.skip_permissions",
 	"agent.timeout",
@@ -271,7 +285,7 @@ func TestInitTemplatesLoad(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "platform.store.dsn") {
 		t.Fatalf("缺 DSN 时应报 platform.store.dsn 错误，实际 %v", err)
 	}
-	t.Setenv("K8S_AI_PLATFORM_STORE_DSN", "k8sai:secret@tcp(db.internal:3306)/k8s_ai?charset=utf8mb4&parseTime=true")
+	t.Setenv("AEGISOPS_PLATFORM_STORE_DSN", "k8sai:secret@tcp(db.internal:3306)/k8s_ai?charset=utf8mb4&parseTime=true")
 	cfg, err := Load(LoadOptions{ConfigFile: serverPath})
 	if err != nil {
 		t.Fatalf("注入 Secret DSN 后应加载成功: %v", err)
@@ -425,7 +439,7 @@ func TestResolveConfigFileCLIFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	dir := filepath.Join(home, ".k8s-ai")
+	dir := filepath.Join(home, ".aegisops")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +479,7 @@ func TestLoadCLIUsesCLIFileWithFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	dir := filepath.Join(home, ".k8s-ai")
+	dir := filepath.Join(home, ".aegisops")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -6,11 +6,54 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/k8s-ai/k8s-ai/internal/store"
 )
+
+// TestAuditCenterCapability 覆盖 P4.7/P4.8：真实装配下管理员可按 audit.read 检索
+// 审计事件与详情，普通用户直调被网关 403，响应不携带存储层 payload。
+func TestAuditCenterCapability(t *testing.T) {
+	h := newHarness(t)
+	admin := h.adminToken()
+	// 登录本身会写一条 LOGIN 审计，列表至少有这条真实事件，便于验证详情。
+	h.createUser(admin, "bob", "bob-password-123", "user")
+	bob := h.login("bob", "bob-password-123")
+
+	if r := h.do(http.MethodGet, "/api/v1/audit/events", bob, ""); r.status != http.StatusForbidden {
+		t.Fatalf("无 audit.read 的普通用户应 403，实得 %d: %s", r.status, r.body)
+	}
+
+	listed := h.must(h.do(http.MethodGet, "/api/v1/audit/events?limit=1", admin, ""), http.StatusOK)
+	if strings.Contains(listed.body, "\"payload\"") {
+		t.Fatalf("审计列表直接透传了存储层 payload: %s", listed.body)
+	}
+	var page struct {
+		Items []struct {
+			ID        int64  `json:"id"`
+			EventType string `json:"eventType"`
+			UserName  string `json:"userName"`
+		} `json:"items"`
+		HasMore bool `json:"hasMore"`
+	}
+	listed.data(t, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("limit=1 应返回 1 条，实得 %d", len(page.Items))
+	}
+	if page.Items[0].EventType == "" || page.Items[0].UserName == "" {
+		t.Errorf("审计事件缺少事件类型或操作者名称: %+v", page.Items[0])
+	}
+
+	detail := h.must(h.do(http.MethodGet, "/api/v1/audit/events/"+strconv.FormatInt(page.Items[0].ID, 10), admin, ""), http.StatusOK)
+	if strings.Contains(detail.body, "\"payload\"") {
+		t.Fatalf("审计详情直接透传了存储层 payload: %s", detail.body)
+	}
+	if !strings.Contains(detail.body, "\"timeline\"") {
+		t.Fatalf("审计详情缺少关联时间线: %s", detail.body)
+	}
+}
 
 // TestUserAndRoleCapability 覆盖 P3.11/P3.13：用户 CRUD 与三角色固定语义。
 func TestUserAndRoleCapability(t *testing.T) {
@@ -23,14 +66,14 @@ func TestUserAndRoleCapability(t *testing.T) {
 		Permissions []string `json:"permissions"`
 	}
 	h.must(h.do(http.MethodGet, "/api/v1/roles", admin, ""), http.StatusOK).data(t, &roles)
-	if len(roles) != 3 {
-		t.Fatalf("内置角色应为 3 个，实得 %d: %+v", len(roles), roles)
+	if len(roles) != 2 {
+		t.Fatalf("内置角色应为 2 个，实得 %d: %+v", len(roles), roles)
 	}
 	byName := map[string][]string{}
 	for _, r := range roles {
 		byName[r.Name] = r.Permissions
 	}
-	for _, name := range []string{"admin", "operator", "user"} {
+	for _, name := range []string{"admin", "user"} {
 		if _, ok := byName[name]; !ok {
 			t.Fatalf("缺少内置角色 %q", name)
 		}
@@ -39,15 +82,11 @@ func TestUserAndRoleCapability(t *testing.T) {
 	if len(byName["admin"]) != 1 || byName["admin"][0] != "*" {
 		t.Errorf("admin 角色权限应为 [*]，实得 %+v", byName["admin"])
 	}
-	if len(byName["user"]) != 0 {
-		t.Errorf("user 角色应零平台权限起步，实得 %+v", byName["user"])
-	}
-	// 发起巡检权是 operator 与 user 的唯一差别，多给一位就等于扩大了 operator 的能力面。
-	if len(byName["operator"]) != 1 || byName["operator"][0] != "scan.execute" {
-		t.Errorf("operator 角色权限应为 [scan.execute]，实得 %+v", byName["operator"])
+	if len(byName["user"]) != 2 || byName["user"][0] != "scan.execute" || byName["user"][1] != "skill.read" {
+		t.Fatalf("unexpected user permissions %v", byName["user"])
 	}
 
-	userID := h.createUser(admin, "alice", "alice-password-123", "operator")
+	userID := h.createUser(admin, "alice", "alice-password-123", "user")
 	// 重名冲突要用合法 roleId，否则会先在角色校验上 400，撞不到唯一性判定。
 	dupBody, _ := json.Marshal(map[string]string{
 		"username": "alice",
@@ -97,6 +136,7 @@ func TestPermissionBoundariesOnZeroRole(t *testing.T) {
 	h.createUser(admin, "bob", "bob-password-12345", "user")
 	zero := h.login("bob", "bob-password-12345")
 
+	h.must(h.do(http.MethodGet, "/api/v1/skills", zero, ""), http.StatusOK)
 	denied := []struct{ method, path, body string }{
 		{http.MethodGet, "/api/v1/users", ""},
 		{http.MethodPost, "/api/v1/users", `{"username":"x","password":"password123","roleId":"r"}`},
@@ -104,7 +144,7 @@ func TestPermissionBoundariesOnZeroRole(t *testing.T) {
 		{http.MethodGet, "/api/v1/grants", ""},
 		{http.MethodGet, "/api/v1/settings/model", ""},
 		{http.MethodPatch, "/api/v1/settings/model", `{"api_key":"sk-nope"}`},
-		{http.MethodGet, "/api/v1/skills", ""},
+
 		{http.MethodPost, "/api/v1/skills/import", "name: nope\n"},
 		{http.MethodGet, "/api/v1/clusters", ""},
 		{http.MethodPost, "/api/v1/clusters", `{"kubeconfig":"x"}`},
@@ -140,7 +180,7 @@ func TestPermissionBoundariesOnZeroRole(t *testing.T) {
 // 只写不读（value 为 null、hasValue=true），响应与审计都不带明文。
 func TestSettingsCenterMasksSensitiveValues(t *testing.T) {
 	const apiKey = "sk-live-SENTINEL-apikey-0001"
-	const kubeconfigPath = "/etc/k8s-ai/SENTINEL-kubeconfig-path"
+	const kubeconfigPath = "/etc/aegisops/SENTINEL-kubeconfig-path"
 	h := newHarness(t)
 	admin := h.adminToken()
 
@@ -418,7 +458,7 @@ func TestSessionOwnerIsolationOnRealStack(t *testing.T) {
 	}
 
 	surfaces := []struct{ name, method, path, body string }{
-		{"历史/SSE", http.MethodGet, sessions + "/" + owned.ID + "/stream", ""},
+		{"规范历史", http.MethodGet, sessions + "/" + owned.ID + "/timeline", ""},
 		{"续用会话", http.MethodPost, sessions, `{"id":"` + owned.ID + `"}`},
 		{"发消息", http.MethodPost, sessions + "/" + owned.ID + "/send-message", `{"query":"hi"}`},
 		{"审批", http.MethodPost, sessions + "/" + owned.ID + "/approve", `{"choice":"yes"}`},

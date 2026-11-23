@@ -117,6 +117,13 @@ func ownerHarness(t *testing.T, chat chatService) (*httptest.Server, *auditCaptu
 	capture := &auditCapture{}
 	srv := httptest.NewServer(New(chat, "m").
 		WithAudit(capture.sink).
+		WithOwnerNames(func(context.Context) (map[string]string, error) {
+			return map[string]string{
+				"u-owner": "Owner Name",
+				"u-other": "Other Name",
+				"u-admin": "Admin Name",
+			}, nil
+		}).
 		AuthenticatedHandler(ownershipResolver(
 			map[string]string{
 				"tok-owner":    "owner",
@@ -171,6 +178,9 @@ func streamFrame(t *testing.T, url, token string) (int, map[string]any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if !strings.Contains(url, "?") {
+		url += "?protocol=2"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +196,11 @@ func streamFrame(t *testing.T, url, token string) (int, map[string]any) {
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		line := strings.TrimPrefix(scanner.Text(), "data: ")
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "data: ")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -214,7 +228,7 @@ func foreignSurfaces(base, id string) []struct {
 		url    string
 		body   string
 	}{
-		{"历史/SSE", http.MethodGet, s("/stream"), ""},
+		{"规范历史", http.MethodGet, s("/timeline"), ""},
 		{"续用会话", http.MethodPost, base + "/api/v1/sessions", `{"id":"` + id + `"}`},
 		{"发消息", http.MethodPost, s("/send-message"), `{"query":"hijack attempt"}`},
 		{"审批", http.MethodPost, s("/approve"), `{"choice":"yes"}`},
@@ -233,6 +247,26 @@ func newOwnerChat() *fakeChat {
 	}
 	chat.sessions["s-other"] = &session.Session{ID: "s-other", UserID: "u-other", Name: "other session"}
 	return chat
+}
+
+// TestSessionListOwnerNameForAdmin 验证管理员跨用户列表能拿到 owner 展示名，
+// 普通用户列表不解析/不泄漏他人的 owner 名称。
+func TestSessionListOwnerNameForAdmin(t *testing.T) {
+	srv, _ := ownerHarness(t, newOwnerChat())
+	status, body := call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-admin", "")
+	if status != http.StatusOK {
+		t.Fatalf("admin list = %d", status)
+	}
+	if !strings.Contains(body, `"ownerName":"Owner Name"`) || !strings.Contains(body, `"ownerName":"Other Name"`) {
+		t.Fatalf("管理员列表缺少 owner 展示名: %s", body)
+	}
+	status, body = call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-owner", "")
+	if status != http.StatusOK {
+		t.Fatalf("owner list = %d", status)
+	}
+	if strings.Contains(body, "Other Name") || strings.Contains(body, "s-other") {
+		t.Fatalf("普通用户列表泄漏他人会话/名称: %s", body)
+	}
 }
 
 // TestForeignUserCannotTouchAnySessionSurface 覆盖零权限用户与只持有
@@ -293,7 +327,7 @@ func TestReadAllAdminCannotWriteOthersSessions(t *testing.T) {
 	if status != http.StatusOK || frame == nil {
 		t.Fatalf("read.all 读历史 = %d, want 200", status)
 	}
-	if frame["type"] != "history" || frame["sessionId"] != "s-owner" {
+	if frame["event_type"] != "stream.snapshot" || frame["session_id"] != "s-owner" {
 		t.Fatalf("历史快照帧异常: %+v", frame)
 	}
 	if _, body := call(t, http.MethodGet, srv.URL+"/api/v1/sessions", "tok-reader", ""); !strings.Contains(body, "s-other") {
@@ -301,7 +335,7 @@ func TestReadAllAdminCannotWriteOthersSessions(t *testing.T) {
 	}
 
 	for _, surface := range foreignSurfaces(srv.URL, "s-owner") {
-		if surface.name == "历史/SSE" || surface.name == "续用会话" {
+		if surface.name == "规范历史" || surface.name == "续用会话" {
 			continue
 		}
 		status, _ := call(t, surface.method, surface.url, "tok-reader", surface.body)
@@ -350,16 +384,16 @@ func TestAdminCrossUserSessionOpsAreAudited(t *testing.T) {
 		t.Fatalf("admin 续用他人会话 = %d, want 200", status)
 	}
 	// 3+4. 发消息后代他人审批（审批值带敏感串，验红线）。
-	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/send-message", "tok-admin", `{"query":"`+secretQuery+`"}`); status != http.StatusAccepted {
+	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/send-message", "tok-admin", `{"query":"`+secretQuery+`"}`); status != http.StatusForbidden {
 		t.Fatalf("admin 代发消息 = %d, want 202", status)
 	}
-	<-chat.started
-	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/approve", "tok-admin", `{"choice":"`+secretChoice+`"}`); status != http.StatusOK {
+
+	if status, _ := call(t, http.MethodPost, sessions+"/s-owner/approve", "tok-admin", `{"choice":"`+secretChoice+`"}`); status != http.StatusForbidden {
 		t.Fatalf("admin 代审批 = %d, want 200", status)
 	}
-	<-chat.done
+
 	// 5. 另起一轮运行并由 admin 取消。
-	if status, _ := call(t, http.MethodPost, sessions+"/s-run/send-message", "tok-admin", `{"query":"run please"}`); status != http.StatusAccepted {
+	if status, _ := call(t, http.MethodPost, sessions+"/s-run/send-message", "tok-owner", `{"query":"run please"}`); status != http.StatusAccepted {
 		t.Fatalf("admin 发起第二轮 = %d, want 202", status)
 	}
 	<-chat.started
@@ -382,13 +416,11 @@ func TestAdminCrossUserSessionOpsAreAudited(t *testing.T) {
 		eventType string
 		session   string
 	}{
-		actionAdminSessionRead:    {store.AuditEventSession, "s-owner"},
-		actionAdminSessionMessage: {store.AuditEventSession, "s-owner"},
-		actionAdminSessionApprove: {store.AuditEventApproval, "s-owner"},
-		actionAdminSessionCancel:  {store.AuditEventSession, "s-run"},
-		actionAdminSessionRename:  {store.AuditEventSession, "s-owner"},
-		actionAdminSessionPin:     {store.AuditEventSession, "s-owner"},
-		actionAdminSessionDelete:  {store.AuditEventSession, "s-owner"},
+		actionAdminSessionRead:   {store.AuditEventSession, "s-owner"},
+		actionAdminSessionCancel: {store.AuditEventSession, "s-run"},
+		actionAdminSessionRename: {store.AuditEventSession, "s-owner"},
+		actionAdminSessionPin:    {store.AuditEventSession, "s-owner"},
+		actionAdminSessionDelete: {store.AuditEventSession, "s-owner"},
 	}
 	for action, expect := range want {
 		events := capture.byAction(action)

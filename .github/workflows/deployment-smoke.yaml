@@ -1,0 +1,84 @@
+name: Deployment CI
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'internal/cli/**'
+      - 'internal/store/**'
+      - 'tests/arch/**'
+      - 'Dockerfile'
+      - '.github/workflows/deployment-smoke.yaml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4.13
+        env:
+          MYSQL_ROOT_PASSWORD: integration-only
+          MYSQL_DATABASE: aegisops_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h127.0.0.1 --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - run: go test ./...
+      - run: go vet ./...
+      - name: MySQL schema and CRUD integration
+        env:
+          AEGISOPS_TEST_MYSQL_DSN: root:integration-only@tcp(127.0.0.1:3306)/aegisops_test?parseTime=true&timeout=10s&readTimeout=30s&writeTimeout=30s
+        run: go test ./internal/store -run TestStoresMySQL -count=1 -v
+      - run: |
+          bash -n deploy/install.sh deploy/upgrade.sh deploy/lib.sh deploy/package.sh
+          helm lint deploy/helm/aegisops -f deploy/helm/aegisops/values-production.yaml --set image.tag=test
+          helm lint deploy/helm/aegisops -f deploy/helm/aegisops/values-quickstart.yaml --set image.tag=test
+
+  quickstart:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - name: Create isolated Kubernetes cluster
+        run: |
+          go install sigs.k8s.io/kind@v0.27.0
+          kind create cluster --name aegisops-smoke --wait 120s
+      - name: One-command source build, image distribution and install
+        env:
+          AEGISOPS_SHOW_INITIAL_PASSWORD: 'false'
+          KUBECTL_VERSION: ''
+        run: |
+          bash deploy/install.sh
+          kubectl -n aegisops rollout status deployment/aegisops-server --timeout=5m
+      - name: Verify HTTP login, page configuration and repeat install
+        env:
+          AEGISOPS_SHOW_INITIAL_PASSWORD: 'false'
+          KUBECTL_VERSION: ''
+        run: python3 deploy/test/quickstart_smoke.py
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          kubectl -n aegisops get pods,jobs,pvc
+          kubectl -n aegisops get events --sort-by=.lastTimestamp
+          kubectl -n aegisops logs deployment/aegisops-server --all-containers --tail=100 || true
+      - name: Cleanup isolated cluster
+        if: always()
+        run: kind delete cluster --name aegisops-smoke

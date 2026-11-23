@@ -59,13 +59,19 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
 
+/** 账号来源（对应后端 store.UserSource*）：本地口令 / 企业 OIDC / 两者并存。 */
+export type AuthUserSource = 'local' | 'oidc' | 'local+oidc'
+
 /** 认证端点（auth.go / store.User 结构化字段，PasswordHash 永不外泄）。 */
 export interface AuthUser {
   id: string
   username: string
   displayName?: string
+  email?: string
   roleId?: string
   status?: string
+  /** 账号来源，仅 GET /api/v1/users 回填；/auth/me 不携带。 */
+  source?: AuthUserSource
   createdAt: string
   updatedAt: string
 }
@@ -95,7 +101,6 @@ export interface LoginRequest {
 }
 
 export interface LoginResponse {
-  token: string
   expiresAt: string
   user: AuthUser
 }
@@ -119,6 +124,10 @@ export interface Cluster {
   server?: string
   version?: string
   status?: string
+  /** 最近一次连测时间；null/缺省表示从未连测。 */
+  checkedAt?: string | null
+  /** 最近一次连测的结论摘要（失败时区分网络/TLS/认证/授权）。 */
+  checkSummary?: string
   createdAt: string
   updatedAt: string
 }
@@ -132,6 +141,55 @@ export interface ClusterInfo {
   health?: string
 }
 
+/** 当前用户在某集群的有效授权规则（工作台展示，不替代执行期核权）。 */
+export interface ClusterAccessRule {
+  scopeType: 'namespace' | 'cluster'
+  namespaces: string[] | null
+  resourceProfile?: string
+  actions: string[]
+  grantId?: string
+}
+
+/** GET /api/v1/clusters/workspace 的单条目标。 */
+export interface ClusterWorkspaceItem {
+  cluster: Cluster
+  checkState: 'ok' | 'failed' | 'unchecked' | 'stale'
+  identityRecorded: boolean
+  access: ClusterAccessRule[]
+  canManage: boolean
+  canChat: boolean
+  canScan: boolean
+  canViewReports: boolean
+}
+
+export interface ClusterWorkspaceStats {
+  total: number
+  connected: number
+  failed: number
+  unchecked: number
+}
+
+export interface ClusterWorkspace {
+  dataSource: string
+  generatedAt: string
+  summary: ClusterWorkspaceStats
+  items: ClusterWorkspaceItem[]
+}
+
+/** POST /api/v1/clusters/contexts 的响应：可选 context 与文件里的当前值。 */
+export interface ClusterContexts {
+  current?: string
+  contexts: string[]
+}
+
+/** PATCH /api/v1/clusters/{id}：原位替换同一逻辑集群的凭据。 */
+export interface ClusterUpdateRequest {
+  name?: string
+  context?: string
+  kubeconfig: string
+  confirmServerChange?: boolean
+}
+
 /** GET /api/v1/clusters/current 的 data（后端 cluster.StatusView）。 */
 export interface ClusterStatusView {
   cluster: Cluster
@@ -141,11 +199,14 @@ export interface ClusterStatusView {
 /** POST /api/v1/clusters 请求体：kubeconfig 仅作一次性提交，不回显。 */
 export interface ClusterCreateRequest {
   name?: string
+  /** 显式选择的 context；空则沿用 kubeconfig 的 current-context。 */
+  context?: string
   kubeconfig: string
 }
 
 /** POST /api/v1/clusters/test 请求体。 */
 export interface ClusterTestRequest {
+  context?: string
   kubeconfig: string
 }
 
@@ -275,7 +336,7 @@ export interface SettingsItem {
 /** GET /api/v1/settings/{group} 的 data（后端 settings.GroupView）。 */
 export interface SettingsGroupView {
   group: string
-  /** 服务端是否已配置 K8S_AI_ENC_KEY；false 时敏感配置只能读状态不能保存。 */
+  /** 服务端是否已配置 AEGISOPS_ENC_KEY；false 时敏感配置只能读状态不能保存。 */
   encryptionAvailable?: boolean
   items: SettingsItem[]
   /** 仅 PATCH 返回：本次写入的键里有被部署期变量覆盖的项，逐条说明实际生效来源。 */
@@ -313,6 +374,8 @@ export interface UpdateUserRequest {
 
 /** namespace 授权/销毁委派（后端 authz.Grant；不含任何敏感实体）。 */
 export interface AuthzGrant {
+  scopeType?:string
+ actions?:string[]
   id: string
   principalType: GrantPrincipalType
   principalId: string
@@ -327,22 +390,14 @@ export interface AuthzGrant {
 
 /** POST /api/v1/grants 请求体（authz.CreateGrantRequest）。 */
 export interface CreateGrantRequest {
-  principalType: GrantPrincipalType
-  principalId: string
-  clusterId?: string
-  namespaces: string[]
-  permissions: string[]
-  expiresAt?: string
+ userId:string
+ clusterId:string
+ scopeType:string
+ namespaces:string[]
+ actions:string[]
+ expiresAt?:string|null
 }
-
-/** PATCH /api/v1/grants/{id} 部分更新请求体（authz.UpdateGrantRequest；
- * expiresAt 省略表示保持原值）。 */
-export interface UpdateGrantRequest {
-  clusterId?: string
-  namespaces?: string[]
-  permissions?: string[]
-  expiresAt?: string
-}
+export type UpdateGrantRequest=Partial<CreateGrantRequest>
 
 /** 用户 API Token 元数据（authz.Token；TokenHash 永不回传）。 */
 export interface ApiToken {
@@ -821,4 +876,54 @@ export interface StructuredReportEnvelope {
   /** true = 四期之前的 v1 结构，缺结论/采集质量/诊断账等区块。 */
   legacy: boolean
   inspection: InspectionReport | null
+}
+
+// ---------------------------------------------------------------------------
+// P4.7 审计中心（方案 28）
+// ---------------------------------------------------------------------------
+
+/**
+ * 审计事件投影（后端 service.AuditEventView）。
+ *
+ * 这里刻意没有 payload 字段：后端只回字段白名单，存储层原始 Payload 可能含
+ * 工具参数与终端输出，页面拿到的永远是写入时已脱敏并截断的摘要。
+ */
+export interface AuditEventView {
+  id: number
+  timestamp: string
+  requestId?: string
+  sessionId?: string
+  turnId?: string
+  stepId?: string
+  userId?: string
+  userName?: string
+  clusterId?: string
+  clusterName?: string
+  eventType: string
+  action: string
+  operation?: string
+  resourceKind?: string
+  resourceName?: string
+  risk?: string
+  decision?: string
+  approvalId?: string
+  grantId?: string
+  matchReason?: string
+  parameterSummary?: string
+  resultSummary?: string
+  status?: string
+}
+
+/** 游标分页的审计列表（后端 service.AuditListResult）。 */
+export interface AuditListResult {
+  items: AuditEventView[]
+  nextCursor?: string
+  hasMore: boolean
+}
+
+/** 审计详情：当前事件 + 按明确关联键查出的有界时间线（后端 service.AuditDetailResult）。 */
+export interface AuditDetailResult {
+  event: AuditEventView
+  timeline: AuditEventView[]
+  timelineTruncated: boolean
 }

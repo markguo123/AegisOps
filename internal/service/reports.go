@@ -50,15 +50,16 @@ type ReportView struct {
 // ReportScope 是本次请求的可见性范围（方案 15 §12.2）。由 server 层从认证上下文与
 // AuthzGrant 算出，service 层不自己猜调用者是谁。
 type ReportScope struct {
+	Boundaries []store.ReportBoundary
 	// ViewerID 是当前用户 ID；Admin 为 false 时必填。
 	ViewerID string
 	// Admin 表示角色含全域权限（*），可跨用户读取（跨 owner 由 server 层落审计）。
 	Admin bool
 	// AllSystemClusters / SystemClusterIDs 决定能看到哪些系统体检报告。
-	AllSystemClusters  bool
-	SystemClusterIDs   []string
-	ClusterID          string
-	Kind               string
+	AllSystemClusters bool
+	SystemClusterIDs  []string
+	ClusterID         string
+	Kind              string
 	// ScanID 按扫描任务反查产物（P8.13）：页面发起体检后靠它找回自己的报告。
 	// 它是过滤条件而不是授权条件——归属判定仍然只看 owner 与集群授权，扫描 ID 猜中了
 	// 也读不到别人的报告。
@@ -90,7 +91,7 @@ func (p *ReportPlatform) List(ctx context.Context, scope ReportScope, limit, off
 		return nil, 0, fmt.Errorf("list reports: report platform not wired")
 	}
 	rows, total, err := p.st.Reports().List(ctx, store.ReportQuery{
-		ViewerID:          scope.ViewerID,
+		Boundaries: scope.Boundaries, ViewerID: scope.ViewerID,
 		Admin:             scope.Admin,
 		AllSystemClusters: scope.AllSystemClusters,
 		SystemClusterIDs:  scope.SystemClusterIDs,
@@ -134,7 +135,7 @@ func (p *ReportPlatform) Overview(ctx context.Context, scope ReportScope) (Repor
 		return ReportOverview{}, fmt.Errorf("overview reports: report platform not wired")
 	}
 	stats, err := p.st.Reports().Stats(ctx, store.ReportQuery{
-		ViewerID:          scope.ViewerID,
+		Boundaries: scope.Boundaries, ViewerID: scope.ViewerID,
 		Admin:             scope.Admin,
 		AllSystemClusters: scope.AllSystemClusters,
 		SystemClusterIDs:  scope.SystemClusterIDs,
@@ -243,7 +244,7 @@ func (p *ReportPlatform) resolve(ctx context.Context, id string, scope ReportSco
 	if p.gw != nil && meta.Driver != p.gw.Driver() {
 		// 内容只是躺在别的后端里，不是丢了：这里绝不 MarkMissing，也不动 reports.available，
 		// 否则一次没跑 migrate 的配置切换就把历史报告判成永久丢失（方案 15 §10.3）。
-		return nil, nil, fmt.Errorf("%w: object is on driver %q, current driver is %q; run k8s-ai blobs migrate --to %q",
+		return nil, nil, fmt.Errorf("%w: object is on driver %q, current driver is %q; run aopsctl blobs migrate --to %q",
 			ErrObjectDriverMismatch, meta.Driver, p.gw.Driver(), p.gw.Driver())
 	}
 	return row, meta, nil
@@ -291,43 +292,32 @@ func (p *ReportPlatform) Delete(ctx context.Context, id string, scope ReportScop
 	if err != nil {
 		return ReportView{}, err
 	}
-	if !reportVisible(row, scope) {
+	if !reportVisible(row, scope) || scope.Boundaries != nil && !scope.Admin && row.CreatedBy != scope.ViewerID {
 		// 与读面同形：越权与不存在都是 store.ErrNotFound → 404，不回 403。
 		return ReportView{}, store.ErrNotFound
 	}
 
-	// 引用能不能减，必须在事务开始前就知道（WithTx 回调里不能再调非事务入口）。
-	skipRelease := false
-	meta, err := p.st.Objects().Get(ctx, row.BlobKey)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		skipRelease = true
-	case err != nil:
-		return ReportView{}, err
-	case meta.RefCount <= 0:
-		// 计数已归零：GC 已认领它，再 Release 就是下溢报错。业务行照删。
-		skipRelease = true
-	}
-	if skipRelease {
-		slog.Warn("report: 清理时对象引用已不存在，仅删除业务行",
-			"report_id", row.ID, "blob_key", row.BlobKey)
-	}
-
+	var missingReference bool
 	err = p.st.WithTx(ctx, func(tx *store.Tx) error {
-		changed, err := tx.DeleteReport(ctx, row.ID, row.BlobKey)
+		if err := tx.LockReportRetentionPolicy(ctx, row.ClusterID, row.Kind); err != nil {
+			return err
+		}
+		changed, missing, err := tx.DeleteReportReference(ctx, row.ID, row.BlobKey)
 		if err != nil {
 			return err
 		}
 		if !changed {
 			return store.ErrNotFound
 		}
-		if skipRelease {
-			return nil
-		}
-		return tx.Release(ctx, row.BlobKey)
+		missingReference = missing
+		return nil
 	})
 	if err != nil {
 		return ReportView{}, err
+	}
+	if missingReference {
+		slog.Warn("report: 清理时对象引用已不存在，仅删除业务行",
+			"report_id", row.ID, "blob_key", row.BlobKey)
 	}
 	return toReportView(row), nil
 }
@@ -398,6 +388,17 @@ func reportVisible(r *store.Report, scope ReportScope) bool {
 	if scope.Admin {
 		return true
 	}
+	if scope.Boundaries != nil {
+		if r.CreatedBy != scope.ViewerID && r.CreatedBy != objectstore.SystemActor {
+			return false
+		}
+		for _, b := range scope.Boundaries {
+			if b.Matches(r) {
+				return true
+			}
+		}
+		return false
+	}
 	if scope.ViewerID != "" && r.CreatedBy == scope.ViewerID {
 		return true
 	}
@@ -418,17 +419,17 @@ func reportVisible(r *store.Report, scope ReportScope) bool {
 
 func toReportView(r *store.Report) ReportView {
 	return ReportView{
-		ID:        r.ID,
-		ClusterID: r.ClusterID,
-		ScanID:    r.ScanID,
-		Kind:      r.Kind,
-		MediaType: r.MediaType,
-		Size:      r.Size,
-		SHA256:    r.SHA256,
-		Findings:  r.Findings,
-		CreatedBy: r.CreatedBy,
-		Available: r.Available,
-		CreatedAt: r.CreatedAt,
+		ID:         r.ID,
+		ClusterID:  r.ClusterID,
+		ScanID:     r.ScanID,
+		Kind:       r.Kind,
+		MediaType:  r.MediaType,
+		Size:       r.Size,
+		SHA256:     r.SHA256,
+		Findings:   r.Findings,
+		CreatedBy:  r.CreatedBy,
+		Available:  r.Available,
+		CreatedAt:  r.CreatedAt,
 		ScopeKind:  r.ScopeKind,
 		ScopeValue: r.ScopeValue,
 	}

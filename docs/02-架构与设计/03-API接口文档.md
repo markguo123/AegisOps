@@ -1,7 +1,10 @@
-# k8s-ai API 接口契约设计
+# AegisOps API 接口契约设计
+
+> **2026-11-16 契约更新**：Chat 流式旧设计废弃整改，新目标见 [25-方案-Chat流式输出与前端展示统一](25-方案-Chat流式输出与前端展示统一.md)（ADR-055，尚未实现）。下文现有 HTTP 接口与旧字段仅供当前代码核对；身份和 owner 一律以现行身份方案及后端强校验为准，不从旧 admin/operator 描述派生权限。
+
 
 - 版本：v4.0.0（企业平台）
-- 日期：2026-10-23（初版）/ 2026-11-03（发起体检契约收窄与报告三面登记，见 17-方案） / 2026-11-04（报告清单清理两面登记，见方案 15 v1.12；补体检发起面 v1.1：format 单选、阶段账、停止体检、报告总览、按需导出 Markdown）/ 2026-11-05（补结构化报告的 canonical 证据与诊断投影契约）
+- 日期：2026-10-23（初版）/ 2026-11-03（发起体检契约收窄与报告三面登记，见 17-方案） / 2026-11-04（报告清单清理两面登记，见方案 15 v1.12；补体检发起面 v1.1：format 单选、阶段账、停止体检、报告总览、按需导出 Markdown）/ 2026-11-05（补结构化报告的 canonical 证据与诊断投影契约）/ 2026-11-18（补审计中心查询与详情两面，见方案 28）
 - 状态：四期企业平台落地中
 - 范围：本文档统一描述四期企业平台的 Go 应用服务契约与 HTTP API，包括认证、会话与 SSE、
   扫描、集群、Skill、配置、用户/角色、授权、审批、审计与 Memory。所有产品 API 统一归属
@@ -58,7 +61,9 @@ type Reader interface {
 
 约束：
 - `Client` 内部只允许调用 typed clientset 的 List/Get 方法与 `CoreV1().Pods(ns).GetLogs(...)`。
-- 暴露给工具的一面无写方法；Secret 内容值永不返回，法则见 `08-安全设计.md`。
+- 暴露给工具的一面无写方法；默认工具仅返回 Secret 元数据。`read_on_demand`
+  模式下 `get_secret_value` 的明文只进入当前轮模型，API/UI 结果仍为脱敏指纹，
+  规则见 `08-安全设计.md` 与 ADR-048。
 - `ListOptions{ResourceVersion:"0"}` 走 apiserver 缓存（ADR-009）。
 
 ## 3. Collector 与诊断编排（Application）
@@ -171,7 +176,7 @@ type Decision string // auto | require_approval | deny
 ## 8. HTTP API（服务端）
 
 实现于 `internal/server`，复用 `ScanService.Run`，任务注册表为内存实现，单次扫描并发限制。
-`k8s-ai server --addr :8080` 启动。历史差异（internal/history）按 Finding 指纹对比
+`aopsctl server --addr :8080` 启动。历史差异（internal/history）按 Finding 指纹对比
 新增/持续/恢复，写入 `latest.json` 的 history 字段。四期 P1.4-P1.6 在该层叠加了
 统一中间件与认证/权限门禁：
 
@@ -202,6 +207,8 @@ POST /api/v1/users            // 创建用户 {username,password(>=8),roleId,dis
 PATCH /api/v1/users/{id}      // 部分更新 {displayName?,password?,roleId?,status?}；需 user.manage；禁止停用/降级自己
 DELETE /api/v1/users/{id}     // 删除用户；需 user.manage；内置 admin 不可删，禁止删除自己
 GET  /api/v1/roles            // 角色列表（user/operator/admin 及权限视图）；需 user.manage
+GET  /api/v1/audit/events     // 审计中心检索（P4.7）：from/to/eventType/userId/clusterId/sessionId/status/action/limit/cursor；keyset 游标（timestamp DESC,id DESC），默认 50、上限 100；需 audit.read
+GET  /api/v1/audit/events/{id} // 单条审计事件 + 按 approval/grant/request/turn/session 显式关联键查询的有界时间线；字段白名单，永不返回存储层 payload；不存在 404；需 audit.read
 GET  /api/v1/reports            // 报告中心分页列表（cluster/kind/scanId/scopeCategory/时间过滤，不返回对象 key、不加载正文；每行附 createdByName 即发起人）；需登录，可见性由后端三层归属判定下推 SQL
 GET  /api/v1/reports/{id}/content // 报告正文流式下载或 presign 直连；越权与 id 不存在同形 404；available=false 返回 410；后端不匹配 409
 GET  /api/v1/reports/{id}/report  // 结构化体检报告详情（P9）：普通 JSON 响应，供 Web 报告详情页渲染；授权与 /content 同一套 scope 判定；415=无结构化形态、413=正文超 8MiB
@@ -213,6 +220,14 @@ GET  /api/v1/storage/health     // 对象存储健康唯一可观测入口；需
 ```
 
 `roleId` 必须指向 `user / operator / admin` 之一；创建表单默认选择 `user`。
+
+**审计中心（2026-11-18 契约冻结；P4.7/P4.8 已实现）**：列表与详情都要求 `audit.read`（admin 的 `*` 天然满足），
+未登录 401、无权限 403、未装配平台 Store 时 501。列表按 `timestamp DESC, id DESC` 做 **keyset 游标分页**，
+`cursor` 是不透明串；非法时间/游标/limit 与 `from > to` 一律 400，不静默忽略筛选项。响应只回字段白名单
+（`id/timestamp/requestId/sessionId/turnId/stepId/userId/userName/clusterId/clusterName/eventType/action/operation/
+resourceKind/resourceName/risk/decision/approvalId/grantId/matchReason/parameterSummary/resultSummary/status`），
+**存储层 `payload`、原始工具参数与终端输出永不透传**。详情时间线只按显式关联键取同一条操作链，
+不按时间相邻推断；没有关联键时返回空时间线。口径见 `28-方案-审计中心.md`。
 
 **发起体检与报告读取（2026-11-03 契约冻结；报告三面 P8.5/P8.11 已实现，体检发起面 P8.13 已实现，2026-11-05 按代码回写）**：
 `POST /api/v1/scans` 的请求体是**白名单 DTO**，只接受 `scope`（`cluster`/`namespace`/`pod`）、`namespace`、`pod`、
@@ -229,7 +244,7 @@ GET  /api/v1/storage/health     // 对象存储健康唯一可观测入口；需
 
 **报告清单清理（2026-11-04 契约冻结；P8.14 已实现，2026-11-05 按代码回写）**：`DELETE /api/v1/reports/{id}` 与 `POST /api/v1/reports/cleanup` 均登记为
 `AccessAuthenticated`，**不新增权限位**，归属在 handler 内判定（owner 删自己的、`system` 体检报告按 cluster 授权、admin 跨 owner 可删）。
-删除动作只删 `reports` 业务引用并在同一事务内 `Release`，**请求路径不删后端对象**，正文由 `k8s-ai blobs gc` 在宽限期后回收；
+删除动作只删 `reports` 业务引用并在同一事务内 `Release`，**请求路径不删后端对象**，正文由 `aopsctl blobs gc` 在宽限期后回收；
 `available=false`（已返回 410）的报告**仍然可删**，删除侧不复用下载侧的可用性闸门。每一条删除落 `report.delete` 审计，
 越权与 id 不存在同形 404。批量端点不构成第二条授权通道：它逐 id 复用同一套归属判定与同一条事务契约。
 口径见 `15-方案` **v1.13** §0 与 §13.1/§15/§18。
@@ -340,91 +355,21 @@ POST   /api/v1/sessions/{id}/cancel        // own 或 admin
 `token` 为会话级 token 用量合计（`{promptTokens, completionTokens, totalTokens}`）；
 无记录时字段缺省，`history` 快照中显式为 `null`，前端隐藏统计而不是显示 0。
 
-### 9.1 事件契约（`service.ChatEvent`）
+### 9.1 原 ChatEvent 与四期事件目录：废弃整改
 
-| 类型 | 编码 | 说明 |
-|---|---|---|
-| state | `state` | Agent 状态快照 |
-| answer-delta | `answer-delta` | 最终回答流式增量 |
-| reasoning-delta | `reasoning-delta` | 推理过程增量（Web 分析面板） |
-| tool-call | `tool-call` | 工具调用发起（名称/参数/风险等级） |
-| tool-response | `tool-response` | 工具结果（脱敏、截断） |
-| progress | `progress` | 阶段进度摘要 |
-| answer | `answer` | 最终回答全文（收尾） |
-| error | `error` | 错误事件 |
-| choice-request | `choice-request` | 请求用户审批选择（审批卡片） |
+原 9.1/9.2 的双轨、旧事件清单以及“历史 messages + 当前回合缓存”不再作为设计依据。当前代码仍有旧链路，不得将本文更新理解为接口已经升级。
 
-> 后端当前主要下发 `answer-delta` 流；`reasoning-delta` / `tool-call` / `answer` 事件经 SSE
-> 转发给前端驱动三个阶段（推理展开 → 工具卡 → 最终回答折叠）。
+### 9.2 新 Chat 流契约 v2（待实现）
 
-### 9.2 四期统一事件流（P1.9）
+完整字段与行为以 [方案 25](25-方案-Chat流式输出与前端展示统一.md) §5–§9 为准：
 
-统一事件信封 JSON（snake_case，每个事件必带）：
-
-```text
-session_id
-turn_id
-step_id
-seq          // 会话内单调递增；用于重连回放去重
-timestamp
-event_type
-data        // 各事件专属载荷，可为 null
-```
-
-支持的事件类型：
-
-```text
-session.created
-turn.started
-turn.completed
-reason.started
-reason.completed
-tool.started
-tool.completed
-observation.created
-approval.required
-approval.approved
-approval.rejected
-message.delta
-message.completed
-session.completed
-session.failed
-```
-
-数据面：`internal/sse` 提供 Marshal 与 Frame。平台只维护这一套原生事件契约，
-不定义第二套旧事件通道。所有出站 `params` / `result` / 回答负载在封装前统一经
-`store.RedactJSONPayload` 脱敏，Secret / kubeconfig / API Key 明文永不进入 SSE。
-
-`observation.created` 的命令类结果额外携带：
-
-```text
-command
-stdout
-stderr
-exitCode
-errorCode     // 如 RBAC_DENIED / SCOPE_DENIED / NOT_FOUND / TIMEOUT
-displayType   // terminal | table | kv | events | yaml | logs | text
-data          // 结构化数据；terminal 视图是 kubectl 的权威展示面
-```
-
-运行中会话重连时，服务端先发送历史快照，再补发当前回合缓存事件；前端按 `seq`
-去重。历史快照仍是已持久化消息的权威来源，缓存事件只补齐尚未落库的运行过程。
-
-`approval.required` 的结构化载荷新增：
-
-```text
-title / tool / operation / risk
-target{cluster, namespace, group, version, kind, name}
-changes[{path, operation, before, after, description}]
-checks[{name, status, message}]
-verification[]
-command
-options[]
-```
-
-`prompt` 继续保留给 CLI 和旧客户端回退；Web 新版审批卡以目标、变更、检查、
-验证和命令字段为主。HIGH/CRITICAL 的 `options` 不包含
-`yes_and_dont_ask_again`。
+- 原 `/api/v1/sessions*` 下新增规范 timeline；stream 明确 `protocol=2` 和 after 游标，支持一致快照与续传。
+- 事件目录为 `turn.status`、`message.started/delta/completed/failed`、`tool.updated`、`interaction.updated`、`notice.created`、`usage.updated`；按 session 持久 seq，SSE id 绑定 cursor。
+- 连接控制为 `stream.snapshot/reset_required/fatal`；心跳不推进游标。
+- message_id/part_id、tool_call_id、interaction_id 是稳定展示身份，禁止按 turn+role 或名称拼装历史。
+- send-message/答复/审批/取消增加幂等和必要版本核验，不改变原授权语义；旧客户端切换后要求升级，不并行广播两套契约。
+- 工具结果 command/stdout/stderr/exitCode/errorCode/displayType、审批 target/changes/checks/verification 等业务字段保留，装入规范对象；不再由两个出口分别维护。
+- 正文与控制状态可靠提交后发布；取消、断流、保存失败、日志过期与重启边界按方案 25 明确处理。
 
 ## 10. 平台依赖矩阵
 
@@ -447,3 +392,10 @@ options[]
 - 实现方不得 import 定义方（kubernetes 不得 import scanner）。
 - `model` 不 import 任何内部包；`session` 不得反向依赖 `llm`（`TokenUsage` 同构复制）。
 - Web UI 与 CLI、Server 复用同一 `service.ChatService`，不依赖长驻 Agent。
+
+
+## Secret 明文即时查看（2026-11-16）
+
+`POST /api/v1/sessions/{id}/secret/reveal` 接收 namespace、name、keys（1–5 个）。用户主动点击显示后独立请求，使用当前登录身份与 CSRF 防护，重新校验会话、目标集群、namespace 授权和 Kubernetes RBAC。namespace 资源 read 授权包含 Secret 读取；平台 Admin 拥有全部已接入集群范围资格，仍受接入凭据的 RBAC 约束。返回 values，每项为 value/encoding（utf8 或 base64）；每 key 最大 16KiB、合计最大 32KiB。响应 `Cache-Control: no-store, private`，禁止写入聊天 SSE、历史与审计正文。
+
+400 为参数错误，403 为授权或集群读取被拒，413 为超出显示上限，503 为连接或审计不可用。审计成功后才返回明文，审计仅保存目标、keys、身份与状态。前端隐藏、会话切换、失焦或 60 秒后清除。Agent 的 get_secret_value 仍是独立的逐次真人确认流程，同意后复核权限执行；旧 auto 配置不再免除确认。

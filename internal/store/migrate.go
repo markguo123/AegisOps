@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/session"
 )
 
 // schemaVersion 是统一的逻辑 schema 版本。SQLite/MySQL 共用该版本号，
 // migrations 按版本逐个应用（P0.3/P1.12/P1.3）。只允许追加，禁止回跳。
-const schemaVersion = 8
+const schemaVersion = 15
 
 // migration 是一条单向升级步骤，通过 dialect 适配两个驱动。
 type migration struct {
@@ -63,6 +64,198 @@ var migrations = []migration{
 		name:    "report scan scope columns",
 		up:      migrateV8,
 	},
+	{version: 9, name: "user security versions and scoped resource grants", up: migrateV9},
+	{version: 10, name: "external user identities", up: migrateV10},
+	{version: 11, name: "two platform roles and report coverage", up: migrateV11},
+	{version: 12, name: "cluster identity and last check metadata", up: migrateV12},
+	{version: 13, name: "chat display entities and persistent event log", up: migrateV13},
+	{version: 14, name: "audit center bounded query indexes", up: migrateV14},
+	{version: 15, name: "report retention lifecycle", up: migrateV15},
+}
+
+// schemaV14Indexes 是审计中心（P4.7 / 方案 28 §2/§3）的有界查询索引：
+// 列表按 (timestamp DESC, id DESC) 做 keyset 游标，详情时间线按 approval_id /
+// request_id 等显式关联键回查，集群与操作者过滤也需要各自的索引。索引只加在
+// 读路径真正用到的列上——审计写是高频路径，无用的索引会拖慢每一次落库。
+var schemaV14Indexes = []indexSpec{
+	{name: "idx_audit_time_id", table: "audit_events", cols: "timestamp, id"},
+	{name: "idx_audit_cluster", table: "audit_events", cols: "cluster_id"},
+	{name: "idx_audit_approval", table: "audit_events", cols: "approval_id"},
+	{name: "idx_audit_request", table: "audit_events", cols: "request_id"},
+}
+
+// migrateV14 为审计中心补查询索引（幂等，沿用各驱动对重复索引的容忍）。
+func migrateV14(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, idx := range schemaV14Indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(idx.name, idx.table, idx.cols)); err != nil {
+			if d.isDuplicateIndexErr(err) {
+				continue
+			}
+			return fmt.Errorf("create index %s: %w", idx.name, err)
+		}
+	}
+	return nil
+}
+
+// schemaV13 是 Chat 展示事实源（方案 25 §5.2）。所有会话共用一套表：
+// chat_items 存规范对象（版本化载荷），chat_chunks 存高频文本追加块，
+// chat_events 存持久事件日志（session_id+seq 唯一），chat_stream_heads 存
+// 会话水位/回放下限，chat_commits 登记提交命令 ID 以支持不明确结果的重试。
+var schemaV13 = []tableSpec{
+	{
+		name: "chat_items",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "item_id", kind: colText},
+			{name: "item_type", kind: colText},
+			{name: "turn_id", kind: colText, def: "''"},
+			{name: "item_order", kind: colInt, def: "0"},
+			{name: "revision", kind: colInt, def: "0"},
+			{name: "payload", kind: colLong},
+			{name: "updated_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "item_id"},
+	},
+	{
+		name: "chat_chunks",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "message_id", kind: colText},
+			{name: "part_id", kind: colText},
+			{name: "idx", kind: colInt},
+			{name: "text", kind: colLong},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "message_id", "part_id", "idx"},
+	},
+	{
+		name: "chat_events",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "seq", kind: colInt},
+			{name: "event_type", kind: colText},
+			{name: "turn_id", kind: colText, def: "''"},
+			{name: "payload", kind: colLong},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "seq"},
+	},
+	{
+		name: "chat_stream_heads",
+		cols: []column{
+			{name: "session_id", kind: colText, primary: true},
+			{name: "head", kind: colInt, def: "0"},
+			{name: "replay_floor", kind: colInt, def: "0"},
+			{name: "protocol_version", kind: colInt, def: "2"},
+			{name: "epoch", kind: colInt, def: "0"},
+			{name: "updated_at", kind: colTime},
+		},
+	},
+	{
+		name: "chat_commits",
+		cols: []column{
+			{name: "session_id", kind: colText},
+			{name: "command_id", kind: colText},
+			{name: "first_seq", kind: colInt, def: "0"},
+			{name: "last_seq", kind: colInt, def: "0"},
+			{name: "created_at", kind: colTime},
+		},
+		primaryKey: []string{"session_id", "command_id"},
+	},
+	{
+		name: "chat_legacy_migrations",
+		cols: []column{
+			{name: "session_id", kind: colText, primary: true},
+			{name: "source_digest", kind: colText, def: "''"},
+			{name: "item_count", kind: colInt, def: "0"},
+			{name: "migrated_at", kind: colTime},
+		},
+	},
+}
+
+var schemaV13Indexes = []indexSpec{
+	{name: "idx_chat_items_order", table: "chat_items", cols: "session_id, item_order"},
+	{name: "idx_chat_items_turn", table: "chat_items", cols: "session_id, turn_id"},
+	{name: "idx_chat_chunks_message", table: "chat_chunks", cols: "session_id, message_id"},
+	{name: "idx_chat_events_created", table: "chat_events", cols: "session_id, created_at"},
+	{name: "idx_chat_events_turn_status", table: "chat_events", cols: "session_id, turn_id, event_type, seq"},
+	{name: "idx_chat_commits_created", table: "chat_commits", cols: "created_at"},
+}
+
+// migrateV13 建 Chat 展示实体与持久事件日志表（SQL 由 dialect 按驱动渲染）。
+func migrateV13(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, t := range schemaV13 {
+		if _, err := tx.ExecContext(ctx, d.createTable(t)); err != nil {
+			return fmt.Errorf("create table %s: %w", t.name, err)
+		}
+	}
+	for _, idx := range schemaV13Indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(idx.name, idx.table, idx.cols)); err != nil {
+			if d.isDuplicateIndexErr(err) {
+				continue
+			}
+			return fmt.Errorf("create index %s: %w", idx.name, err)
+		}
+	}
+	return nil
+}
+
+// migrateV12 给 clusters 补集群身份依据与最近连测元数据（P12.3/P12.4）。
+// identity 只记录可验证的稳定身份（kube-system namespace UID），旧集群留空；
+// 空身份不允许原位凭据替换，必须重新接入并人工核对，避免把另一集群静默
+// 继承为原 ClusterID。
+func migrateV12(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, item := range []struct {
+		table string
+		col   column
+	}{
+		{"clusters", column{name: "identity", kind: colText, def: "''"}},
+		{"clusters", column{name: "checked_at", kind: colTimeOrNull}},
+		{"clusters", column{name: "check_summary", kind: colText, def: "''"}},
+	} {
+		if _, err := tx.ExecContext(ctx, d.addColumn(item.table, item.col)); err != nil && !d.isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV11(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, q := range []string{"SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE r.name='operator'", "SELECT COUNT(*) FROM authz_grants WHERE scope_type='' OR principal_type<>'user'"} {
+		var n int
+		if err := tx.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return fmt.Errorf("identity upgrade blocked: %d legacy assignments or grants; export policy, explicitly reassign operators and revoke obsolete grants before upgrade", n)
+		}
+	}
+	for _, q := range []string{"DELETE FROM roles WHERE name='operator'", "UPDATE api_tokens SET status='revoked'"} {
+		if _, e := tx.ExecContext(ctx, q); e != nil {
+			return e
+		}
+	}
+	_, e := tx.ExecContext(ctx, d.addColumn("reports", column{name: "coverage_level", kind: colInt, def: "0"}))
+	if e != nil && d.isDuplicateColumnErr(e) {
+		return nil
+	}
+	return e
+}
+func migrateV9(ctx context.Context, tx *sql.Tx, d dialect) error {
+	for _, item := range []struct {
+		table string
+		col   column
+	}{
+		{"users", column{name: "email", kind: colTextMedium, def: "''"}},
+		{"users", column{name: "session_version", kind: colInt, def: "0"}},
+		{"authz_grants", column{name: "scope_type", kind: colText, def: "''"}},
+		{"authz_grants", column{name: "resource_profile", kind: colText, def: "''"}},
+	} {
+		if _, err := tx.ExecContext(ctx, d.addColumn(item.table, item.col)); err != nil && !d.isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // schemaV1 描述建表：users / roles / sessions / audit_events / settings /
@@ -206,6 +399,9 @@ var schemaV1 = []tableSpec{
 			{name: "server", kind: colText, def: "''"},
 			{name: "version", kind: colText, def: "''"},
 			{name: "status", kind: colText, def: "'unknown'"},
+			{name: "identity", kind: colText, def: "''"},
+			{name: "checked_at", kind: colTimeOrNull},
+			{name: "check_summary", kind: colText, def: "''"},
 			{name: "created_at", kind: colTime},
 			{name: "updated_at", kind: colTime},
 		},
@@ -490,7 +686,6 @@ func migrateV8(ctx context.Context, tx *sql.Tx, d dialect) error {
 	return nil
 }
 
-
 func migrateV1(ctx context.Context, tx *sql.Tx, d dialect) error {
 	for _, t := range schemaV1 {
 		if _, err := tx.ExecContext(ctx, d.createTable(t)); err != nil {
@@ -682,11 +877,11 @@ func backfillSessionIndexColumns(ctx context.Context, tx *sql.Tx) error {
 		return fmt.Errorf("backfill session index columns: %w", err)
 	}
 	type patch struct {
-		id      string
-		pinned  int
-		count   int
-		title   string
-		size    int
+		id     string
+		pinned int
+		count  int
+		title  string
+		size   int
 	}
 	var patches []patch
 	var skipped int
@@ -745,7 +940,6 @@ func bytesColumns() []columnRef {
 	return out
 }
 
-
 func backfillAuditEventType(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, action FROM audit_events WHERE event_type = ''`)
@@ -783,13 +977,31 @@ func backfillAuditEventType(ctx context.Context, tx *sql.Tx) error {
 
 // Migrate 把数据库升级到当前 schemaVersion（幂等），两驱动共用。
 func (s *dbStore) Migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open migration connection: %w", err)
+	}
+	defer conn.Close()
+	// MySQL DDL may implicitly commit. A connection-scoped advisory lock still
+	// serializes runners across processes; sql.Tx alone does not provide this.
+	if _, mysql := s.dialect.(mysqlDialect); mysql {
+		var acquired int
+		if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(CONCAT('aegisops-schema:', LEFT(SHA2(DATABASE(),256),40)),30)`).Scan(&acquired); err != nil || acquired != 1 {
+			return fmt.Errorf("acquire migration lock (result %d): %v", acquired, err)
+		}
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(releaseCtx, `SELECT RELEASE_LOCK(CONCAT('aegisops-schema:', LEFT(SHA2(DATABASE(),256),40)))`)
+		}()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name    TEXT NOT NULL,
 		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -820,6 +1032,40 @@ func (s *dbStore) Migrate(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV15(ctx context.Context, tx *sql.Tx, d dialect) error {
+	policies := tableSpec{
+		name: "report_retention_policies",
+		cols: []column{
+			{name: "cluster_id", kind: colText},
+			{name: "kind", kind: colText},
+			{name: "days", kind: colInt},
+			{name: "minimum", kind: colInt},
+			{name: "enabled", kind: colInt, def: "0"},
+			{name: "next_run", kind: colTime},
+			{name: "last_run", kind: colTimeOrNull},
+			{name: "last_deleted", kind: colInt, def: "0"},
+		},
+		primaryKey: []string{"cluster_id", "kind"},
+	}
+	if _, err := tx.ExecContext(ctx, d.createTable(policies)); err != nil {
+		return err
+	}
+	finalized := column{name: "retention_finalized", kind: colInt, def: "0"}
+	if _, err := tx.ExecContext(ctx, d.addColumn("reports", finalized)); err != nil && !d.isDuplicateColumnErr(err) {
+		return err
+	}
+	indexes := []indexSpec{
+		{name: "idx_reports_retention_order", table: "reports", cols: "cluster_id, kind, created_at, id"},
+		{name: "idx_reports_retention_scan", table: "reports", cols: "scan_id, cluster_id, created_by"},
+	}
+	for _, index := range indexes {
+		if _, err := tx.ExecContext(ctx, d.createIndex(index.name, index.table, index.cols)); err != nil && !d.isDuplicateIndexErr(err) {
+			return err
+		}
 	}
 	return nil
 }

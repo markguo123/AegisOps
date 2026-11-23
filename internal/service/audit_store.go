@@ -37,7 +37,13 @@ func (r *storeAuditRecorder) Write(ctx context.Context, e audit.Event) error {
 	if err := r.inner.Write(ctx, e); err != nil {
 		return err
 	}
-	if err := r.st.Audit().Write(ctx, toStoreAuditEvent(e, r.snapshot())); err != nil {
+	scope := r.snapshot()
+	operation := audit.OperationFrom(ctx)
+	if operation.StepID != "" {
+		scope.StepID = operation.StepID
+		scope.TurnID = operation.TurnID
+	}
+	if err := r.st.Audit().Write(ctx, toStoreAuditEvent(e, scope)); err != nil {
 		slog.Warn("audit: 四期审计落库失败", "action", e.Action, "session", r.base.SessionID, "error", err)
 	}
 	return nil

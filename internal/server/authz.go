@@ -66,6 +66,10 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "authz is not configured")
 		return
 	}
+	if s.platform != nil {
+		s.savePolicy(w, r, false)
+		return
+	}
 	var req authz.CreateGrantRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthzBody)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid body: "+err.Error())
@@ -89,6 +93,10 @@ func (s *Server) handleUpdateGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "authz is not configured")
 		return
 	}
+	if s.platform != nil {
+		s.savePolicy(w, r, true)
+		return
+	}
 	var req authz.UpdateGrantRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthzBody)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "invalid body: "+err.Error())
@@ -106,6 +114,9 @@ func (s *Server) handleUpdateGrant(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteGrant(w http.ResponseWriter, r *http.Request) {
 	if s.authzSvc == nil {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "authz is not configured")
+		return
+	}
+	if s.platform != nil && !s.auditPolicy(w, r, "grant.revoke") {
 		return
 	}
 	if err := s.authzSvc.DeleteGrant(r.Context(), r.PathValue("id")); err != nil {
@@ -191,6 +202,15 @@ func (s *Server) handleMyScope(w http.ResponseWriter, r *http.Request) {
 	u, role := UserFrom(r.Context()), RoleFrom(r.Context())
 	if u == nil || role == nil {
 		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "authentication required")
+		return
+	}
+	if s.platform != nil {
+		a, e := s.platform.Grants.EffectiveAccess(r.Context(), u.ID, r.URL.Query().Get("clusterId"))
+		if e != nil {
+			writeAuthzError(w, r, e)
+			return
+		}
+		writeOK(w, r, 200, a)
 		return
 	}
 	scope, err := s.authzSvc.EffectiveScope(r.Context(), u, role, "")

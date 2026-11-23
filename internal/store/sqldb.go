@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/objectstore"
@@ -12,8 +13,9 @@ import (
 // dbStore 是 Store 的通用数据库实现（D-04）：core CRUD 只依赖 *sql.DB 与
 // dialect，SQLite/MySQL 两种驱动共用同一套逻辑与统一迁移，避免双驱动漂移。
 type dbStore struct {
-	db      *sql.DB
-	dialect dialect
+	userSecurity sync.Mutex
+	db           *sql.DB
+	dialect      dialect
 
 	// sessionMaxBytes 是单会话正文上限（agent.session_max_bytes 的有效值），由
 	// WithSessionMaxBytes 注入；未注入时取 DefaultSessionMaxBytes（P8.6）。

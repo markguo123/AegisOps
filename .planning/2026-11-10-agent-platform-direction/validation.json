@@ -1,0 +1,11 @@
+{
+  "mainlineTasks": 133,
+  "totalDays": 129.75,
+  "remainingTasks": 41,
+  "remainingDays": 41,
+  "stages": 6,
+  "stageDays": 41,
+  "dependencies": "acyclic",
+  "sourcePaths": "valid",
+  "linksChecked": 12
+}

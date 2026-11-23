@@ -10,9 +10,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"unicode"
 	"time"
+	"unicode"
 
+	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/objectstore"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
@@ -186,6 +187,10 @@ func (s *Server) handleGetReportContent(w http.ResponseWriter, r *http.Request) 
 	}
 	id := r.PathValue("id")
 
+	if mode == "presign" && s.platform != nil {
+		writeError(w, r, 400, codeInvalidArgument, "use authenticated stream download")
+		return
+	}
 	if mode == "presign" {
 		// ttl 传 0：签名有效期是后端的部署参数（platform.blobs.presign_ttl），
 		// 让请求方自选时长会把一个运维旋钮变成"能不能签一条长期有效链接"的攻击面。
@@ -194,7 +199,10 @@ func (s *Server) handleGetReportContent(w http.ResponseWriter, r *http.Request) 
 			writeReportError(w, r, err)
 			return
 		}
-		s.recordReportDownload(r, user, view)
+		if !s.recordReportDownload(r, user, view) {
+			writeError(w, r, 503, codeUnavailable, "audit unavailable")
+			return
+		}
 		// URL 含签名：只进本次响应体，不落库、不进 SSE、不进审计、不进日志（§13.2）。
 		writeOK(w, r, http.StatusOK, map[string]any{"report": view, "downloadUrl": url})
 		return
@@ -221,7 +229,10 @@ func (s *Server) handleGetReportContent(w http.ResponseWriter, r *http.Request) 
 	if ref.Size > 0 {
 		h.Set("Content-Length", strconv.FormatInt(ref.Size, 10))
 	}
-	s.recordReportDownload(r, user, view)
+	if !s.recordReportDownload(r, user, view) {
+		writeError(w, r, 503, codeUnavailable, "audit unavailable")
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, rc); err != nil {
 		// 状态行已经写出，改不了响应码；留下日志是这里唯一诚实的收尾。
@@ -244,10 +255,45 @@ func (s *Server) reportScopeFor(ctx context.Context) (service.ReportScope, *stor
 		return scope, u, nil
 	}
 	if permission.HasPermission(role.Permissions, "*") {
+		if s.platform != nil && (s.auditlog == nil || s.auditlog.Record(ctx, store.AuditEvent{UserID: u.ID, Action: "report.governance.read", EventType: store.AuditEventReport, ResourceKind: "Report", Status: "success"}) != nil) {
+			return service.ReportScope{}, u, fmt.Errorf("governance audit unavailable")
+		}
 		scope.Admin = true
 		return scope, u, nil
 	}
 	if s.authzSvc == nil {
+		return scope, u, nil
+	}
+	if s.platform != nil {
+		scope.Boundaries = []store.ReportBoundary{}
+		clusters, e := s.platform.Grants.AccessibleClusters(ctx, u.ID)
+		if e != nil {
+			return scope, u, e
+		}
+		for _, cl := range clusters {
+			if scanCoverage(cl.ID, "cluster", "", 2).CoveredBy(cl.Access) {
+				scope.Boundaries = append(scope.Boundaries, store.ReportBoundary{ClusterID: cl.ID, Cluster: true, Level: 2})
+			}
+			seen := map[string]bool{}
+			for _, r := range cl.Access.Rules {
+				for _, ns := range r.Namespaces {
+					if seen[ns] {
+						continue
+					}
+					seen[ns] = true
+					t := authz.Target{ClusterID: cl.ID, Namespace: ns, Actions: []string{authz.ActionRead}}
+					if cl.Access.Check(t) != nil {
+						continue
+					}
+					level := 1
+					t.Actions = []string{authz.ActionLogs}
+					if cl.Access.Check(t) == nil {
+						level = 2
+					}
+					scope.Boundaries = append(scope.Boundaries, store.ReportBoundary{ClusterID: cl.ID, Namespace: ns, Level: level})
+				}
+			}
+		}
 		return scope, u, nil
 	}
 	all, ids, err := s.authzSvc.AuthorizedClusterIDs(ctx, u, role)
@@ -301,9 +347,12 @@ func writeReportError(w http.ResponseWriter, r *http.Request, err error) {
 // recordReportDownload 只在跨 owner 读取时留审计（含读系统报告）：用户下自己的报告
 // 是日常动作，把它全量写进审计表只会把真正需要追责的那条——管理员翻别人的体检结论——
 // 淹没在噪声里（方案 15 §12.4）。
-func (s *Server) recordReportDownload(r *http.Request, user *store.User, view service.ReportView) {
-	if s.auditlog == nil || user == nil || view.CreatedBy == user.ID {
-		return
+func (s *Server) recordReportDownload(r *http.Request, user *store.User, view service.ReportView) bool {
+	if user != nil && view.CreatedBy == user.ID {
+		return true
+	}
+	if user == nil || s.auditlog == nil {
+		return s.platform == nil
 	}
 	err := s.auditlog.Record(r.Context(), store.AuditEvent{
 		Action:    store.ActionReportDownload,
@@ -321,7 +370,9 @@ func (s *Server) recordReportDownload(r *http.Request, user *store.User, view se
 	})
 	if err != nil {
 		slog.Warn("server: 报告下载审计写入失败", "report_id", view.ID, "user_id", user.ID, "error", err)
+		return false
 	}
+	return true
 }
 
 // reportFilename 生成人可读的下载文件名（方案 17 §7.2）：体检-业务-命名空间arc-20261103-1712.md。
@@ -488,15 +539,15 @@ func (s *Server) recordReportDelete(r *http.Request, user *store.User, view serv
 	}
 	summary += "}"
 	err := s.auditlog.Record(r.Context(), store.AuditEvent{
-		Action:       store.ActionReportDelete,
-		EventType:    store.AuditEventReport,
-		RequestID:    RequestIDFrom(r.Context()),
-		UserID:       user.ID,
-		ClusterID:    view.ClusterID,
-		Operation:    "delete",
-		ResourceKind: "report",
-		ResourceName: view.ID,
-		Status:       "success",
+		Action:        store.ActionReportDelete,
+		EventType:     store.AuditEventReport,
+		RequestID:     RequestIDFrom(r.Context()),
+		UserID:        user.ID,
+		ClusterID:     view.ClusterID,
+		Operation:     "delete",
+		ResourceKind:  "report",
+		ResourceName:  view.ID,
+		Status:        "success",
 		ResultSummary: summary,
 	})
 	if err != nil {

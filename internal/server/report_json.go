@@ -57,7 +57,10 @@ func (s *Server) handleGetReportStructured(w http.ResponseWriter, r *http.Reques
 	}
 	// 详情页与下载同样计一次跨 owner 读取：管理员翻别人的体检结论必须留痕，
 	// 「只是看了看」不构成例外。
-	s.recordReportDownload(r, user, sr.Report)
+	if !s.recordReportDownload(r, user, sr.Report) {
+		writeError(w, r, 503, codeUnavailable, "audit unavailable")
+		return
+	}
 	writeOK(w, r, http.StatusOK, structuredReportResponse{
 		Report:        sr.Report,
 		SchemaVersion: sr.SchemaVersion,
@@ -110,7 +113,10 @@ func (s *Server) handleExportReportMarkdown(w http.ResponseWriter, r *http.Reque
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Type", "text/markdown; charset=utf-8")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
-	s.recordReportDownload(r, user, view)
+	if !s.recordReportDownload(r, user, view) {
+		writeError(w, r, 503, codeUnavailable, "audit unavailable")
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil {
 		slog.Warn("server: 报告 Markdown 导出中断", "report_id", view.ID, "error", err)

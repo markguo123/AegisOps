@@ -23,17 +23,13 @@ const SKILL = {
 }
 
 describe('ComposerBox（P2.10 输入与发送）', () => {
-  it('展示当前模型与 Secret 策略提示（对齐原型工具条）', () => {
+  it('展示当前模型和可聚焦的人工审批入口，不显示内部 Secret 策略值', () => {
     const wrapper = mount(ComposerBox, {
-      props: { modelValue: '', model: 'qwen-plus', secretPolicy: 'create_only' },
+      props: { modelValue: '', model: 'qwen-plus' },
     })
     expect(wrapper.text()).toContain('qwen-plus')
-    expect(wrapper.text()).toContain('Secret: create_only')
-    // P7.2：长安全文案降噪为小字入口，完整说明保留在 aria-label（Tooltip 同源）
-    expect(wrapper.text()).toContain('安全策略')
-    expect(wrapper.get('.composer-hint').attributes('aria-label')).toContain(
-      'Secret 值与 kubeconfig 不会进入会话与审计',
-    )
+    expect(wrapper.text()).not.toContain('create_only')
+    expect(wrapper.get('button.composer-hint').text()).toBe('人工审批')
   })
 
   it('输入回写 modelValue，Enter 触发发送', async () => {

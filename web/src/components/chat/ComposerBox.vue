@@ -17,10 +17,10 @@ import type { Skill } from '@/api/types'
 const props = withDefaults(
   defineProps<{
     modelValue: string
-    /** 当前会话模型名（只读展示，切换模型属配置中心能力）。 */
     model?: string
-    /** Secret 访问策略展示串（如 create_only）。 */
-    secretPolicy?: string
+    models?: string[]
+    modelLabels?: Record<string, string>
+    stopping?: boolean
     disabled?: boolean
     sending?: boolean
     /** 当前角色是否可引用 Skill（skill.read）。前端只隐藏提示，后端独立强校验。 */
@@ -28,7 +28,6 @@ const props = withDefaults(
   }>(),
   {
     model: '',
-    secretPolicy: 'create_only',
     disabled: false,
     sending: false,
     canUseSkills: false,
@@ -39,6 +38,7 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'send'): void
   (e: 'stop'): void
+  (e: 'select-model', value: string): void
 }>()
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -209,20 +209,22 @@ defineExpose({ focus, availableSkills })
       ></textarea>
     </div>
     <div class="composer-toolbar">
-      <span class="composer-chip">🧠 {{ model || '默认模型' }}</span>
-      <span class="composer-chip"><el-icon><Lock /></el-icon> Secret: {{ secretPolicy }}</span>
       <el-tooltip
-        content="Shell 语法命令需人工审批；Secret 值与 kubeconfig 不会进入会话与审计"
+        content="只读检查按授权执行；需要确认的操作由你审批。读取指定 Secret 前会单独征得你的同意。"
         placement="top"
+        :trigger="['hover', 'focus', 'click']"
       >
-        <!-- P7.2：长安全文案降噪为小字入口，完整说明放 Tooltip 与 aria-label（信息不丢、可访问） -->
-        <span
+        <button type="button"
           class="composer-hint"
-          aria-label="Shell 语法命令需人工审批；Secret 值与 kubeconfig 不会进入会话与审计"
-          >安全策略</span
+          ><el-icon><Lock /></el-icon> 人工审批</button
         >
       </el-tooltip>
       <span class="composer-actions">
+        <el-select v-if="(models?.length ?? 0) > 1" :model-value="model" :disabled="disabled || sending"
+          aria-label="下一轮模型" class="composer-model" @change="emit('select-model', $event)">
+          <el-option v-for="entry in models" :key="entry" :label="modelLabels?.[entry] || entry" :value="entry" />
+        </el-select>
+        <span v-else class="composer-chip">{{ modelLabels?.[model] || model || '默认模型' }}</span>
         <el-button
           v-if="!sending"
           type="primary"
@@ -232,8 +234,8 @@ defineExpose({ focus, availableSkills })
         >
           发送
         </el-button>
-        <el-button v-else type="danger" plain :icon="VideoPause" @click="emit('stop')">
-          停止
+        <el-button v-else type="danger" plain :icon="VideoPause" :loading="stopping" @click="emit('stop')">
+          {{ stopping ? '正在停止…' : '停止' }}
         </el-button>
       </span>
     </div>
@@ -289,8 +291,9 @@ defineExpose({ focus, availableSkills })
 }
 
 .composer-hint {
-  flex: 1;
-  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
   font-size: 11px;
   color: var(--app-faint);
   cursor: help;
@@ -387,9 +390,13 @@ defineExpose({ focus, availableSkills })
 
 .composer-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
+}
+.composer-model {
+  width: min(180px, 35vw);
 }
 
 /* 发送/停止按钮对齐原型 .send-btn（30px 高、8px 圆角） */

@@ -44,30 +44,46 @@ func (st *userStore) Create(ctx context.Context, u *User) error {
 		u.UpdatedAt = now
 	}
 	_, err := st.s.db.ExecContext(ctx, `
-		INSERT INTO users (id, username, display_name, password_hash, role_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.ID, u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.CreatedAt, u.UpdatedAt)
+		INSERT INTO users (id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.Email, u.SessionVersion, u.CreatedAt, u.UpdatedAt)
 	return mapErr(err, "create user")
 }
 
 func (st *userStore) Get(ctx context.Context, id string) (*User, error) {
 	u := &User{}
+	var issuer sql.NullString
 	err := st.s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
-		FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+		SELECT u.id, u.username, u.display_name, u.password_hash, u.role_id, u.status, u.email, u.session_version, u.created_at, u.updated_at,
+		       (SELECT MIN(i.issuer) FROM user_identities i WHERE i.user_id = u.id)
+		FROM users u WHERE u.id = ?`, id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt, &issuer)
 	if err != nil {
 		return nil, mapErr(err, "get user")
 	}
+	u.Source = userSourceFrom(issuer, u.PasswordHash)
 	return u, nil
+}
+
+// userSourceFrom 把「是否绑定外部身份」与「有没有本地口令」折成来源标识，口径见
+// UserSource* 常量。外部身份用标量子查询取，不用 JOIN：user_identities.user_id
+// 唯一，异常数据下也不会把行数放大。
+func userSourceFrom(issuer sql.NullString, passwordHash string) string {
+	if !issuer.Valid || issuer.String == "" {
+		return ""
+	}
+	if passwordHash == "" {
+		return UserSourceOIDC
+	}
+	return UserSourceBoth
 }
 
 func (st *userStore) GetByUsername(ctx context.Context, username string) (*User, error) {
 	u := &User{}
 	err := st.s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
+		SELECT id, username, display_name, password_hash, role_id, status, email, session_version, created_at, updated_at
 		FROM users WHERE username = ?`, username).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, mapErr(err, "get user by username")
 	}
@@ -75,21 +91,14 @@ func (st *userStore) GetByUsername(ctx context.Context, username string) (*User,
 }
 
 func (st *userStore) Update(ctx context.Context, u *User) error {
-	u.UpdatedAt = time.Now()
-	res, err := st.s.db.ExecContext(ctx, `
-		UPDATE users SET username=?, display_name=?, password_hash=?, role_id=?, status=?, updated_at=?
-		WHERE id=?`,
-		u.Username, u.DisplayName, u.PasswordHash, u.RoleID, u.Status, u.UpdatedAt, u.ID)
-	if err != nil {
-		return fmt.Errorf("update user: %w", err)
-	}
-	return ensureAffected(res, "update user")
+	return st.updateUser(ctx, u)
 }
 
 func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, username, display_name, password_hash, role_id, status, created_at, updated_at
-		FROM users ORDER BY created_at`)
+		SELECT u.id, u.username, u.display_name, u.password_hash, u.role_id, u.status, u.email, u.session_version, u.created_at, u.updated_at,
+		       (SELECT MIN(i.issuer) FROM user_identities i WHERE i.user_id = u.id)
+		FROM users u ORDER BY u.created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -97,9 +106,11 @@ func (st *userStore) List(ctx context.Context) ([]*User, error) {
 	var out []*User
 	for rows.Next() {
 		u := &User{}
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		var issuer sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.RoleID, &u.Status, &u.Email, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt, &issuer); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
+		u.Source = userSourceFrom(issuer, u.PasswordHash)
 		out = append(out, u)
 	}
 	return out, rows.Err()
@@ -244,6 +255,12 @@ func newSessionWrite(sess *session.Session, limit int64) (sessionWrite, SessionS
 }
 
 func (st *sessionStore) Create(ctx context.Context, sess *session.Session) error {
+	return insertSession(ctx, st.s.db, sess, st.s.sessionMaxBytes)
+}
+
+func insertSession(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, sess *session.Session, maxBytes int64) error {
 	now := time.Now()
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = now
@@ -251,11 +268,11 @@ func (st *sessionStore) Create(ctx context.Context, sess *session.Session) error
 	if sess.LastModified.IsZero() {
 		sess.LastModified = now
 	}
-	w, _, err := newSessionWrite(sess, st.s.sessionMaxBytes)
+	w, _, err := newSessionWrite(sess, maxBytes)
 	if err != nil {
 		return err
 	}
-	_, err = st.s.db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO sessions (id, user_id, name, cluster_id, namespace, model, state, data, created_at, last_modified, pinned, message_count, title, data_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.UserID, w.row.Name, w.row.Cluster, w.row.Namespace, w.row.Model, w.row.State,
@@ -424,6 +441,12 @@ func scanAudit(row interface{ Scan(...any) error }) (*AuditEvent, error) {
 // Write 落一条审计事件。EventType 缺省时由 Action 推导；payload 与两个摘要列
 // 在写库前脱敏，确保 Secret 值 / kubeconfig / API Key 明文永不入库（AGENTS.md）。
 func (st *auditStore) Write(ctx context.Context, e *AuditEvent) error {
+	return writeAuditEvent(ctx, st.s.db, e)
+}
+
+func writeAuditEvent(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, e *AuditEvent) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
@@ -432,7 +455,7 @@ func (st *auditStore) Write(ctx context.Context, e *AuditEvent) error {
 	}
 	payload := redactJSONPayload(e.Payload)
 	e.Payload = payload
-	res, err := st.s.db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO audit_events (timestamp, request_id, session_id, turn_id, step_id,
 			user_id, cluster_id, action, payload, event_type, resource_kind, resource_name,
 			operation, risk, decision, approval_id, grant_id, match_reason,
@@ -864,9 +887,9 @@ func (st *authzGrantStore) Create(ctx context.Context, g *AuthzGrant) error {
 	}
 	_, err := st.s.db.ExecContext(ctx, `
 		INSERT INTO authz_grants
-			(id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		g.ID, g.PrincipalType, g.PrincipalID, g.ClusterID, g.Namespaces, g.Permissions,
+			(id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		g.ID, g.PrincipalType, g.PrincipalID, g.ClusterID, g.ScopeType, g.ResourceProfile, g.Namespaces, g.Permissions,
 		nilTime(g.ExpiresAt), g.CreatedBy, g.CreatedAt, g.UpdatedAt)
 	return mapErr(err, "create authz grant")
 }
@@ -874,7 +897,7 @@ func (st *authzGrantStore) Create(ctx context.Context, g *AuthzGrant) error {
 func scanAuthzGrant(scanner interface{ Scan(...any) error }) (*AuthzGrant, error) {
 	g := &AuthzGrant{}
 	var expires sql.NullTime
-	if err := scanner.Scan(&g.ID, &g.PrincipalType, &g.PrincipalID, &g.ClusterID,
+	if err := scanner.Scan(&g.ID, &g.PrincipalType, &g.PrincipalID, &g.ClusterID, &g.ScopeType, &g.ResourceProfile,
 		&g.Namespaces, &g.Permissions, &expires, &g.CreatedBy, &g.CreatedAt, &g.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -886,7 +909,7 @@ func scanAuthzGrant(scanner interface{ Scan(...any) error }) (*AuthzGrant, error
 
 func (st *authzGrantStore) Get(ctx context.Context, id string) (*AuthzGrant, error) {
 	row := st.s.db.QueryRowContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants WHERE id = ?`, id)
 	g, err := scanAuthzGrant(row)
 	if err != nil {
@@ -898,9 +921,9 @@ func (st *authzGrantStore) Get(ctx context.Context, id string) (*AuthzGrant, err
 func (st *authzGrantStore) Update(ctx context.Context, g *AuthzGrant) error {
 	g.UpdatedAt = time.Now()
 	res, err := st.s.db.ExecContext(ctx, `
-		UPDATE authz_grants SET principal_type=?, principal_id=?, cluster_id=?, namespaces=?, permissions=?, expires_at=?, created_by=?, updated_at=?
+		UPDATE authz_grants SET principal_type=?, principal_id=?, cluster_id=?, scope_type=?, resource_profile=?, namespaces=?, permissions=?, expires_at=?, created_by=?, updated_at=?
 		WHERE id=?`,
-		g.PrincipalType, g.PrincipalID, g.ClusterID, g.Namespaces, g.Permissions,
+		g.PrincipalType, g.PrincipalID, g.ClusterID, g.ScopeType, g.ResourceProfile, g.Namespaces, g.Permissions,
 		nilTime(g.ExpiresAt), g.CreatedBy, g.UpdatedAt, g.ID)
 	if err != nil {
 		return fmt.Errorf("update authz grant: %w", err)
@@ -910,7 +933,7 @@ func (st *authzGrantStore) Update(ctx context.Context, g *AuthzGrant) error {
 
 func (st *authzGrantStore) List(ctx context.Context) ([]*AuthzGrant, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list authz grants: %w", err)
@@ -929,7 +952,7 @@ func (st *authzGrantStore) List(ctx context.Context) ([]*AuthzGrant, error) {
 
 func (st *authzGrantStore) ListByPrincipal(ctx context.Context, principalType, principalID string) ([]*AuthzGrant, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, principal_type, principal_id, cluster_id, namespaces, permissions, expires_at, created_by, created_at, updated_at
+		SELECT id, principal_type, principal_id, cluster_id, scope_type, resource_profile, namespaces, permissions, expires_at, created_by, created_at, updated_at
 		FROM authz_grants WHERE principal_type=? AND principal_id=? ORDER BY created_at`, principalType, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("list authz grants by principal: %w", err)
@@ -1054,16 +1077,17 @@ func (st *clusterStore) Create(ctx context.Context, c *Cluster) error {
 		c.UpdatedAt = now
 	}
 	_, err := st.s.db.ExecContext(ctx, `
-		INSERT INTO clusters (id, name, context, server, version, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.Name, c.Context, c.Server, c.Version, c.Status, c.CreatedAt, c.UpdatedAt)
+		INSERT INTO clusters (id, name, context, server, version, status, identity, checked_at, check_summary, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.Name, c.Context, c.Server, c.Version, c.Status, c.Identity,
+		nilTime(c.CheckedAt), c.CheckSummary, c.CreatedAt, c.UpdatedAt)
 	return mapErr(err, "create cluster")
 }
 
 func scanCluster(scanner interface{ Scan(...any) error }) (*Cluster, error) {
 	c := &Cluster{}
 	if err := scanner.Scan(&c.ID, &c.Name, &c.Context, &c.Server, &c.Version, &c.Status,
-		&c.CreatedAt, &c.UpdatedAt); err != nil {
+		&c.Identity, &c.CheckedAt, &c.CheckSummary, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -1071,7 +1095,8 @@ func scanCluster(scanner interface{ Scan(...any) error }) (*Cluster, error) {
 
 func (st *clusterStore) Get(ctx context.Context, id string) (*Cluster, error) {
 	row := st.s.db.QueryRowContext(ctx, `
-		SELECT id, name, context, server, version, status, created_at, updated_at
+		SELECT id, name, context, server, version, status, identity, checked_at, check_summary,
+			created_at, updated_at
 		FROM clusters WHERE id = ?`, id)
 	c, err := scanCluster(row)
 	if err != nil {
@@ -1083,17 +1108,34 @@ func (st *clusterStore) Get(ctx context.Context, id string) (*Cluster, error) {
 func (st *clusterStore) Update(ctx context.Context, c *Cluster) error {
 	c.UpdatedAt = time.Now()
 	res, err := st.s.db.ExecContext(ctx, `
-		UPDATE clusters SET name=?, context=?, server=?, version=?, status=?, updated_at=? WHERE id=?`,
-		c.Name, c.Context, c.Server, c.Version, c.Status, c.UpdatedAt, c.ID)
+		UPDATE clusters SET name=?, context=?, server=?, version=?, status=?, identity=?,
+			checked_at=?, check_summary=?, updated_at=? WHERE id=?`,
+		c.Name, c.Context, c.Server, c.Version, c.Status, c.Identity,
+		nilTime(c.CheckedAt), c.CheckSummary, c.UpdatedAt, c.ID)
 	if err != nil {
 		return fmt.Errorf("update cluster: %w", err)
 	}
 	return ensureAffected(res, "update cluster")
 }
 
+func (st *clusterStore) UpdateClusterCheck(ctx context.Context, c *Cluster, credentialID, credentialSecret string) error {
+	comparison := "CAST(kubeconfig_secret AS BLOB)=CAST(? AS BLOB)"
+	if st.s.dialect.name() == "mysql" {
+		comparison = "BINARY kubeconfig_secret=BINARY ?"
+	}
+	res, err := st.s.db.ExecContext(ctx, `UPDATE clusters SET version=?, status=?, checked_at=?, check_summary=?, updated_at=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM credentials WHERE id=? AND cluster_id=? AND `+comparison+`)`,
+		c.Version, c.Status, nilTime(c.CheckedAt), c.CheckSummary, c.UpdatedAt, c.ID, credentialID, c.ID, credentialSecret)
+	if err != nil {
+		return fmt.Errorf("update cluster check: %w", err)
+	}
+	return ensureAffected(res, "cluster credential changed during check")
+}
+
 func (st *clusterStore) List(ctx context.Context) ([]*Cluster, error) {
 	rows, err := st.s.db.QueryContext(ctx, `
-		SELECT id, name, context, server, version, status, created_at, updated_at FROM clusters ORDER BY name`)
+		SELECT id, name, context, server, version, status, identity, checked_at, check_summary,
+			created_at, updated_at FROM clusters ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list clusters: %w", err)
 	}
@@ -1173,6 +1215,51 @@ func (st *credentialStore) Update(ctx context.Context, c *Credential) error {
 		return fmt.Errorf("update credential: %w", err)
 	}
 	return ensureAffected(res, "update credential")
+}
+
+// RotateClusterCredential 在同一事务内更新凭据密文与集群元数据（P12.3）。
+// 调用方必须在事务外完成候选凭据连测与身份核对；这里只负责原子落库。
+func (st *credentialStore) RotateClusterCredential(ctx context.Context, c *Cluster, cred *Credential) error {
+	if c == nil || cred == nil || c.ID == "" || cred.ID == "" || cred.ClusterID != c.ID {
+		return fmt.Errorf("rotate cluster credential: invalid cluster or credential reference")
+	}
+	now := time.Now()
+	c.UpdatedAt = now
+	cred.UpdatedAt = now
+	tx, err := st.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rotate cluster credential: begin tx: %w", err)
+	}
+	rollback := func(cause error) error {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("%w (rollback failed: %v)", cause, rbErr)
+		}
+		return cause
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE credentials SET kubeconfig_secret=?, updated_at=? WHERE id=? AND cluster_id=?`,
+		cred.KubeconfigSecret, cred.UpdatedAt, cred.ID, cred.ClusterID)
+	if err != nil {
+		return rollback(fmt.Errorf("rotate credential: %w", err))
+	}
+	if err := ensureAffected(res, "rotate credential"); err != nil {
+		return rollback(err)
+	}
+	res, err = tx.ExecContext(ctx, `
+		UPDATE clusters SET name=?, context=?, server=?, version=?, status=?, identity=?,
+			checked_at=?, check_summary=?, updated_at=? WHERE id=?`,
+		c.Name, c.Context, c.Server, c.Version, c.Status, c.Identity,
+		nilTime(c.CheckedAt), c.CheckSummary, c.UpdatedAt, c.ID)
+	if err != nil {
+		return rollback(fmt.Errorf("rotate cluster metadata: %w", err))
+	}
+	if err := ensureAffected(res, "rotate cluster metadata"); err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rotate cluster credential: commit: %w", err)
+	}
+	return nil
 }
 
 func (st *credentialStore) Delete(ctx context.Context, id string) error {

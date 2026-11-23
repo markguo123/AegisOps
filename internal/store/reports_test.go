@@ -163,3 +163,68 @@ func TestReportGetRoundTrip(t *testing.T) {
 		t.Fatalf("不存在的报告应 ErrNotFound, got %v", err)
 	}
 }
+
+func TestReportRetentionPreviewProtectsMinimumAndCutoff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	cutoff := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	old := cutoff.Add(-time.Hour)
+	insertTestReport(t, s, "at-cutoff", "prod", "latest-md", "u1", cutoff)
+	insertTestReport(t, s, "old-1", "prod", "latest-md", "u1", old)
+	insertTestReport(t, s, "old-2", "prod", "latest-md", "u2", old)
+	insertTestReport(t, s, "other-kind", "prod", "latest-json", "u2", old)
+	insertTestReport(t, s, "other-cluster", "stage", "latest-md", "u2", old)
+
+	for _, tc := range []struct {
+		minimum int
+		want    int64
+	}{{1, 2}, {2, 1}, {3, 0}} {
+		got, err := s.Reports().PreviewRetention(ctx, "prod", "latest-md", cutoff, tc.minimum)
+		if err != nil || got.Total != 3 || got.Potential != tc.want || got.Protected != 3-tc.want {
+			t.Fatalf("minimum %d: got %+v, err %v", tc.minimum, got, err)
+		}
+	}
+}
+
+func TestReportRetentionRunsOnlyOnceAndKeepsUnfinalizedReports(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.Clusters().Create(ctx, &Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	kind := "latest-md"
+	keep := insertTestReport(t, st, "keep", "prod", kind, "u1", now.AddDate(0, 0, -4))
+	old := insertTestReport(t, st, "old", "prod", kind, "u1", now.AddDate(0, 0, -5))
+	unknown := insertTestReport(t, st, "unknown", "prod", kind, "u1", now.AddDate(0, 0, -6))
+	for _, report := range []*Report{keep, old} {
+		if err := st.Reports().FinalizeRetentionScan(ctx, report.ScanID, "prod", "u1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preview, err := st.Reports().PreviewRetention(ctx, "prod", kind, now.AddDate(0, 0, -1), 1)
+	if err != nil || preview.Eligible != 1 || preview.Excluded != 1 || preview.Protected != 1 {
+		t.Fatalf("preview = %+v, err = %v", preview, err)
+	}
+	policy := ReportRetentionPolicy{ClusterID: "prod", Kind: kind, Days: 1, Minimum: 1, Enabled: true, NextRun: now}
+	if err := st.Reports().SetReportRetentionPolicy(ctx, policy, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{1, 0} {
+		if deleted, err := st.Reports().RunReportRetention(ctx, policy, now); err != nil || deleted != want {
+			t.Fatalf("deleted = %d, want %d, err = %v", deleted, want, err)
+		}
+	}
+	for _, id := range []string{keep.ID, unknown.ID} {
+		if _, err := st.Reports().Get(ctx, id); err != nil {
+			t.Fatalf("protected report %s: %v", id, err)
+		}
+	}
+	if _, err := st.Reports().Get(ctx, old.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("eligible report still present: %v", err)
+	}
+	events, err := st.Audit().List(ctx)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("audit events = %+v, err = %v", events, err)
+	}
+}

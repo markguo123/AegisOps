@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +388,42 @@ func TestImportConfigSensitiveRequiresCipher(t *testing.T) {
 	}
 	if _, err := st.Settings().Get(ctx, GroupModel, "api_key"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("报错后不得落任何敏感明文, err=%v", err)
+	}
+}
+
+func TestChatModelCatalogRuntime(t *testing.T) {
+	ctx := context.Background()
+	svc := New(newTestStore(t))
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("platform:\n  store:\n    driver: sqlite\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := config.Load(config.LoadOptions{ConfigFile: path, NoEnv: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.PatchGroup(ctx, GroupModel, map[string]json.RawMessage{
+		"api_format":  json.RawMessage(`"openai-chat-completions"`),
+		"chat_models": json.RawMessage(`[{"id":"private/128k","context_window":131072}]`),
+	}, Actor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := svc.LoadRuntimeConfig(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.LLM.APIFormat != config.ModelAPIChatCompletions ||
+		len(resolved.LLM.ChatModels) != 1 || resolved.LLM.ChatModels[0] != (config.ChatModel{ID: "private/128k", ContextWindow: 131072}) {
+		t.Fatalf("unexpected model settings: %s %+v", resolved.LLM.APIFormat, resolved.LLM.ChatModels)
+	}
+	for key, invalid := range map[string]string{
+		"api_format":  `"anthropic-messages"`,
+		"chat_models": `[{"id":"private/128k","context_window":2048}]`,
+	} {
+		if _, err := svc.PatchGroup(ctx, GroupModel, map[string]json.RawMessage{key: json.RawMessage(invalid)}, Actor{}); err == nil {
+			t.Fatalf("invalid %s accepted", key)
+		}
 	}
 }
 

@@ -13,10 +13,11 @@ import (
 
 // parseConnector 复用真实 ParseKubeconfig 做连测（测试隔离点内仍按真实解析口径校验）。
 type parseConnector struct {
-	version string
-	health  string
-	err     error
-	calls   int
+	version  string
+	health   string
+	identity string
+	err      error
+	calls    int
 }
 
 func (p *parseConnector) Inspect(ctx context.Context, data []byte) (*Info, error) {
@@ -30,6 +31,7 @@ func (p *parseConnector) Inspect(ctx context.Context, data []byte) (*Info, error
 	}
 	info.Version = p.version
 	info.Health = p.health
+	info.Identity = p.identity
 	return info, nil
 }
 
@@ -239,5 +241,205 @@ func TestServiceGetNotFound(t *testing.T) {
 	}
 	if _, err := svc.Get(context.Background(), " "); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("空 id 应 ErrInvalid, got %v", err)
+	}
+}
+
+// TestServiceUpdateCredentialReplacesInPlace 验证 P12.3 主路径：ClusterID 不变，
+// 凭据密文被替换，版本变化，元数据与检查时间更新，审计不含明文。
+func TestServiceUpdateCredentialReplacesInPlace(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: "identity-a"}
+	svc, st, events := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("https://a.example:6443", "OLD-TOKEN")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCred, err := st.Credentials().GetByCluster(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldVersion, err := svc.ExecutionVersion(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.Update(context.Background(), created.ID, UpdateRequest{
+		Kubeconfig: kubeconfigFor("https://a.example:6443", "NEW-TOKEN"),
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if view.Cluster.ID != created.ID {
+		t.Fatal("原位更新必须保留 ClusterID")
+	}
+	if view.Cluster.Identity != "identity-a" || view.Cluster.CheckedAt == nil || view.Cluster.CheckSummary == "" {
+		t.Fatalf("更新后元数据不完整: %+v", view.Cluster)
+	}
+	newCred, err := st.Credentials().GetByCluster(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCred.ID != oldCred.ID {
+		t.Fatal("原位更新应保留凭据行 ID")
+	}
+	if newCred.KubeconfigSecret == oldCred.KubeconfigSecret {
+		t.Fatal("凭据密文必须被替换")
+	}
+	newVersion, err := svc.ExecutionVersion(context.Background(), created.ID)
+	if err != nil || newVersion == oldVersion {
+		t.Fatalf("凭据版本必须变化以作废旧调用/审批, old=%s new=%s err=%v", oldVersion, newVersion, err)
+	}
+	for _, ev := range *events {
+		if ev.EventType == store.AuditEventClusterChange && strings.Contains(ev.ResultSummary, "NEW-TOKEN") {
+			t.Fatal("审计不得携带凭据明文")
+		}
+	}
+}
+
+// TestServiceUpdateRejectsIdentityMismatch 验证候选凭据指向另一集群时拒绝原位
+// 替换并保留旧值（不得静默把 B 继承为 A 的 ClusterID）。
+func TestServiceUpdateRejectsIdentityMismatch(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: "identity-a"}
+	svc, st, _ := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("", "OLD-TOKEN")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.Credentials().GetByCluster(context.Background(), created.ID)
+	p.identity = "identity-b"
+	_, err = svc.Update(context.Background(), created.ID, UpdateRequest{Kubeconfig: kubeconfigFor("", "NEW-TOKEN")})
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("身份不一致必须 ErrIdentityMismatch, got %v", err)
+	}
+	after, _ := st.Credentials().GetByCluster(context.Background(), created.ID)
+	if after.KubeconfigSecret != before.KubeconfigSecret {
+		t.Fatal("拒绝更新时必须保留旧凭据")
+	}
+}
+
+// TestServiceUpdateRejectsUnknownIdentity 验证身份缺失/不可验证时阻止原位替换，
+// 而不是用名称或地址相同来猜。
+func TestServiceUpdateRejectsUnknownIdentity(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: ""}
+	svc, _, _ := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("", "OLD-TOKEN")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Update(context.Background(), created.ID, UpdateRequest{Kubeconfig: kubeconfigFor("", "NEW-TOKEN")})
+	if !errors.Is(err, ErrIdentityUnverified) {
+		t.Fatalf("身份不可验证必须 ErrIdentityUnverified, got %v", err)
+	}
+}
+
+// TestServiceUpdateServerChangeNeedsConfirmation 验证 API 地址变化必须显式确认。
+func TestServiceUpdateServerChangeNeedsConfirmation(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: "identity-a"}
+	svc, _, _ := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("https://old.example:6443", "OLD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Update(context.Background(), created.ID, UpdateRequest{Kubeconfig: kubeconfigFor("https://new.example:6443", "NEW")})
+	if !errors.Is(err, ErrServerChanged) {
+		t.Fatalf("地址变化未确认必须 ErrServerChanged, got %v", err)
+	}
+	view, err := svc.Update(context.Background(), created.ID, UpdateRequest{
+		Kubeconfig:          kubeconfigFor("https://new.example:6443", "NEW"),
+		ConfirmServerChange: true,
+	})
+	if err != nil || view.Cluster.Server != "https://new.example:6443" {
+		t.Fatalf("确认后应完成替换: %v %+v", err, view)
+	}
+}
+
+// TestServiceUpdateKeepsOldValueOnCandidateFailure 验证候选连测失败不覆盖旧凭据。
+func TestServiceUpdateKeepsOldValueOnCandidateFailure(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: "identity-a"}
+	svc, st, _ := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("", "OLD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.Credentials().GetByCluster(context.Background(), created.ID)
+	p.err = fmt.Errorf("%w: connect failed", ErrInvalid)
+	_, err = svc.Update(context.Background(), created.ID, UpdateRequest{Kubeconfig: kubeconfigFor("", "NEW")})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("候选连测失败应返回 ErrInvalid, got %v", err)
+	}
+	after, _ := st.Credentials().GetByCluster(context.Background(), created.ID)
+	if after.KubeconfigSecret != before.KubeconfigSecret {
+		t.Fatal("候选失败必须保留旧凭据")
+	}
+}
+
+func TestServiceRefreshRecordsCheckTimeAndReason(t *testing.T) {
+	p := &parseConnector{version: "v1.30.0", identity: "identity-a"}
+	svc, st, _ := newTestService(t, p)
+	created, err := svc.Create(context.Background(), CreateRequest{Name: "prod", Kubeconfig: kubeconfigFor("", "OLD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.err = fmt.Errorf("%w: dial tcp 10.0.0.1:6443: connect: connection refused", ErrInvalid)
+	if _, err := svc.Refresh(context.Background(), created.ID); err != nil {
+		t.Fatalf("Refresh 连测失败不应视为内部错误: %v", err)
+	}
+	got, err := st.Clusters().Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CheckedAt == nil || got.Status != string(StatusDisconnected) || !strings.Contains(got.CheckSummary, "网络") {
+		t.Fatalf("失败连测必须记录时间与分类原因: %+v", got)
+	}
+}
+
+func TestServiceContextsListsExplicitChoices(t *testing.T) {
+	svc, _, _ := newTestService(t, &parseConnector{})
+	view, err := svc.Contexts(context.Background(), ContextsRequest{Kubeconfig: kubeconfigFor("", "")})
+	if err != nil {
+		t.Fatalf("Contexts: %v", err)
+	}
+	if view.Current != "test-ctx" || len(view.Contexts) != 1 || view.Contexts[0] != "test-ctx" {
+		t.Fatalf("context 列表不符: %+v", view)
+	}
+}
+
+type connectorFunc func(context.Context, []byte) (*Info, error)
+
+func (f connectorFunc) Inspect(ctx context.Context, data []byte) (*Info, error) { return f(ctx, data) }
+
+func TestRefreshRejectsStaleCredentialResult(t *testing.T) {
+	ctx := context.Background()
+	svc, st, _ := newTestService(t, &parseConnector{version: "old", identity: "same"})
+	c, err := svc.Create(ctx, CreateRequest{Name: "test", Kubeconfig: kubeconfigFor("https://old.example", "old")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.connector = connectorFunc(func(ctx context.Context, _ []byte) (*Info, error) {
+		cred, err := st.Credentials().GetByCluster(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		current, err := st.Clusters().Get(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		cred.KubeconfigSecret, err = svc.cipher.Encrypt([]byte(kubeconfigFor("https://new.example", "new")))
+		if err != nil {
+			return nil, err
+		}
+		current.Server, current.Context, current.Version = "https://new.example", "new-context", "new-version"
+		if err := st.Credentials().(store.ClusterCredentialRotator).RotateClusterCredential(ctx, current, cred); err != nil {
+			return nil, err
+		}
+		return &Info{Server: "https://old.example", Version: "stale-version"}, nil
+	})
+	if _, err := svc.Refresh(ctx, c.ID); err == nil {
+		t.Fatal("stale probe must fail after credential rotation")
+	}
+	got, err := st.Clusters().Get(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Server != "https://new.example" || got.Context != "new-context" || got.Version != "new-version" {
+		t.Fatalf("stale probe overwrote rotated metadata: %+v", got)
 	}
 }

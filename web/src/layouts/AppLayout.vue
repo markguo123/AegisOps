@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import request from '@/api/request'
+import { ElMessage,ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
   ChatDotRound,
   Connection,
   Document,
   Files,
-  Finished,
   MagicStick,
   Monitor,
   Moon,
@@ -28,7 +28,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const SIDEBAR_KEY = 'k8s_ai_sidebar_collapsed'
+const SIDEBAR_KEY = 'aegisops_sidebar_collapsed'
 const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_KEY) === '1')
 
 watch(sidebarCollapsed, (collapsed) => {
@@ -47,10 +47,9 @@ const allMenuGroups = [
   },
   {
     title: '治理',
-    items: [
-      { index: '/app/approval', title: '审批中心', icon: Finished, permission: PERM.approvalRead },
-      { index: '/app/audit', title: '审计', icon: Document, permission: PERM.auditRead },
-    ],
+    // P4.7：治理菜单收敛为审计中心。审批不再有独立入口——确认动作在 Chat 内完成，
+    // 审批决定作为审计事件在本页查询（方案 28 §1）。
+    items: [{ index: '/app/audit', title: '审计中心', icon: Document, permission: PERM.auditRead }],
   },
   {
     title: '平台管理',
@@ -77,12 +76,13 @@ const menuGroups = computed(() =>
 
 const activeMenu = computed(() => route.path)
 const pageTitle = computed<string>(() => (route.meta.title as string | undefined) ?? '控制台')
-const displayName = computed(() => auth.user?.username ?? '未登录')
+// 右上角只放登录名：本地账号是用户名本身，企业 SSO 账号是 IdP 的登录名，
+// 不再暴露内部建档用的 oidc- 随机串（口径见 auth store 的 loginName）。
+const displayName = computed(() => auth.loginName || '未登录')
 const displayRole = computed(() => auth.user?.role ?? 'user')
 const userInitial = computed(() => displayName.value.charAt(0).toUpperCase() || 'K')
 
-const PLATFORM_VERSION = 'v4.0.0-dev'
-const isAdmin = computed(() => auth.user?.role === 'admin')
+const PLATFORM_VERSION = 'v4.0.0'
 
 // P7.1：主题切换（light | dark | system），默认深色，选择持久化到 localStorage。
 const { mode: themeMode, setThemeMode } = useTheme()
@@ -96,14 +96,22 @@ const THEME_OPTIONS: ThemeMode[] = ['dark', 'light', 'system']
 const THEME_ICONS: Record<ThemeMode, Component> = { dark: Moon, light: Sunny, system: Monitor }
 const themeIcon = computed(() => THEME_ICONS[themeMode.value])
 
-function handleUserCommand(command: string | number | object): void {
+async function handleUserCommand(command: string | number | object): Promise<void> {
+ if(command==='identity'){
+ try{const {data}=await request<{local:boolean;enabled:boolean;linked:boolean}>('/auth/oidc/bind')
+ if(!data?.local){ElMessage.info('当前账号使用企业身份登录');return}
+ if(!data.enabled&&!data.linked){ElMessage.info('管理员尚未启用企业登录');return}
+ const action=data.linked?'解绑':'绑定'
+ const {value}=await ElMessageBox.prompt('输入本地密码以'+action+'企业身份',action+'企业身份',{inputType:'password',confirmButtonText:action})
+ const res=await request<{redirect?:string}>('/auth/oidc/bind',{method:data.linked?'DELETE':'POST',body:{password:value}})
+ if(data.linked){await router.replace({name:'login'})}else if(res.data?.redirect){window.location.assign(res.data.redirect)}
+ }catch(e){if(e instanceof Error)ElMessage.error(e.message)};return
+ }
   if (command === 'logout') {
     auth.logout()
     router.push({ name: 'login' })
   } else if (command === 'password') {
     passwordDialogVisible.value = true
-  } else if (command === 'admin') {
-    router.push({ path: '/app/admin' })
   }
 }
 
@@ -162,7 +170,7 @@ async function submitPasswordChange(): Promise<void> {
           <el-icon class="brand-mark"><Connection /></el-icon>
         </div>
         <div v-show="!sidebarCollapsed" class="brand-text">
-          <strong>K8S-AI</strong>
+          <strong>AegisOps</strong>
         </div>
       </div>
 
@@ -185,7 +193,7 @@ async function submitPasswordChange(): Promise<void> {
       </el-menu>
 
       <div class="sidebar-foot">
-        <span>K8S-AI · Operations Console</span>
+        <span>AegisOps · 云原生智能工作台</span>
       </div>
     </el-aside>
 
@@ -238,11 +246,9 @@ async function submitPasswordChange(): Promise<void> {
                 </el-dropdown-item>
                 <el-dropdown-item disabled class="user-version">
                   <span>平台版本</span>
-                  <el-tag size="small" effect="plain" type="info">{{ PLATFORM_VERSION }}</el-tag>
+                  <span class="user-version-value">{{ PLATFORM_VERSION }}</span>
                 </el-dropdown-item>
-                <el-dropdown-item v-if="isAdmin" divided command="admin">
-                  管理控制台
-                </el-dropdown-item>
+                <el-dropdown-item divided command="identity">企业身份绑定</el-dropdown-item>
                 <el-dropdown-item divided command="password">修改密码</el-dropdown-item>
                 <el-dropdown-item command="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
@@ -655,6 +661,12 @@ async function submitPasswordChange(): Promise<void> {
   width: 100%;
   font-size: 12px;
   color: var(--app-muted);
+}
+
+.user-version-value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .app-body {

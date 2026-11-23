@@ -2,6 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { ArrowDown, CopyDocument, WarningFilled } from '@element-plus/icons-vue'
 
+import SecretReveal from './SecretReveal.vue'
+import QuestionRecord from './QuestionRecord.vue'
 import MarkdownView from './MarkdownView.vue'
 import YamlBlock from './render/YamlBlock.vue'
 import LogBlock from './render/LogBlock.vue'
@@ -34,6 +36,7 @@ export interface ToolUiData {
   command: string
   risk: string
   status: 'running' | 'done' | 'error' | 'unknown'
+  denied?: boolean
   ok: boolean
   params: unknown
   result: unknown
@@ -52,6 +55,7 @@ export interface ToolUiData {
 
 const props = withDefaults(
   defineProps<{
+    sessionId?: string
     tool: ToolUiData
     /** 完成并成功后默认展开（对齐三期行为）。 */
     autoOpen?: boolean
@@ -65,7 +69,7 @@ const props = withDefaults(
 )
 
 // P7.4：手动折叠状态持久化（key=toolCallId），刷新后保持，手动优先于自动折叠。
-const FOLD_KEY_PREFIX = 'k8s_ai_tool_fold:'
+const FOLD_KEY_PREFIX = 'aegisops_tool_fold:'
 const storedFold = (() => {
   try {
     return localStorage.getItem(FOLD_KEY_PREFIX + props.tool.key)
@@ -82,7 +86,7 @@ watch(
   () => props.tool.status,
   (status) => {
     if (status !== 'running' && !manual.value) {
-      expanded.value = true
+      expanded.value = status === 'error' || status === 'unknown' || (props.autoOpen && !props.reportDone)
     }
   },
   { immediate: true },
@@ -92,10 +96,11 @@ watch(
 watch(
   () => props.reportDone,
   (done) => {
-    if (done && !manual.value) {
+    if (done && !manual.value && props.tool.status !== 'error' && props.tool.status !== 'unknown') {
       expanded.value = false
     }
   },
+  { immediate: true },
 )
 
 watch(
@@ -117,6 +122,16 @@ watch(
     }
   },
 )
+
+const displayName = computed(() => {
+  const names: Record<string, string> = {
+    get_pods: '检查 Pod 状态', get_pod: '查看 Pod 详情', get_logs: '读取容器日志',
+    get_resources: '查询资源', get_statefulset: '查看 StatefulSet',
+    get_secret_info: '检查 Secret 元数据', read_tool_result: '读取检查结果',
+    kubectl: '执行集群命令', get_events: '查看集群事件',
+  }
+  return names[props.tool.name] ?? props.tool.name
+})
 
 const riskTag = computed<'danger' | 'warning' | 'info' | 'primary'>(() => {
   const risk = props.tool.risk?.toUpperCase() ?? ''
@@ -142,6 +157,14 @@ const durationText = computed(() => {
 })
 
 const errorText = computed(() => {
+  const executionErrors: Record<string, string> = {
+    POLICY_DENIED: '该操作不符合执行安全策略，请使用支持的诊断方式',
+    TARGET_ISOLATION_DENIED: '该命令无法保证当前集群目标隔离',
+    EXECUTION_BUSY: '诊断执行通道繁忙，请稍后重试',
+    UNSUPPORTED: '当前执行通道不支持该命令或参数',
+    TOOL_UNAVAILABLE: '执行或确认通道当前不可用',
+  }
+  if (props.tool.errorCode && executionErrors[props.tool.errorCode]) return executionErrors[props.tool.errorCode]
   if (props.tool.errorCode === 'RBAC_DENIED') {
     return '当前集群执行身份没有该操作权限（RBAC 拒绝）'
   }
@@ -306,10 +329,7 @@ function toggle(): void {
   <article class="toolcard" :class="tool.status">
     <button type="button" class="toolcard-head" @click="toggle">
       <span class="toolcard-dot" :class="tool.status"></span>
-      <span v-if="tool.shortName && tool.shortName !== tool.name" class="toolcard-short">{{
-        tool.shortName
-      }}</span>
-      <span class="toolcard-title">{{ tool.name }}</span>
+      <span class="toolcard-title" :title="tool.name">{{ displayName }}</span>
       <!-- P7.4：头部概览优先展示后端摘要（如 "成功 · 12 pods · 320ms"），命令降级为 tooltip -->
       <span v-if="tool.summary" class="toolcard-cmd toolcard-summary" :title="tool.command || tool.summary">
         {{ tool.summary }}
@@ -330,6 +350,7 @@ function toggle(): void {
       <el-icon class="toolcard-caret" :class="{ open: expanded }"><ArrowDown /></el-icon>
     </button>
 
+    <SecretReveal v-if="sessionId && tool.name === 'get_secret_value' && tool.status === 'done'" :session-id="sessionId" :params="tool.params" />
     <!-- create_resource：提交的 manifest + dry-run→apply 两段式状态 -->
     <div
       v-if="expanded && tool.createResource && tool.createResource.manifest"
@@ -370,7 +391,8 @@ function toggle(): void {
         </div>
       </template>
       <template v-else>
-        <TerminalBlock v-if="view.type === 'terminal'" :data="view.parse" />
+        <QuestionRecord v-if="tool.name === 'ask_user_question'" :value="maskedResult" />
+<TerminalBlock v-else-if="view.type === 'terminal'" :data="view.parse" />
         <StructuredTable
           v-else-if="view.type === 'table'"
           :items="view.parse as unknown[]"

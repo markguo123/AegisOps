@@ -1,9 +1,11 @@
-// Package config loads and validates k8s-ai configuration.
+// Package config loads and validates AegisOps configuration.
 // Precedence: CLI overrides > ENV > YAML file > defaults (FR-002).
 package config
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,30 +31,114 @@ type Config struct {
 
 // KubernetesConfig controls cluster access (FR-003).
 type KubernetesConfig struct {
-	Kubeconfig  string        `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
-	Context     string        `mapstructure:"context"`
-	Namespace   string        `mapstructure:"namespace"`
-	KubectlPath string        `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
-	Timeout     time.Duration `mapstructure:"timeout"`
-	QPS         float32       `mapstructure:"qps"`
-	Burst       int           `mapstructure:"burst"`
+	TargetID     string                    `json:"-" mapstructure:"-"`
+	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
+	// TargetBound 是运行期标记（P12.2），不来自配置文件：平台会话把目标
+	// kubeconfig 临时文件写进 Kubeconfig 后置为 true，执行器据此拒绝无法证明
+	// 目标边界的 shell 与目标覆盖参数。
+	TargetBound bool `json:"-" mapstructure:"-"`
+	// TargetCheck 是运行期的目标前置校验（P12.2）：每次 kubectl 子进程执行前
+	// 重新核验用户授权、集群存在性与凭据版本。凭据轮换或撤权后旧命令与旧批准
+	// 立即失效，而不是等下一个 15s 看护周期。
+	TargetCheck func(context.Context) error `json:"-" mapstructure:"-"`
+	Kubeconfig  string                      `mapstructure:"kubeconfig"` // empty = loading rules (KUBECONFIG or ~/.kube/config)
+	Context     string                      `mapstructure:"context"`
+	Namespace   string                      `mapstructure:"namespace"`
+	KubectlPath string                      `mapstructure:"kubectl_path"` // 二期：kubectl 二进制路径（空 = PATH 查找）
+	Timeout     time.Duration               `mapstructure:"timeout"`
+	QPS         float32                     `mapstructure:"qps"`
+	Burst       int                         `mapstructure:"burst"`
 }
 
 // LLMConfig controls the OpenAI-compatible endpoint (FR-015).
+const ModelAPIChatCompletions = "openai-chat-completions"
+
+type ChatModel struct {
+	Name          string `json:"name,omitempty" mapstructure:"name"`
+	ID            string `json:"id" mapstructure:"id"`
+	ContextWindow int    `json:"context_window" mapstructure:"context_window"`
+}
+
+type ModelProfile struct {
+	Temperature    *float64 `json:"temperature,omitempty" mapstructure:"temperature"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty" mapstructure:"timeoutSeconds"`
+	ThinkingMode   string   `json:"thinkingMode,omitempty" mapstructure:"thinkingMode"`
+	ID             string   `json:"id" mapstructure:"id"`
+	Name           string   `json:"name" mapstructure:"name"`
+	Model          string   `json:"model" mapstructure:"model"`
+	Endpoint       string   `json:"endpoint" mapstructure:"endpoint"`
+	APIKey         string   `json:"apiKey" mapstructure:"apiKey"`
+	APIFormat      string   `json:"apiFormat" mapstructure:"apiFormat"`
+	ContextWindow  int      `json:"contextWindow" mapstructure:"contextWindow"`
+	MaxTokens      int      `json:"maxTokens" mapstructure:"maxTokens"`
+}
+
+func ValidateModelProfiles(profiles []ModelProfile) error {
+	for _, p := range profiles {
+		if (p.Temperature != nil && (*p.Temperature < 0 || *p.Temperature > 2)) || p.TimeoutSeconds < 0 || p.TimeoutSeconds > 3600 || (p.ThinkingMode != "" && p.ThinkingMode != "enabled" && p.ThinkingMode != "disabled") {
+			return fmt.Errorf("模型高级参数超出范围")
+		}
+	}
+	if len(profiles) > 50 {
+		return fmt.Errorf("最多添加 50 个模型")
+	}
+	seen := make(map[string]bool, len(profiles))
+	for _, entry := range profiles {
+		endpoint, err := url.Parse(entry.Endpoint)
+		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+			endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.ForceQuery {
+			return fmt.Errorf("模型接口地址必须是有效的 HTTP(S) 基础地址")
+		}
+		if !strings.HasPrefix(entry.ID, "profile_") || seen[entry.ID] ||
+			strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Model) == "" ||
+			len(entry.Name) > 128 || len(entry.Model) > 256 || len(entry.APIKey) > 4096 {
+			return fmt.Errorf("模型名称、模型 ID 或 API Key 无效")
+		}
+		if entry.APIFormat != ModelAPIChatCompletions {
+			return fmt.Errorf("不支持该 API 格式")
+		}
+		if entry.ContextWindow < 8192 || entry.ContextWindow > 4194304 || entry.MaxTokens <= 0 || entry.MaxTokens >= entry.ContextWindow {
+			return fmt.Errorf("上下文窗口需在 8192 到 4194304 之间，输出上限必须小于总窗口")
+		}
+		seen[entry.ID] = true
+	}
+	return nil
+}
+
+func ValidateChatModels(models []ChatModel) error {
+	if len(models) > 50 {
+		return fmt.Errorf("最多配置 50 个问诊模型")
+	}
+	seen := make(map[string]bool, len(models))
+	for _, entry := range models {
+		if entry.ID == "" || len(entry.ID) > 256 || strings.TrimSpace(entry.ID) != entry.ID || seen[entry.ID] ||
+			entry.ContextWindow < 8192 || entry.ContextWindow > 4194304 {
+			return fmt.Errorf("模型 ID 不能为空或重复，上下文窗口需在 8192 到 4194304 之间")
+		}
+		seen[entry.ID] = true
+	}
+	return nil
+}
+
 type LLMConfig struct {
-	Enabled         bool              `mapstructure:"enabled"`
-	Endpoint        string            `mapstructure:"endpoint"`
-	APIKey          string            `mapstructure:"api_key"`
-	Model           string            `mapstructure:"model"`
-	Temperature     float64           `mapstructure:"temperature"`
-	MaxTokens       int               `mapstructure:"max_tokens"`
-	MaxInputTokens  int               `mapstructure:"max_input_tokens"`
-	MaxTotalTokens  int               `mapstructure:"max_total_tokens"`
-	MaxFindings     int               `mapstructure:"max_findings"`
-	Timeout         time.Duration     `mapstructure:"timeout"`
-	Stream          bool              `mapstructure:"stream"`           // chat 流式输出（true = SSE 逐 token 推送到终端/Web）
-	Thinking        map[string]string `mapstructure:"thinking"`         // 标准思考参数，例如 {type: enabled}
-	ReasoningFields []string          `mapstructure:"reasoning_fields"` // 可选：SSE delta 中的思考字段名
+	ModelProfiles    []ModelProfile    `mapstructure:"model_profiles"`
+	DefaultChatModel string            `mapstructure:"default_chat_model"`
+	ScanModel        string            `mapstructure:"scan_model"`
+	APIFormat        string            `mapstructure:"api_format"`
+	ChatModels       []ChatModel       `mapstructure:"chat_models"`
+	Enabled          bool              `mapstructure:"enabled"`
+	Endpoint         string            `mapstructure:"endpoint"`
+	APIKey           string            `mapstructure:"api_key"`
+	Model            string            `mapstructure:"model"`
+	Temperature      float64           `mapstructure:"temperature"`
+	MaxTokens        int               `mapstructure:"max_tokens"`
+	MaxInputTokens   int               `mapstructure:"max_input_tokens"`
+	MaxTotalTokens   int               `mapstructure:"max_total_tokens"`
+	MaxFindings      int               `mapstructure:"max_findings"`
+	Timeout          time.Duration     `mapstructure:"timeout"`
+	Stream           bool              `mapstructure:"stream"`           // chat 流式输出（true = SSE 逐 token 推送到终端/Web）
+	Thinking         map[string]string `mapstructure:"thinking"`         // 标准思考参数，例如 {type: enabled}
+	ReasoningFields  []string          `mapstructure:"reasoning_fields"` // 可选：SSE delta 中的思考字段名
 }
 
 // ScanConfig controls collection behaviour (FR-004, FR-022, FR-024).
@@ -97,6 +183,7 @@ type AgentConfig struct {
 	TurnMaxBytes    int           `mapstructure:"turn_max_bytes"`
 	CmdMaxBytes     int           `mapstructure:"cmd_max_bytes"`
 	HistoryTurns    int           `mapstructure:"history_turns"`
+	ContextWindow   int           `mapstructure:"context_window"`
 	SessionDir      string        `mapstructure:"session_dir"`
 	AuditDir        string        `mapstructure:"audit_dir"`
 	// SessionMaxBytes caps one session body as it is written to the platform store
@@ -108,10 +195,20 @@ type AgentConfig struct {
 	// platform audit table (P8.0). The platform DB is the source of truth; the
 	// file is an optional copy. Default true keeps existing deployments intact,
 	// and CLI mode (no platform store) always writes it.
-	AuditFileCopy bool         `mapstructure:"audit_file_copy"`
-	DisabledTools []string     `mapstructure:"disabled_tools"`
-	Create        CreateConfig `mapstructure:"create"`
-	Secret        SecretConfig `mapstructure:"secret"`
+	AuditFileCopy bool          `mapstructure:"audit_file_copy"`
+	DisabledTools []string      `mapstructure:"disabled_tools"`
+	Create        CreateConfig  `mapstructure:"create"`
+	Secret        SecretConfig  `mapstructure:"secret"`
+	ExecPod       ExecPodConfig `mapstructure:"exec_pod"`
+}
+
+type ExecPodConfig struct {
+	Enabled                  bool `mapstructure:"enabled"`
+	TimeoutSeconds           int  `mapstructure:"timeout_seconds"`
+	MaxTimeoutSeconds        int  `mapstructure:"max_timeout_seconds"`
+	MaxOutputBytes           int  `mapstructure:"max_output_bytes"`
+	MaxConcurrentPerInstance int  `mapstructure:"max_concurrent_per_instance"`
+	MaxConcurrentPerUser     int  `mapstructure:"max_concurrent_per_user"`
 }
 
 // CreateConfig controls the Phase 3 resource-creation capability
@@ -135,14 +232,26 @@ type CreateConfig struct {
 	MaxManifestBytes int `mapstructure:"max_manifest_bytes"`
 }
 
-// SecretConfig controls the Secret create channel (D-06/D-12). Reading Secret
-// content values stays a hard red line in every mode.
+// SecretConfig controls the Secret create channel and structured on-demand
+// diagnostic reads. Broad kubectl Secret dumps remain forbidden; reads never
+// persist plaintext and every non-model exit stays redacted.
 type SecretConfig struct {
-	// Access is "off" (no Secret creation), "create_only" (default: create with
-	// values that never enter the LLM context) or "read_write" (reserved,
-	// rejected by Validate until a later phase).
+	// Access is "off" (no Secret creation/read), "create_only" (create with
+	// values that never enter the LLM context), or "read_on_demand" (creation
+	// plus structured, per-key diagnostic reads after explicit approval).
+	// "read_write" is intentionally rejected because it is too broad.
 	Access string `mapstructure:"access"`
+	// ReadApproval retains the legacy configuration field. Agent reads always
+	// require per-call human consent; the old auto value is treated as always.
+	// Dedicated authorized UI reveal uses a separate non-persistent response.
+	ReadApproval string `mapstructure:"read_approval"`
 }
+
+// Secret read approval modes (agent.secret.read_approval).
+const (
+	SecretReadApprovalAlways = "always"
+	SecretReadApprovalAuto   = "auto"
+)
 
 // WebUIConfig 控制二期 Web UI 监听地址。
 type WebUIConfig struct {
@@ -192,8 +301,10 @@ type PlatformExecConfig struct {
 
 // PlatformServerConfig 控制平台 HTTP 服务监听参数。
 type PlatformServerConfig struct {
-	Addr string            `mapstructure:"addr"`
-	TLS  PlatformTLSConfig `mapstructure:"tls"`
+	PublicURL         string            `mapstructure:"public_url"`
+	AllowLoopbackHTTP bool              `mapstructure:"allow_loopback_http"`
+	Addr              string            `mapstructure:"addr"`
+	TLS               PlatformTLSConfig `mapstructure:"tls"`
 	// StaticEnabled 控制是否由本进程托管内嵌前端产物（P6.1/P6.11，D-26）：
 	// true = 形态 A 一体化（单端口同时提供 SPA 与 API）；false = 形态 B 纯 API
 	// （静态资源交给独立前端镜像/Nginx）。
@@ -232,9 +343,32 @@ func (p PlatformStoreConfig) IsMySQL() bool {
 
 // PlatformAuthConfig 控制平台内建账号与登录会话参数。
 type PlatformAuthConfig struct {
-	AdminUsername string        `mapstructure:"admin_username"`
-	TokenTTL      time.Duration `mapstructure:"token_ttl"`
-	SessionStore  string        `mapstructure:"session_store"` // memory（本期）
+	// AllowQuickstartHTTP permits plain HTTP only for explicitly opted-in experience installations.
+	AllowQuickstartHTTP bool          `mapstructure:"allow_quickstart_http"`
+	AdminUsername       string        `mapstructure:"admin_username"`
+	TokenTTL            time.Duration `mapstructure:"token_ttl"`
+	SessionStore        string        `mapstructure:"session_store"` // memory（本期）
+	// OIDCCAFile 是企业 IdP（OIDC）证书链根 CA 的 PEM 文件路径，用于对接内部自建
+	// CA 签发的 IdP：OIDC discovery、令牌交换与 JWKS 拉取都在系统信任链之上追加这批
+	// 根证书。只增不减，公网 IdP 照旧可信；刻意不提供「跳过证书校验」开关——那等于
+	// 接受任意来源签发的身份令牌。留空 = 仅用镜像系统信任链。
+	// 值是容器内路径，部署时由 aegisops-config 卷提供（见 deploy/base/configmap.yaml）。
+	OIDCCAFile string `mapstructure:"oidc_ca_file"`
+	// OIDCDisablePKCE 是「企业 IdP 自己把 PKCE 处理坏了」时的兼容开关：true 时授权请求
+	// 不带 code_challenge、令牌交换不带 code_verifier。默认 false。
+	// 只在现场 IdP 声称支持 PKCE、实际却不保存 challenge（例：某些 Dex 分支把 PKCE 参数
+	// 丢掉，或把 code_challenge_method 落成 plain 又拿空 challenge 去比对）时打开，
+	// 表现为单点登录每次都在令牌交换那一步被拒。关掉 PKCE 会削弱授权码被截获后的防线，
+	// 因此必须同时保留 HTTPS 入口与一次性短寿命登录事务，且不要把开关写进公网部署。
+	OIDCDisablePKCE bool `mapstructure:"oidc_disable_pkce"`
+	// OIDCAllowMissingNonce 是「企业 IdP 收到 nonce 却不回传」时的兼容开关：true 时只容忍
+	// id_token 完全没有 nonce 声明这一种情形，且追加「iat 不得早于本次登录事务开始」来挡住
+	// 旧令牌重放。只要 IdP 回了 nonce 却与本次登录不符，无论开关如何一律拒绝。默认 false。
+	// 现场触发条件是 IdP 在授权请求里收到 nonce 却不持久化（例：某些 Dex 分支的 AuthRequest
+	// 没有 nonce 字段，其自定义登录页还会把 nonce 从 back 参数里丢掉），表现为单点登录每次
+	// 都在「id token nonce 不匹配」上失败。这是拿一次性随机数绑定换兼容性，必须同时保留
+	// HTTPS 入口与短寿命登录事务，且不要把开关写进公网部署。
+	OIDCAllowMissingNonce bool `mapstructure:"oidc_allow_missing_nonce"`
 }
 
 // LoadOptions controls a single Load call.
@@ -245,16 +379,16 @@ type LoadOptions struct {
 	CLI        bool           // 终端直用面（chat/scan）：默认读 cli.yaml，缺失回退 config.yaml
 }
 
-// DefaultConfigFile returns the default config path (~/.k8s-ai/config.yaml).
+// DefaultConfigFile returns the default config path (~/.aegisops/config.yaml).
 func DefaultConfigFile() (string, error) {
-	return expandHome("~/.k8s-ai/config.yaml")
+	return expandHome("~/.aegisops/config.yaml")
 }
 
-// DefaultCLIConfigFile 返回终端直用配置的默认路径（~/.k8s-ai/cli.yaml，D-21）。
+// DefaultCLIConfigFile 返回终端直用配置的默认路径（~/.aegisops/cli.yaml，D-21）。
 // 它与平台静态 config.yaml 是两份独立文件：由 `config init --cli` 生成，只有
-// k8s-ai chat / scan 读取，server 既不读取也不回写。
+// aopsctl chat / scan 读取，server 既不读取也不回写。
 func DefaultCLIConfigFile() (string, error) {
-	return expandHome("~/.k8s-ai/cli.yaml")
+	return expandHome("~/.aegisops/cli.yaml")
 }
 
 // ResolveConfigFile 解析实际生效的配置文件路径（显式 --config 优先）。终端直用面
@@ -290,7 +424,7 @@ func Load(opts LoadOptions) (*Config, error) {
 	setDefaults(v)
 
 	if !opts.NoEnv {
-		v.SetEnvPrefix("K8S_AI")
+		v.SetEnvPrefix("AEGISOPS")
 		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 		v.AutomaticEnv()
 	}
@@ -330,6 +464,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("llm.enabled", true)
 	v.SetDefault("llm.endpoint", "http://localhost:8000/v1")
+	v.SetDefault("llm.api_format", ModelAPIChatCompletions)
 	v.SetDefault("llm.api_key", "")
 	v.SetDefault("llm.model", "qwen-plus")
 	v.SetDefault("llm.temperature", 0.1)
@@ -366,8 +501,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.turn_max_bytes", 32*1024)
 	v.SetDefault("agent.cmd_max_bytes", 64*1024)
 	v.SetDefault("agent.history_turns", 20)
-	v.SetDefault("agent.session_dir", "~/.k8s-ai/sessions")
-	v.SetDefault("agent.audit_dir", "~/.k8s-ai/audit")
+	v.SetDefault("agent.context_window", 65536)
+	v.SetDefault("agent.session_dir", "~/.aegisops/sessions")
+	v.SetDefault("agent.audit_dir", "~/.aegisops/audit")
 	v.SetDefault("agent.session_max_bytes", defaultSessionMaxBytes())
 	v.SetDefault("agent.audit_file_copy", true)
 
@@ -378,7 +514,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.create.cluster_kinds", []string{})
 	v.SetDefault("agent.create.max_objects_per_call", 3)
 	v.SetDefault("agent.create.max_manifest_bytes", 8*1024)
-	v.SetDefault("agent.secret.access", "create_only")
+	v.SetDefault("agent.secret.access", "read_on_demand")
+	v.SetDefault("agent.secret.read_approval", SecretReadApprovalAlways)
+	v.SetDefault("agent.exec_pod.enabled", true)
+	v.SetDefault("agent.exec_pod.timeout_seconds", 15)
+	v.SetDefault("agent.exec_pod.max_timeout_seconds", 30)
+	v.SetDefault("agent.exec_pod.max_output_bytes", 65536)
+	v.SetDefault("agent.exec_pod.max_concurrent_per_instance", 8)
+	v.SetDefault("agent.exec_pod.max_concurrent_per_user", 2)
 
 	v.SetDefault("webui.addr", "127.0.0.1:8081")
 
@@ -391,12 +534,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.server.tls.cert_file", "")
 	v.SetDefault("platform.server.tls.key_file", "")
 	v.SetDefault("platform.store.driver", StoreDriverSQLite)
-	v.SetDefault("platform.store.sqlite_path", "~/.k8s-ai/k8s-ai.db")
+	v.SetDefault("platform.store.sqlite_path", "~/.aegisops/aegisops.db")
 	v.SetDefault("platform.store.dsn", "")
 	// 二进制对象后端（P8.1 / D-32）：默认 db，未配置的环境升级即无感。每个键都必须
 	// 有默认值，viper 才能在 Unmarshal 时合并只来自环境变量（Secret）注入的取值。
 	v.SetDefault("platform.blobs.driver", BlobDriverDB)
-	v.SetDefault("platform.blobs.prefix", "k8sai")
+	v.SetDefault("platform.blobs.prefix", "aegisops")
 	v.SetDefault("platform.blobs.dir", "")
 	// tmp_dir 留空时由 objectstore 取 os.TempDir()（方案 15 §14）：装配层决定回落值，
 	// 配置面不猜，避免 validate 在有无临时卷的不同环境下结论不一致。
@@ -405,7 +548,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.blobs.region", "us-east-1")
 	v.SetDefault("platform.blobs.use_tls", false)
 	v.SetDefault("platform.blobs.path_style", true)
-	v.SetDefault("platform.blobs.bucket", "k8s-ai")
+	v.SetDefault("platform.blobs.bucket", "aegisops")
 	v.SetDefault("platform.blobs.access_key", "")
 	v.SetDefault("platform.blobs.secret_key", "")
 	v.SetDefault("platform.blobs.create_bucket", true)
@@ -413,9 +556,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("platform.blobs.max_object_size", "32MiB")
 	v.SetDefault("platform.blobs.session_data", false)
 	v.SetDefault("platform.blobs.gc_grace_period", 168*time.Hour)
+	v.SetDefault("platform.server.public_url", "")
+	v.SetDefault("platform.server.allow_loopback_http", false)
+	v.SetDefault("platform.auth.allow_quickstart_http", false)
 	v.SetDefault("platform.auth.admin_username", "admin")
 	v.SetDefault("platform.auth.token_ttl", 24*time.Hour)
 	v.SetDefault("platform.auth.session_store", "memory")
+	// 企业 IdP 根 CA 文件路径：留空即用系统信任链，不追加任何自定义信任。
+	v.SetDefault("platform.auth.oidc_ca_file", "")
+	v.SetDefault("platform.auth.oidc_disable_pkce", false)
+	v.SetDefault("platform.auth.oidc_allow_missing_nonce", false)
 	// 执行通道默认开启（D-33）：关闭是给无 shell 镜像变体的现场用的。
 	v.SetDefault("platform.exec.shell_enabled", true)
 }
@@ -515,7 +665,16 @@ func (c *Config) Validate() error {
 	if c.Scan.PodLogsTimeout <= 0 {
 		return fmt.Errorf("scan.pod_logs_timeout must be > 0")
 	}
+	if err := ValidateModelProfiles(c.LLM.ModelProfiles); err != nil {
+		return err
+	}
 	if c.LLM.Enabled {
+		if c.LLM.APIFormat != "" && c.LLM.APIFormat != ModelAPIChatCompletions {
+			return fmt.Errorf("unsupported llm.api_format")
+		}
+		if err := ValidateChatModels(c.LLM.ChatModels); err != nil {
+			return err
+		}
 		u, err := url.Parse(c.LLM.Endpoint)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("llm.endpoint must be a valid http(s) URL")
@@ -569,6 +728,9 @@ func (c *Config) Validate() error {
 	if c.Agent.HistoryTurns <= 0 {
 		return fmt.Errorf("agent.history_turns must be > 0")
 	}
+	if c.Agent.ContextWindow < 8192 || c.Agent.ContextWindow > 4194304 || c.Agent.ContextWindow <= c.LLM.MaxTokens {
+		return fmt.Errorf("agent.context_window must be between 8192 and 4194304 and larger than llm.max_tokens")
+	}
 	if c.Agent.SessionMaxBytes < 0 {
 		return fmt.Errorf("agent.session_max_bytes must be > 0 (omit it or set %s to keep the default)", defaultSessionMaxBytesText)
 	}
@@ -583,6 +745,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("agent.create.max_manifest_bytes must be between 1KiB and 1MiB")
 	}
 	if err := validateSecretAccess(c.Agent.Secret.Access); err != nil {
+		return err
+	}
+	e := c.Agent.ExecPod
+	if e.TimeoutSeconds < 1 || e.TimeoutSeconds > e.MaxTimeoutSeconds || e.MaxTimeoutSeconds > 30 || e.MaxOutputBytes < 1024 || e.MaxOutputBytes > 65536 || e.MaxConcurrentPerInstance < 1 || e.MaxConcurrentPerInstance > 8 || e.MaxConcurrentPerUser < 1 || e.MaxConcurrentPerUser > 2 || e.MaxConcurrentPerUser > e.MaxConcurrentPerInstance {
+		return fmt.Errorf("agent.exec_pod: invalid timeout, output or concurrency limits")
+	}
+	if err := validateSecretReadApproval(c.Agent.Secret.Access, c.Agent.Secret.ReadApproval); err != nil {
 		return err
 	}
 	if c.WebUI.Addr == "" {
@@ -668,16 +837,32 @@ func validateMySQLDSN(dsn string) error {
 	return fmt.Errorf("platform.store.dsn must set parseTime=true")
 }
 
-// validateSecretAccess enforces the Phase 3 Secret channel gate (D-12/R4.7):
-// only "off" and "create_only" are available; reading Secret content values
-// ("read_write") stays out of scope and is rejected instead of silently ignored.
+// validateSecretAccess enforces the Secret access gate. The broad "read_write"
+// name is rejected: diagnostic reads must stay key-scoped and approval-gated.
 func validateSecretAccess(access string) error {
 	switch access {
-	case "", "off", "create_only":
+	case "", "off", "create_only", "read_on_demand":
 		return nil
 	case "read_write":
-		return fmt.Errorf("agent.secret.access=read_write is not supported: reading Secret content values stays a red line")
+		return fmt.Errorf("agent.secret.access=read_write is not supported: use read_on_demand for approval-gated per-key reads")
 	default:
-		return fmt.Errorf("agent.secret.access must be one of off, create_only")
+		return fmt.Errorf("agent.secret.access must be one of off, create_only, read_on_demand")
+	}
+}
+
+// validateSecretReadApproval 校验新增的读取审批模式（方案 24 §4.1）。
+// 缺省/旧配置保持 always；非法值启动失败；off/create_only 搭配 auto 是矛盾
+// 配置，必须在启动期报错，而不是静默保留一个不会生效的"授权"。
+func validateSecretReadApproval(access, readApproval string) error {
+	switch strings.ToLower(strings.TrimSpace(readApproval)) {
+	case "", SecretReadApprovalAlways:
+		return nil
+	case SecretReadApprovalAuto:
+		if !strings.EqualFold(strings.TrimSpace(access), "read_on_demand") {
+			return fmt.Errorf("agent.secret.read_approval=auto requires agent.secret.access=read_on_demand")
+		}
+		return nil
+	default:
+		return fmt.Errorf("agent.secret.read_approval must be one of always, auto")
 	}
 }

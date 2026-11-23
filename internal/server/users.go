@@ -119,7 +119,7 @@ func writeUserError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, auth.ErrInvalidUser), errors.Is(err, auth.ErrRoleNotFound):
 		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, err.Error())
-	case errors.Is(err, auth.ErrUserExists):
+	case errors.Is(err, auth.ErrUserExists), errors.Is(err, store.ErrConcurrentUpdate):
 		writeError(w, r, http.StatusConflict, codeConflict, err.Error())
 	case errors.Is(err, auth.ErrUserNotFound):
 		writeError(w, r, http.StatusNotFound, codeNotFound, err.Error())

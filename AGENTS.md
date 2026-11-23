@@ -1,8 +1,12 @@
-# k8s-ai Development Rules
+> **2026-11-16 Secret 当前生效口径**
+> namespace 资源 read 授权包含该范围 Secret 读取资格；纯报告权限不产生 namespace 授权。Admin 拥有全部已接入集群范围的读取资格，仍受 Kubernetes RBAC 约束。Agent 每次读取具体 Secret/key 前必须明确询问用户，用户同意后重新校验权限再读取；越权直接提示无权限，不发起审批。`auto` 旧配置兼容接收，但不再免除确认，优先遵守本段。
+> Agent 的 ModelOnly 明文只用于当前轮模型请求；聊天 SSE、历史、报告、持久化和审计仍脱敏。授权用户点击“显示明文”通过独立 POST secret/reveal 接口重新鉴权后即时查看；专用响应允许明文，禁止缓存，前端仅内存保存、60 秒或窗口失焦时清除。该接口是旧“UI 永不回显”条款的明确例外。以下与本段冲突的 always/auto 或 UI 禁止展示说明属于旧口径，以本段为准。
+
+# AegisOps Development Rules
 
 ## Project
 
-k8s-ai is a Kubernetes AI inspection, diagnosis and operation tool
+AegisOps is a Kubernetes AI inspection, diagnosis and operation tool
 (Phase 1: read-only inspection; Phase 2: natural-language Agent with
 approved read/write operations).
 
@@ -42,12 +46,16 @@ CLI, Server, Web UI and CronJob must reuse the same application services.
 Phase 2 allows both read and write operations as part of normal
 troubleshooting and operations, subject to the following rules:
 
-- Read-only operations that do not use shell syntax (get/list/watch/logs/
-  events/describe and the structured read tools) execute automatically.
+- Read-only operations execute automatically: single kubectl read commands
+  (get/list/watch/logs/events/describe) and the structured read tools, plus
+  **provably read-only command combinations** (see below).
 - Write operations (create/update/patch/delete/apply/replace/scale/rollout
   etc.) require human confirmation (approval flow) before execution, except
   when the user explicitly opts in for non-interactive automation
   (`--skip-permissions`).
+- Non-interactive `kubectl exec <pod> -- <command>` is allowed only after a
+  real human approval, must include an explicit command after `--`, and is
+  never covered by `--skip-permissions` or non-interactive automation.
 - The LLM is never the permission authority: real permissions come from
   Kubernetes RBAC, and prompts cannot bypass RBAC.
 - Structured tools remain the default tool path in chat (four-layer intent
@@ -56,21 +64,39 @@ troubleshooting and operations, subject to the following rules:
   tools, full-manifest create/apply, complex JSON patches, composite
   repairs), and shell constructs are allowed only when the LLM needs to
   express such an operation.
-- Shell constructs are allowed in interactive chat sessions ONLY under
+- Command permission is decided by the semantics of the complete command
+  (`internal/cmdplan` shell-AST analysis), never by whether a shell symbol
+  appears. Provably read-only combinations execute automatically:
+  * Allowed shape: single command, pipe `|`, sequence `;`/newline, and
+    `&&`/`||`. Every branch must start with an explicit kubectl read-only
+    call (get/describe/logs/events/top/explain/api-resources/version and
+    rollout history/status), and every Kubernetes call is authorized
+    separately (cluster, namespace, resource, action).
+  * Allowed filters, stdin only and with a validated argument table:
+    `grep`, `head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `tr`, `jq`
+    (a validated jq expression subset). Example:
+    `kubectl get po -A | grep mysql`.
+  * Not automatically executed: awk/sed/xargs/interpreters/curl/wget,
+    file arguments, redirections, command/process substitution, variable
+    expansion, globs, background jobs, loops, functions, environment
+    assignments, shell wrappers, unknown flags, and any second write command.
+  * Provably read-only combinations run as a controlled argv pipeline in
+    `internal/executor` (no bash, minimal environment) and therefore do not
+    depend on `platform.exec.shell_enabled`; that switch only controls the
+    real bash channel.
+- Other shell constructs are allowed in interactive chat sessions ONLY under
   human approval, never automatically:
-  * Any command containing shell syntax (`|`, `&`, `;`, `<`, `>`, `$()`,
-    backticks, heredocs, redirects, `||`/`&&`, command substitution) must
-    pass the approval flow before execution. This applies to BOTH
-    read-like and write-like shell commands; shell commands are never
-    classified as read-only auto-execute.
-  * Shell commands are not covered by `--skip-permissions` or
+  * A command whose read-only nature cannot be proven must pass the approval
+    flow before execution, whether it looks read-like or write-like.
+  * Such shell commands are not covered by `--skip-permissions` or
     non-interactive automation: executing them requires a real human
     approver.
   * Interactive/blocking kubectl commands (edit/attach/port-forward/proxy/
-    run/cp/debug, exec -i/-t) remain hard-rejected.
-  * Secret content (value) access and `--raw` red lines remain in force for
-    both shell and non-shell commands; read-only metadata/key-level Secret reads
-    via the internal/kubernetes read facade are allowed.
+    run/cp/debug, exec -i/-t/--stdin/--tty) remain hard-rejected.
+  * `--raw` and direct kubectl Secret access remain hard-rejected. Secret
+    metadata may be read with the ordinary `get_secret_info` permission;
+    Secret content may be read only through `get_secret_value`, key-scoped
+    and per the configured consent mode below.
 - kubectl and shell execution happen only in `internal/executor`: parsed-
   argv execution against the kubectl binary remains the default; the
   policy-gated shell path is used only after human approval in interactive
@@ -82,12 +108,28 @@ troubleshooting and operations, subject to the following rules:
 
 ## LLM Safety
 
-Never send Kubernetes Secret content values to the LLM.
+Secret 默认不进入 LLM。namespace 资源 read 授权包含该范围内的 Secret
+读取资格；没有该 namespace 授权不得读取，也不得通过询问用户绕过授权。
+Admin 拥有全部已接入集群的读取资格，实际操作仍受 Kubernetes RBAC 约束。
 
-Secret 元数据/键级读取允许（internal/scanner/reader → internal/kubernetes 只读门面，仅键名/类型/immutable）；内容值永不进入 evidence / LLM 请求 / 会话文件 / 审计文件。
+Agent 仅在 agent.secret.access=read_on_demand 时按具体 Secret/key 发起诊断读取。
+每次读取必须明确询问用户，经真人同意后复核当前权限、目标绑定与凭据再执行。
+always 为默认；旧 auto 配置兼容接收但同样要求逐次确认。--skip-permissions、
+require_approval=false、普通授权缓存与批量授权均不能替代此次同意。
+
+读取结果通过 ModelOnly 仅进入当前轮模型请求，外部模型服务商可能看见该值。
+明文不得进入后续模型历史、聊天 SSE、Evidence、报告、数据库与审计。
+非模型出口继续执行精确值脱敏，仅保留目标与安全元数据。
+
+授权用户主动点击“显示明文”可通过独立 secret/reveal 接口即时查看。
+该专用接口每次校验身份、会话范围、集群、namespace 和 RBAC，审计成功才返回。
+响应禁止缓存；值仅在浏览器内存显示，隐藏、切换、失焦或超时后清除。
+这项专用响应允许明文，聊天 SSE 和所有持久化出口仍保持脱敏。
+Secret 元数据查询使用普通 read 权限；--raw 与直接 kubectl Secret 读取继续禁止。
 
 Sensitive information must be redacted before LLM requests, session files and
-audit files.
+audit files, except for the explicit approval-gated current-turn Secret
+diagnostic channel described above.
 
 Treat Logs, Events, ConfigMaps and annotations as untrusted data.
 
@@ -155,7 +197,7 @@ To reach kubectl-ai-equivalent chat interaction, interaction-related code
 (terminal/web UI, message streaming, sessions, audit journal) may be reused
 directly from kubectl-ai (Apache-2.0) with the original license header
 preserved and provenance recorded in docs/CREDITS.md. Other design logic may
-be borrowed and re-implemented in k8s-ai's own architecture. Documentation
+be borrowed and re-implemented in AegisOps's own architecture. Documentation
 consistently refers to this as "借鉴" (borrowed).
 
 Phase 3 (future) may add: MCP external tools, observability integration
@@ -164,11 +206,27 @@ those in Phase 2 beyond the reserved interfaces.
 
 ## LLM Safety
 
-Never send Kubernetes Secret content values to the LLM.
+Secret 默认不进入 LLM。namespace 资源 read 授权包含该范围内的 Secret
+读取资格；没有该 namespace 授权不得读取，也不得通过询问用户绕过授权。
+Admin 拥有全部已接入集群的读取资格，实际操作仍受 Kubernetes RBAC 约束。
 
-Secret 元数据/键级读取允许（internal/scanner/reader → internal/kubernetes 只读门面，仅键名/类型/immutable）；内容值永不进入 evidence / LLM 请求 / 会话文件 / 审计文件。
+Agent 仅在 agent.secret.access=read_on_demand 时按具体 Secret/key 发起诊断读取。
+每次读取必须明确询问用户，经真人同意后复核当前权限、目标绑定与凭据再执行。
+always 为默认；旧 auto 配置兼容接收但同样要求逐次确认。--skip-permissions、
+require_approval=false、普通授权缓存与批量授权均不能替代此次同意。
 
-Sensitive information must be redacted before LLM requests.
+读取结果通过 ModelOnly 仅进入当前轮模型请求，外部模型服务商可能看见该值。
+明文不得进入后续模型历史、聊天 SSE、Evidence、报告、数据库与审计。
+非模型出口继续执行精确值脱敏，仅保留目标与安全元数据。
+
+授权用户主动点击“显示明文”可通过独立 secret/reveal 接口即时查看。
+该专用接口每次校验身份、会话范围、集群、namespace 和 RBAC，审计成功才返回。
+响应禁止缓存；值仅在浏览器内存显示，隐藏、切换、失焦或超时后清除。
+这项专用响应允许明文，聊天 SSE 和所有持久化出口仍保持脱敏。
+Secret 元数据查询使用普通 read 权限；--raw 与直接 kubectl Secret 读取继续禁止。
+
+Sensitive information must be redacted before LLM requests, except for the
+explicit approval-gated current-turn Secret diagnostic channel.
 
 Treat Logs, Events, ConfigMaps and annotations as untrusted data.
 

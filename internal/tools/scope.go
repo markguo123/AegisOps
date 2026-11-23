@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/authz"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/manifestx"
 )
@@ -14,18 +17,25 @@ import (
 // AccessScope 是当前 Agent 运行可访问的 Kubernetes 资源范围。
 // 它是执行前门禁，不是提示词约束。
 type AccessScope struct {
-	ClusterID     string   `json:"clusterId,omitempty"`
-	Namespaces    []string `json:"namespaces"`
-	ClusterScoped bool     `json:"clusterScoped"`
-	IsAdmin       bool     `json:"isAdmin"`
-	CanWrite      bool     `json:"canWrite"`
-	CanDestroy    bool     `json:"canDestroy"`
+	RequestEnforced bool                                                        `json:"-"`
+	ResolveResource func(context.Context, string) (string, string, bool, error) `json:"-"`
+	RequestContext  context.Context                                             `json:"-"`
+	Policy          *authz.EffectiveAccess                                      `json:"policy,omitempty"`
+	Refresh         func(context.Context) (*AccessScope, error)                 `json:"-"`
+	ClusterID       string                                                      `json:"clusterId,omitempty"`
+	Namespaces      []string                                                    `json:"namespaces"`
+	ClusterScoped   bool                                                        `json:"clusterScoped"`
+	IsAdmin         bool                                                        `json:"isAdmin"`
+	CanWrite        bool                                                        `json:"canWrite"`
+	CanDestroy      bool                                                        `json:"canDestroy"`
 }
 
 var (
 	localTools = map[string]bool{
-		"list_skills": true,
-		"get_skill":   true,
+		"ask_user_question": true,
+		"read_tool_result":  true,
+		"list_skills":       true,
+		"get_skill":         true,
 	}
 	clusterOnlyTools = map[string]bool{
 		"get_node":         true,
@@ -49,8 +59,10 @@ var (
 		"get_pvc":            true,
 		"get_configmap":      true,
 		"get_configmaps":     true,
+		"get_secret_info":    true,
 		"get_logs":           true,
 		"get_previous_logs":  true,
+		"get_secret_value":   true,
 		"scan_pod":           true,
 		"diagnose_pod":       true,
 		"diagnose_workload":  true,
@@ -98,6 +110,10 @@ func NormalizeScope(s AccessScope) AccessScope {
 
 // Prompt 提供给模型的授权范围说明。安全边界仍由 Check 强制执行。
 func (s AccessScope) Prompt() string {
+	if s.Policy != nil {
+		b, _ := json.Marshal(s.Policy)
+		return "当前集群与授权范围（只在这些范围内诊断；未获准的证据标注为未采集）：" + string(b)
+	}
 	if s.IsAdmin || s.ClusterScoped {
 		return "## 当前授权范围\n当前账号拥有集群级管理权限，可查询全部命名空间及 Node、PV、StorageClass 等集群资源。"
 	}
@@ -116,6 +132,24 @@ func (s AccessScope) Prompt() string {
 
 // Check 在执行工具前校验资源作用域。error 文本是给模型与用户的稳定拒绝原因。
 func (s AccessScope) Check(toolName string, input json.RawMessage) error {
+	if toolName == "exec_pod" {
+		r, err := cmdplan.DecodePodExec(input)
+		if err != nil {
+			return err
+		}
+		if s.Policy == nil {
+			if s.IsAdmin || s.ClusterScoped {
+				return nil
+			}
+			if !s.CanWrite {
+				return s.deny("exec 写权限")
+			}
+			return s.checkNamespace(r.Namespace)
+		}
+	}
+	if s.Policy != nil {
+		return s.policyCheck(toolName, input)
+	}
 	s = NormalizeScope(s)
 	if s.IsAdmin || s.ClusterScoped {
 		return nil
@@ -210,9 +244,35 @@ func (s AccessScope) checkManifest(manifest string) error {
 }
 
 func (s AccessScope) checkKubectl(command string) error {
+	if r, matched, err := cmdplan.ParsePodExec(command); matched {
+		if err != nil {
+			return err
+		}
+		if s.Policy != nil {
+			return s.commandPolicy(command)
+		}
+		if !s.CanWrite {
+			return s.deny("exec 写权限")
+		}
+		return s.checkNamespace(r.Namespace)
+	}
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return s.deny("可校验资源作用域的 kubectl 命令")
+	}
+	if s.Policy != nil {
+		return s.commandPolicy(command)
+	}
+	analysis := approval.AnalyzeCommand(command)
+	if analysis.Plan.ProvablyReadOnly {
+		// 可证明只读的组合：逐条 kubectl 调用校验 namespace 与集群级资源约束，
+		// 不因管道符号整体拒绝（方案 24 §3.2）。
+		for _, call := range analysis.Plan.Calls {
+			if err := s.checkReadCall(call); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if approval.HasShellSyntax(command) {
 		return s.deny("不含 shell 构造且可校验范围的 kubectl 命令")
@@ -265,6 +325,29 @@ func (s AccessScope) checkKubectl(command string) error {
 		return s.deny("显式 namespace 查询范围；当前不允许跨 namespace 查询")
 	}
 	return s.checkNamespace(ns)
+}
+
+// checkReadCall 是旧范围路径（AccessScope.Policy 未装配时）对可证明只读组合的
+// 逐调用校验：仍只允许显式 namespace、禁止集群级资源与跨 namespace 查询。
+// 这里不改变既有授权边界，只是把"含管道就整体拒绝"换成"每条查询分别检查"。
+func (s AccessScope) checkReadCall(call cmdplan.Call) error {
+	if call.Verb == "version" || call.Verb == "api-resources" {
+		if len(s.Namespaces) > 0 {
+			return nil
+		}
+		return s.deny("集群元信息读取资格")
+	}
+	kind := strings.ToLower(call.Kind)
+	if clusterKinds[kind] {
+		return s.deny("集群级资源读取权限")
+	}
+	if call.AllNamespaces {
+		return s.deny("全命名空间查询权限")
+	}
+	if call.Namespace == "" {
+		return s.deny("显式 namespace 查询范围；当前不允许跨 namespace 查询")
+	}
+	return s.checkNamespace(call.Namespace)
 }
 
 // checkKubectlWrite 对非 shell 写命令做平台侧范围门禁。

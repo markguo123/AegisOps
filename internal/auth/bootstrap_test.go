@@ -7,7 +7,7 @@ import (
 )
 
 // TestBootstrapRequiresPasswordOnlyOnFirstStart 锁 P6.1 / U-09：首启判定以 users 表为准。
-// 空库缺口令必须启动失败；已有库重启不再要求 K8S_AI_ADMIN_PASSWORD。
+// 空库缺口令必须启动失败；已有库重启不再要求 AEGISOPS_ADMIN_PASSWORD。
 func TestBootstrapRequiresPasswordOnlyOnFirstStart(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
@@ -62,7 +62,7 @@ func TestBootstrapReconcilesRoles(t *testing.T) {
 		t.Fatalf("应有 %d 个内置角色, got %d", len(defaultRoles()), len(roles))
 	}
 	for _, r := range roles {
-		if r.Name == RoleOperator {
+		if r.Name == RoleUser {
 			if err := st.Roles().Delete(ctx, r.ID); err != nil {
 				t.Fatalf("delete role: %v", err)
 			}

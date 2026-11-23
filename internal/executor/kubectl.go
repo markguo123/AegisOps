@@ -3,14 +3,55 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/security"
 )
+
+// ErrTargetIsolation 是目标绑定模式下拒绝执行的稳定原因。
+//
+// 多集群平台模式下，人工审批不能替代目标隔离：任意 shell 命令都能通过
+// 环境赋值、--kubeconfig/--context/--server、读取其它配置文件或调用其它程序
+// 改变实际目标。无法证明目标边界的命令必须在构造子进程之前拒绝（P12.2 /
+// 方案 22 §8.1），而不是只设置一个 KUBECONFIG 就当作隔离。
+var ErrTargetIsolation = errors.New("目标绑定模式拒绝该命令")
+
+// targetOverrideFlags 是能改变 kubectl 实际连接目标的参数。目标绑定模式下
+// 即使命令本身是 kubectl argv 也必须拒绝：审批只解决"要不要执行"，不解决
+// "执行到哪个集群"。
+var targetOverrideFlags = map[string]bool{
+	"--kubeconfig": true, "--context": true, "--cluster": true,
+	"--server": true, "--token": true, "--user": true, "--username": true,
+	"--password": true, "--client-certificate": true, "--client-key": true,
+	"--certificate-authority": true, "--insecure-skip-tls-verify": true,
+	"--as": true, "--as-group": true, "--as-uid": true,
+	"--tls-server-name": true,
+}
+
+// validateBoundTargetArgv 拒绝目标覆盖参数。`--` 之后是 exec 的远端命令，
+// 不是 kubectl 参数，扫描到分隔符即停止。
+func validateBoundTargetArgv(argv []string) error {
+	for _, token := range argv {
+		if token == "--" {
+			break
+		}
+		if !strings.HasPrefix(token, "-") || token == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(token, "=")
+		if targetOverrideFlags[name] {
+			return fmt.Errorf("%w：kubectl 参数 %s 会改写实际连接目标；平台会话只能操作服务端绑定的集群", ErrTargetIsolation, name)
+		}
+	}
+	return nil
+}
 
 // defaultStreamTimeout 是流式命令（logs -f / get -w）的默认采样时长。
 // 借鉴 kubectl-ai streaming.go：到时后捕获部分输出并标记 StreamTimeout，不阻塞 Agent Loop。
@@ -26,29 +67,89 @@ const exitShellDisabled = 126
 // shellDisabledHint 是关闭态的可指导文案（D-33/ADR-044 v1.1）。首行会被工具层摘要
 // 取走（tools.extractKubectlSummary），所以第一句必须自带结论与替代动作。
 const shellDisabledHint = "shell 通道已由平台配置关闭（platform.exec.shell_enabled=false）：该实例不提供 bash，" +
-	"含管道 |、串联 &&/;、重定向 >、命令替换 $() 或 heredoc 的命令一律不执行。\n" +
+	"无法编译为安全受控执行计划的 Shell 命令不执行；已验证只读的管道与条件组合仍可使用。\n" +
 	"请改用单条不含 shell 语法的 kubectl 命令（例如 kubectl get pods -A -o json），" +
 	"过滤、统计交给结构化只读工具（scan_cluster / get_pod / get_deployment 等）。\n" +
 	"确实需要 shell 排障能力时，请让管理员改用默认交付镜像（内置 bash 与 kubectl）" +
 	"或把 platform.exec.shell_enabled 置为 true 后重启服务。"
 
 // RunKubectl 执行 kubectl 命令：
-// deny_ops → 安全红线（secret/--raw）→ 解析（argv 或 shell）→ 动词白名单 →
-// exec.Command → 输出截断 + 脱敏。
-// isShell=true（命令含管道/heredoc/重定向等 shell 元字符）时走 bash -c；
-// 否则走 argv 直调二进制（无 shell）。
+// deny_ops → 安全红线（secret/--raw）→ 可证明只读组合走受控 argv 管道 →
+// 解析（argv 或 shell）→ 动词白名单 → exec.Command → 输出截断 + 脱敏。
+// 可证明只读的单命令/组合（含管道、&&/||、;）不走 bash，由 runReadOnlyProgram
+// 逐段直调固定二进制；因此不依赖 bash，也不受 platform.exec.shell_enabled 阻挡。
+// 其余命令仍按二期行为：isShell=true（含无法证明只读的 shell 构造）时走 bash -c，
+// 且只在人工审批通过且本实例 shell 通道开启时才会执行。
 // 流式命令（logs -f / get -w）套固定超时，超时后捕获部分输出，不视为错误。
 func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error) {
 	if approval.IsDenied(r.denyOps, command) {
 		return Result{Command: command}, fmt.Errorf("command denied by deny_ops policy")
 	}
 	// LLM 数据安全红线：Secret 数据永不进入 LLM 上下文（AGENTS.md）。
+	// 拒绝文案必须可指导：指向结构化元数据工具与按需明文通道，而不是让模型换个写法重试。
 	if approval.IsForbiddenCommand(command) {
-		return Result{Command: command}, fmt.Errorf("command forbidden: 禁止通过 Agent 读取 Secret 资源或使用 --raw（敏感数据不进入 LLM 上下文）")
+		return Result{Command: command}, fmt.Errorf("command forbidden: kubectl 不能直接读取 Secret 资源或使用 --raw。" +
+			"Secret 元数据（名称/类型/键名）请用 get_secret_info（普通读取权限）；" +
+			"确需查看明文时用 get_secret_value（按 key、审批或配置授权、仅当前轮模型可见）。" +
+			"敏感数据不进入 LLM 上下文")
 	}
+	if req, matched, err := cmdplan.ParsePodExec(command); matched {
+		if err != nil {
+			return Result{Command: command}, err
+		}
+		return r.ExecPod(ctx, req)
+	}
+	if r.targetBound && r.restConfig != nil {
+		if !r.ProxiedKubectl() {
+			return Result{}, fmt.Errorf("TOOL_UNAVAILABLE: bound kubectl request Authorizer is unavailable")
+		}
+		var cleanup func()
+		var err error
+		ctx, cleanup, err = r.startKubectlProxy(ctx, command)
+		if err != nil {
+			return Result{}, err
+		}
+		defer cleanup()
+	}
+	// 目标前置校验（P12.2）：每次执行前重验用户授权、集群存在性与凭据版本。
+	// 撤权或凭据轮换后，旧命令与旧批准在真正起进程前失效，不再依赖看护周期。
+	if r.targetCheck != nil {
+		if err := r.targetCheck(ctx); err != nil {
+			return Result{Command: command}, fmt.Errorf("%w：%v", ErrTargetIsolation, err)
+		}
+	}
+	// 可证明只读的受控路径（方案 24 §3.2）：执行前重新分析实际命令，
+	// 批准后命令不可替换，且整条组合共用任务超时与输出上限。
+	// 该路径逐段直调固定 argv、不经过 shell，是目标绑定模式下唯一放行的
+	// shell 形状命令。
+	analysis := cmdplan.Analyze(command)
+	if analysis.ProvablyReadOnly && len(analysis.Program.Commands) > 0 {
+		if r.targetBound && r.kubeconfig == "" {
+			return Result{Command: command}, fmt.Errorf("%w：未装配绑定目标的临时凭据", ErrTargetIsolation)
+		}
+		return r.runReadOnlyProgram(ctx, command, analysis.Program)
+	}
+	// 目标绑定模式：无法证明目标边界的 shell 命令一律拒绝，人工审批不放行。
+	// 覆盖重定向、命令替换、变量、awk/sed/xargs、任意解释器、环境赋值等全部
+	// 非受控构造；--context/--kubeconfig/--server 等目标覆盖参数在 argv 路径另判。
 	pc, err := ParseCommandDetail(command)
 	if err != nil {
+		if r.targetBound && analysis.NeedsShell {
+			return Result{Command: command}, fmt.Errorf("%w：无法证明命令目标边界", ErrTargetIsolation)
+		}
 		return Result{Command: command}, err
+	}
+	if r.targetBound {
+		if pc.IsShell {
+			return Result{Command: command}, fmt.Errorf(
+				"%w：该命令需要 shell 解释器，目标无法被证明绑定到当前集群", ErrTargetIsolation)
+		}
+		if r.kubeconfig == "" {
+			return Result{Command: command}, fmt.Errorf("%w：未装配绑定目标的临时凭据", ErrTargetIsolation)
+		}
+		if err := validateBoundTargetArgv(pc.Argv); err != nil {
+			return Result{Command: command}, err
+		}
 	}
 	// shell 策略闸门（P6.3 / D-33）：必须在构造 exec.Cmd 之前拦下。
 	// 无 shell 镜像变体里 bash 不存在，放行只会让模型收到 "bash: executable file
@@ -97,9 +198,15 @@ func (r *Runner) RunKubectl(ctx context.Context, command string) (Result, error)
 	stderr := newCappedBuffer(r.maxBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
-	if r.kubeconfig != "" {
-		cmd.Env = append(cmd.Env, "KUBECONFIG="+r.kubeconfig)
+	if r.targetBound {
+		// 目标绑定：不继承进程环境，只注入绑定的 KUBECONFIG（childEnv 已剔除
+		// 进程里其它 KUBECONFIG 与凭据）。
+		cmd.Env = r.commandEnv(ctx)
+	} else {
+		cmd.Env = os.Environ()
+		if r.kubeconfig != "" {
+			cmd.Env = append(cmd.Env, "KUBECONFIG="+r.kubeconfig)
+		}
 	}
 	runErr := cmd.Run()
 	// 流式超时：捕获已收到的部分输出，标记 StreamTimeout，不视为错误。

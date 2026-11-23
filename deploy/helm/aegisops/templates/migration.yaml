@@ -1,0 +1,47 @@
+{{- if and (eq .Values.database.driver "mysql") (eq .Values.migration.mode "auto") -}}
+{{- $name := include "aegisops.name" . -}}
+# Normal Job: ConfigMap/Secret exist before it runs. A pre-install hook cannot
+# assume normal release resources have already been created.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "aegisops.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.migration.timeoutSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: migrate
+          image: {{ include "aegisops.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [db, migrate, --config, /etc/aegisops/config.yaml]
+          env:
+            - {name: AEGISOPS_PLATFORM_BLOBS_DRIVER, value: "off"}
+            - name: AEGISOPS_PLATFORM_STORE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.database.existingSecret .Values.database.migrationSecret }}
+                  key: dsn
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/aegisops, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: {{ $name }}-config}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

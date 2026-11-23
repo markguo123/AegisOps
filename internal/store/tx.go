@@ -131,10 +131,10 @@ func (t *Tx) InsertReport(ctx context.Context, r *Report) error {
 		r.CreatedAt = time.Now()
 	}
 	_, err := t.tx.ExecContext(ctx, `
-		INSERT INTO reports (id, cluster_id, scan_id, kind, blob_key, media_type, size, sha256, findings, created_by, available, created_at, scope_kind, scope_value)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO reports (id, cluster_id, scan_id, kind, blob_key, media_type, size, sha256, findings, created_by, available, created_at, scope_kind, scope_value,coverage_level)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)`,
 		r.ID, r.ClusterID, r.ScanID, r.Kind, r.BlobKey, r.MediaType, r.Size, r.SHA256,
-		r.Findings, r.CreatedBy, boolInt(r.Available), r.CreatedAt, r.ScopeKind, r.ScopeValue)
+		r.Findings, r.CreatedBy, boolInt(r.Available), r.CreatedAt, r.ScopeKind, r.ScopeValue, r.CoverageLevel)
 	return mapErr(err, "insert report")
 }
 
@@ -165,6 +165,20 @@ func (t *Tx) DeleteReport(ctx context.Context, id, blobKey string) (bool, error)
 		return false, mapErr(err, "delete report rows affected")
 	}
 	return changed > 0, nil
+}
+
+// DeleteReportReference removes a report and releases its blob in one transaction.
+// A report can outlive its object ledger entry after GC has cleared it.
+func (t *Tx) DeleteReportReference(ctx context.Context, id, key string) (deleted, missingReference bool, err error) {
+	deleted, err = t.DeleteReport(ctx, id, key)
+	if err != nil || !deleted {
+		return deleted, false, err
+	}
+	err = t.Release(ctx, key)
+	if errors.Is(err, ErrNotFound) || errors.Is(err, errRefUnderflow) {
+		return true, true, nil
+	}
+	return true, false, err
 }
 
 // Acquire 给对象加一次引用，必须在写下引用它的业务行的同一事务里调用。

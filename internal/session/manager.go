@@ -25,15 +25,18 @@ func (m *Manager) NewSession(id, cluster, namespace, model string) (*Session, er
 
 // NewSessionForUser 创建带所有者的会话；userID 为空时保持 CLI/三期兼容行为。
 func (m *Manager) NewSessionForUser(id, userID, cluster, namespace, model string) (*Session, error) {
+	return m.NewBoundSession(id, userID, cluster, namespace, model, nil)
+}
+func (m *Manager) NewBoundSession(id, userID, cluster, namespace, model string, coverage []byte) (*Session, error) {
 	if id == "" {
 		id = generateID()
 	}
 	now := time.Now()
 	s := &Session{
-		ID:           id,
-		UserID:       userID,
-		Name:         "Session " + id,
-		Cluster:      cluster,
+		ID:      id,
+		UserID:  userID,
+		Name:    "Session " + id,
+		Cluster: cluster, Coverage: coverage,
 		Namespace:    namespace,
 		Model:        model,
 		State:        "idle",

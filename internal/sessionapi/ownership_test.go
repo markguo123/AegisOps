@@ -101,8 +101,8 @@ func TestAuthenticatedSessionListIsolation(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/v1/sessions/bob-s1/rename", `{"name":"admin-renamed"}`, http.StatusOK},
 		{http.MethodPost, "/api/v1/sessions/bob-s1/pin", `{"pinned":true}`, http.StatusOK},
-		{http.MethodPost, "/api/v1/sessions/bob-s1/send-message", `{"query":"admin"}`, http.StatusAccepted},
-		{http.MethodPost, "/api/v1/sessions/bob-s1/approve", `{"choice":"yes"}`, http.StatusConflict},
+		{http.MethodPost, "/api/v1/sessions/bob-s1/send-message", `{"query":"admin"}`, http.StatusForbidden},
+		{http.MethodPost, "/api/v1/sessions/bob-s1/approve", `{"choice":"yes"}`, http.StatusForbidden},
 		{http.MethodPost, "/api/v1/sessions/bob-s1/cancel", `{}`, http.StatusConflict},
 	} {
 		req, err := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))

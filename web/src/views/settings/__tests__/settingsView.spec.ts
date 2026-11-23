@@ -36,6 +36,13 @@ function installFetch(data: Record<string, unknown> = {}): void {
   )
 }
 
+async function mountGenericGroup() {
+  const wrapper = mount(SettingsView)
+  await flushPromises()
+  await wrapper.findAll('.rail-item')[1]!.trigger('click')
+  return wrapper
+}
+
 enableAutoUnmount(afterEach)
 
 describe('SettingsView 布局（P6.13 左 rail + 全宽内容）', () => {
@@ -50,8 +57,22 @@ describe('SettingsView 布局（P6.13 左 rail + 全宽内容）', () => {
     installFetch()
   })
 
+  it('模型主页仅展示全局开关和独立列表', async () => {
+    installFetch({ items: [
+      { key: 'enabled', kind: 'bool', value: true },
+      { key: 'base_url', kind: 'string', value: 'https://example.invalid' },
+      { key: 'model_profiles', sensitive: true },
+    ] })
+    const wrapper = mount(SettingsView, { global: { stubs: { ModelProfiles: true } } })
+    await flushPromises()
+    expect(wrapper.findAll('.field')).toHaveLength(1)
+    expect(wrapper.find('.field').text()).toContain('启用模型调用')
+    expect(wrapper.find('model-profiles-stub').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('获取候选模型')
+  })
+
   it('渲染左右分区，长分组全部字段位于独立内容容器内', async () => {
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ITEMS.length))
 
@@ -67,7 +88,7 @@ describe('SettingsView 布局（P6.13 左 rail + 全宽内容）', () => {
   })
 
   it('每个配置项占满内容区一整行，信息与控件左右分区', async () => {
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ITEMS.length))
 
@@ -80,13 +101,13 @@ describe('SettingsView 布局（P6.13 左 rail + 全宽内容）', () => {
   })
 
   it('切换分组时仍复用同一内容滚动容器', async () => {
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ITEMS.length))
 
     const railItems = wrapper.findAll('.rail-item')
     expect(railItems.length).toBeGreaterThan(1)
-    await railItems[1]!.trigger('click')
+    await railItems[2]!.trigger('click')
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ITEMS.length))
 
@@ -118,7 +139,7 @@ describe('SettingsView 配置控件可读性', () => {
         },
       ],
     })
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(1))
 
@@ -142,12 +163,12 @@ describe('SettingsView 配置控件可读性', () => {
         },
       ],
     })
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(1))
 
     expect(wrapper.find('.encryption-alert').exists()).toBe(true)
-    expect(wrapper.find('.encryption-alert').text()).toContain('K8S_AI_ENC_KEY')
+    expect(wrapper.find('.encryption-alert').text()).toContain('AEGISOPS_ENC_KEY')
     expect(wrapper.find('.field input').attributes('disabled')).toBeDefined()
   })
 
@@ -188,7 +209,7 @@ describe('SettingsView 配置控件可读性', () => {
         },
       ],
     })
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(4))
 
@@ -212,7 +233,7 @@ const ENV_ITEMS = [
     hasValue: true,
     sensitive: true,
     desc: '接口密钥（不回显）',
-    envOverride: 'K8S_AI_LLM_API_KEY',
+    envOverride: 'AEGISOPS_LLM_API_KEY',
     envOverrideTier: 'secret',
   },
   {
@@ -221,7 +242,7 @@ const ENV_ITEMS = [
     value: 'qwen-plus',
     hasValue: true,
     desc: '模型名',
-    envOverride: 'K8S_AI_LLM_MODEL',
+    envOverride: 'AEGISOPS_LLM_MODEL',
     envOverrideTier: 'seed',
   },
   { key: 'namespace', kind: 'string', value: 'default', hasValue: true, desc: '默认命名空间' },
@@ -260,7 +281,7 @@ describe('SettingsView 部署期覆盖态（P6.12 ⑩）', () => {
 
   it('密钥态键显示"部署 Secret 提供"徽标并说明保存不改运行值', async () => {
     installScopedFetch()
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ENV_ITEMS.length))
 
@@ -268,25 +289,25 @@ describe('SettingsView 部署期覆盖态（P6.12 ⑩）', () => {
     const badge = field!.find('.pill.secret')
     expect(badge.exists()).toBe(true)
     expect(badge.text()).toContain('部署 Secret 提供')
-    expect(badge.text()).toContain('K8S_AI_LLM_API_KEY')
+    expect(badge.text()).toContain('AEGISOPS_LLM_API_KEY')
     expect(field!.find('.env-hint.secret').text()).toContain('运行值不变')
   })
 
   it('种子态键显示"部署种子值"徽标并说明保存后以页面为准', async () => {
     installScopedFetch()
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ENV_ITEMS.length))
 
     const field = wrapper.findAll('.field')[1]
     expect(field!.find('.pill.seed').text()).toContain('部署种子值')
-    expect(field!.find('.pill.seed').text()).toContain('K8S_AI_LLM_MODEL')
+    expect(field!.find('.pill.seed').text()).toContain('AEGISOPS_LLM_MODEL')
     expect(field!.find('.env-hint.seed').text()).toContain('以页面配置为准')
   })
 
   it('未被部署变量覆盖的键不显示覆盖徽标', async () => {
     installScopedFetch()
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ENV_ITEMS.length))
 
@@ -297,9 +318,9 @@ describe('SettingsView 部署期覆盖态（P6.12 ⑩）', () => {
 
   it('保存返回 warnings 时以警告收尾，不得报"配置已保存"', async () => {
     installScopedFetch([
-      'namespace 已写入配置库并立即生效：该键此前由部署变量 K8S_AI_NAMESPACE 提供首启种子值，保存后以页面配置为准。',
+      'namespace 已写入配置库并立即生效：该键此前由部署变量 AEGISOPS_NAMESPACE 提供首启种子值，保存后以页面配置为准。',
     ])
-    const wrapper = mount(SettingsView)
+    const wrapper = await mountGenericGroup()
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.findAll('.field')).toHaveLength(ENV_ITEMS.length))
 

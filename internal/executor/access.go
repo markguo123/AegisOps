@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +25,10 @@ func (r *Runner) CanI(ctx context.Context, verb, group, resource, namespace, nam
 				Name:      name,
 			},
 		},
+	}
+	if base, sub, ok := strings.Cut(resource, "/"); ok {
+		review.Spec.ResourceAttributes.Resource = base
+		review.Spec.ResourceAttributes.Subresource = sub
 	}
 	resp, err := r.cs.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
 	if err != nil {

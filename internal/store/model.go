@@ -12,16 +12,31 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/skills"
 )
 
+// 账号来源口径（用户管理列表展示用）：与登录会话 source 同一套词汇，
+// 见 auth.Service.issue。local=只有本地口令，oidc=只有外部身份，
+// local+oidc=本地口令账号已绑定外部身份（两种登录方式都可用）。
+const (
+	UserSourceLocal = "local"
+	UserSourceOIDC  = "oidc"
+	UserSourceBoth  = "local+oidc"
+)
+
 // User 是产品内用户（D-05：仅作用于 Web/API，不进入 CLI）。
 type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	DisplayName  string    `json:"displayName,omitempty"`
-	PasswordHash string    `json:"-"`
-	RoleID       string    `json:"roleId,omitempty"`
-	Status       string    `json:"status,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Username       string    `json:"username"`
+	DisplayName    string    `json:"displayName,omitempty"`
+	PasswordHash   string    `json:"-"`
+	RoleID         string    `json:"roleId,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	Email          string    `json:"email,omitempty"`
+	SessionVersion int64     `json:"-"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	// Source 是账号来源，由 Users().List 与 Users().Get 关联 user_identities 派生：
+	// users 表没有这一列，Create/Update 不写它，GetByUsername（只服务口令登录）也不回填。
+	// 空串表示尚未判定的本地账号，由 auth 层兜底为 UserSourceLocal。
+	Source string `json:"source,omitempty"`
 }
 
 // Role 是产品内角色。Permission 以 JSON 数组存储，业务判定只依赖
@@ -68,14 +83,14 @@ type AuditEvent struct {
 	// 由 EventTypeForAction 或写入方显式设置。
 	EventType string `json:"eventType,omitempty"`
 	// ResourceKind/ResourceName/Operation 描述被操作对象（可空）。
-	ResourceKind   string `json:"resourceKind,omitempty"`
-	ResourceName   string `json:"resourceName,omitempty"`
-	Operation      string `json:"operation,omitempty"`
-	Risk           string `json:"risk,omitempty"`
-	Decision       string `json:"decision,omitempty"`
-	ApprovalID     string `json:"approvalId,omitempty"`
-	GrantID        string `json:"grantId,omitempty"`
-	MatchReason    string `json:"matchReason,omitempty"`
+	ResourceKind     string `json:"resourceKind,omitempty"`
+	ResourceName     string `json:"resourceName,omitempty"`
+	Operation        string `json:"operation,omitempty"`
+	Risk             string `json:"risk,omitempty"`
+	Decision         string `json:"decision,omitempty"`
+	ApprovalID       string `json:"approvalId,omitempty"`
+	GrantID          string `json:"grantId,omitempty"`
+	MatchReason      string `json:"matchReason,omitempty"`
 	ParameterSummary string `json:"parameterSummary,omitempty"`
 	ResultSummary    string `json:"resultSummary,omitempty"`
 	// Status 是结果状态：success | error | pending。
@@ -130,14 +145,24 @@ type Memory struct {
 
 // Cluster 是受管集群（P3.1/D-02：单集群 UI，数据模型预留 cluster_id）。
 type Cluster struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Context   string    `json:"context,omitempty"`
-	Server    string    `json:"server,omitempty"`
-	Version   string    `json:"version,omitempty"`
-	Status    string    `json:"status,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Context string `json:"context,omitempty"`
+	Server  string `json:"server,omitempty"`
+	Version string `json:"version,omitempty"`
+	Status  string `json:"status,omitempty"`
+	// Identity 是集群的稳定身份依据（当前为 kube-system namespace UID，P12.3）。
+	// 旧数据与 RBAC 不允许读取该对象时为空；空身份不能用于原位凭据替换，
+	// 只能重新接入并人工核对。它不参与授权，仅用于证明候选凭据仍指向同一集群；
+	// 完整 UID 不随 API 返回，工作台只暴露“是否已记录”。
+	Identity string `json:"-"`
+	// CheckedAt 是最近一次连测的时间；从未连测时为空。
+	CheckedAt *time.Time `json:"checkedAt,omitempty"`
+	// CheckSummary 是最近一次连测的结论摘要（失败时区分网络/TLS/认证/授权）。
+	// 不保存原始错误，避免把集群地址细节或凭据相关文本带入页面与审计。
+	CheckSummary string    `json:"checkSummary,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // Credential 是与集群分离的凭据记录（P3.1）。Kubeconfig 为加密存储后的值，
@@ -154,16 +179,18 @@ type Credential struct {
 // namespace 是唯一授权边界；Permissions 是被委派的动作集合（["*"] 表示该
 // namespace 全量，["destroy"] 表示销毁类写操作）。JSON 数组字段以字符串落库。
 type AuthzGrant struct {
-	ID            string     `json:"id"`
-	PrincipalType string     `json:"principalType"` // user | group
-	PrincipalID   string     `json:"principalId"`
-	ClusterID     string     `json:"clusterId,omitempty"`
-	Namespaces    string     `json:"namespaces"`              // JSON array
-	Permissions   string     `json:"permissions"`             // JSON array
-	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	CreatedBy     string     `json:"createdBy,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	ID              string     `json:"id"`
+	PrincipalType   string     `json:"principalType"` // user | group
+	PrincipalID     string     `json:"principalId"`
+	ClusterID       string     `json:"clusterId,omitempty"`
+	ScopeType       string     `json:"scopeType"`
+	ResourceProfile string     `json:"resourceProfile"`
+	Namespaces      string     `json:"namespaces"`  // JSON array
+	Permissions     string     `json:"permissions"` // JSON array
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	CreatedBy       string     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 // ApiToken 是产品内用户的持久化 API Token（P3.11）。
@@ -213,18 +240,19 @@ type Attachment struct {
 // CreatedBy 必须由写入方显式带：扫描任务是进程内对象、没有 owner 列可继承，重启后 Web
 // 仍要能按归属列出历史报告。Available 由对账维护，false 时列表可见但下载返回 410。
 type Report struct {
-	ID        string    `json:"id"`
-	ClusterID string    `json:"clusterId,omitempty"`
-	ScanID    string    `json:"scanId,omitempty"`
-	Kind      string    `json:"kind"`
-	BlobKey   string    `json:"-"`
-	MediaType string    `json:"mediaType,omitempty"`
-	Size      int64     `json:"size"`
-	SHA256    string    `json:"sha256"`
-	Findings  int64     `json:"findings"`
-	CreatedBy string    `json:"createdBy,omitempty"`
-	Available bool      `json:"available"`
-	CreatedAt time.Time `json:"createdAt"`
+	CoverageLevel int       `json:"-"`
+	ID            string    `json:"id"`
+	ClusterID     string    `json:"clusterId,omitempty"`
+	ScanID        string    `json:"scanId,omitempty"`
+	Kind          string    `json:"kind"`
+	BlobKey       string    `json:"-"`
+	MediaType     string    `json:"mediaType,omitempty"`
+	Size          int64     `json:"size"`
+	SHA256        string    `json:"sha256"`
+	Findings      int64     `json:"findings"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+	Available     bool      `json:"available"`
+	CreatedAt     time.Time `json:"createdAt"`
 	// ScopeKind / ScopeValue 是体检范围（cluster|namespace|pod 与取值，P8.13）。
 	// 空串表示 v8 之前入库的存量报告，页面显示「未记录」；两者只用于展示与过滤。
 	ScopeKind  string `json:"scopeKind,omitempty"`

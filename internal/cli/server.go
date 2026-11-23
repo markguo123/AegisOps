@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,10 +13,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/auth"
 	"github.com/k8s-ai/k8s-ai/internal/authz"
 	"github.com/k8s-ai/k8s-ai/internal/cluster"
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/k8sgateway"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/server"
 	"github.com/k8s-ai/k8s-ai/internal/service"
@@ -29,6 +32,7 @@ import (
 // 内嵌前端产物。一期 1.2 的最小服务集合保持不变。
 func newServerCmd(deps Dependencies) *cobra.Command {
 	var addr, dbPath string
+	var skipMigrations bool
 	cmd := &cobra.Command{
 		Use:   "server",
 		Short: "Start the platform HTTP server (API + embedded web UI)",
@@ -47,29 +51,29 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			if cmd.Flags().Changed("db") && !cfg.Platform.Store.IsMySQL() {
 				cfg.Platform.Store.SQLitePath = dbPath
 			}
-			st, target, err := openPlatformStore(cfg)
+			st, target, err := openPlatformStoreContext(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = st.Close() }()
-			// 迁移主路径是 k8s-ai db migrate（升级 Job/initContainer，P6.5）；这里是
-			// 幂等兜底，让单机 sqlite 部署一条命令即可启动。
-			if err := st.Migrate(cmd.Context()); err != nil {
-				return fmt.Errorf("migrate store: %w", err)
+			if err := prepareServerStore(cmd.Context(), st, skipMigrations); err != nil {
+				return err
 			}
 			authSvc := auth.New(st.Users(), st.Roles())
-			if err := authSvc.BootstrapWithName(cmd.Context(), cfg.Platform.Auth.AdminUsername, os.Getenv("K8S_AI_ADMIN_PASSWORD")); err != nil {
+			if err := authSvc.BootstrapWithName(cmd.Context(), cfg.Platform.Auth.AdminUsername, os.Getenv("AEGISOPS_ADMIN_PASSWORD")); err != nil {
 				return fmt.Errorf("bootstrap admin: %w", err)
 			}
 			// 四期平台底座：配置中心与系统事件审计由同一 Store 装配（P1.10/P1.11）。
 			auditSvc := service.NewAuditService(st)
 			// P3.1-P3.9：凭据加密密钥只从环境变量读取（P6.12 约定），
-			// 集群与配置中心共用同一 cipher。未配置 K8S_AI_ENC_KEY 时：
+			// 集群与配置中心共用同一 cipher。未配置 AEGISOPS_ENC_KEY 时：
 			// 集群端点返回 501；配置中心包含敏感键的写入整批拒绝（501），
 			// 非敏感配置仍可正常读写，其余平台能力不受影响。
 			var clusterSvc *cluster.Service
+			var providerCipher auth.ProviderCipher
 			var settingsOpts []settings.Option
 			if cipher, err := cluster.NewCipherFromEnv(); err == nil {
+				providerCipher = cipher
 				settingsOpts = append(settingsOpts, settings.WithCipher(cipher))
 				clusterSvc = cluster.New(st.Clusters(), st.Credentials(), cipher,
 					cluster.WithAudit(func(ctx context.Context, e store.AuditEvent) error {
@@ -80,6 +84,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					"reason", err.Error())
 			}
 			settingsSvc := settings.New(st, settingsOpts...)
+			if err := settingsSvc.MigrateModels(cmd.Context(), cfg); err != nil {
+				return fmt.Errorf("迁移模型配置: %w", err)
+			}
 			// P3.5：Skill 平台装配——先写内置种子，再从 Store 重建内存 registry。
 			skillPlat := service.NewSkillPlatform(st.Skills())
 			if err := skillPlat.SeedBuiltins(cmd.Context()); err != nil {
@@ -93,6 +100,8 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			// Chat 会话与平台 API 使用同一认证服务和 Store；会话归属由
 			// sessionapi.AuthenticatedHandler 统一校验。
 			chat := service.NewChatWithStoreAndConfig(cfg, st)
+			diagnosticMemories := service.NewDiagnosticMemories(st, authzSvc)
+			service.BindDiagnosticMemories(chat, diagnosticMemories)
 			if binder, ok := chat.(service.SkillPlatformBinder); ok {
 				binder.SetSkillPlatform(skillPlat)
 			}
@@ -112,17 +121,51 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				return err
 			}
 			defer func() { _ = blobGW.Close() }()
+			if binder, ok := chat.(service.ChatResultStoreBinder); ok && cfg.Platform.Blobs.Enabled() {
+				binder.SetResultStore(blobGW)
+			}
 			if cfg.Platform.Blobs.Enabled() {
 				if binder, ok := scanSvc.(service.ReportArchiveBinder); ok {
 					binder.SetReportArchive(service.NewReportArchiveWriter(st, blobGW))
 				}
 			}
+			platformAccess := &service.PlatformAccess{Grants: authzSvc, Clusters: clusterSvc}
+			platformAccess.Observe = func(ctx context.Context, user, cluster string, record k8sgateway.RequestRecord) error {
+				payload, _ := json.Marshal(map[string]any{"method": record.Method, "path": record.Path, "allowed": record.Allowed, "duration_ms": record.Duration.Milliseconds()})
+				decision := "denied"
+				if record.Allowed {
+					decision = "allowed"
+				}
+				operation := audit.OperationFrom(ctx)
+				return auditSvc.Record(ctx, store.AuditEvent{UserID: user, ClusterID: cluster, SessionID: operation.SessionID, TurnID: operation.TurnID, StepID: operation.StepID, Action: "k8s.access", EventType: "K8S_ACCESS", Operation: record.Method, Decision: decision, Payload: string(payload)})
+			}
+			reports := service.NewReportPlatform(st, blobGW)
+			retentionCtx, stopRetention := context.WithCancel(cmd.Context())
+			retentionDone := make(chan struct{})
+			go func() {
+				defer close(retentionDone)
+				reports.RunReportRetentionScheduler(retentionCtx, logger)
+			}()
+			defer func() {
+				stopRetention()
+				<-retentionDone
+			}()
 			platformHandler := server.NewWithPlatform(scanSvc, authSvc, settingsSvc, auditSvc).
+				WithModelProfiles(func(ctx context.Context) (*config.Config, error) {
+					return settingsSvc.LoadRuntimeConfig(ctx, cfg)
+				}).
+				WithModelChecks(func(ctx context.Context) (*config.Config, error) {
+					return settingsSvc.LoadRuntimeConfig(ctx, cfg)
+				}).
+				WithPlatformAccess(platformAccess).
 				WithClusters(clusterSvc).
 				WithSkills(skillPlat).
 				WithAuthz(authzSvc).
-				WithReports(service.NewReportPlatform(st, blobGW)).
+				WithDiagnosticMemories(diagnosticMemories).
+				WithReports(reports).
 				WithStorage(blobGW).
+				// P4.7：审计中心只读查询面，与写入口共用同一 Store。
+				WithAuditQuery(service.NewAuditQueryService(st)).
 				// P8.13：页面发起体检的连接/模型基线。配置中心是动态键的权威源（D-29，
 				// 口径里 scan 与 chat 同源），解析失败回退静态文件并记 WARN——体检的
 				// 规则结论不依赖模型，不该因为模型配置读不出来就整次发起失败。
@@ -133,16 +176,43 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					} else if err != nil {
 						logger.Warn("scan baseline: runtime config unavailable, falling back to static config file", "error", err)
 					}
-					return scanOptionsFromConfig(base)
+					if base.LLM.ScanModel != "" {
+						if resolved, _, err := service.ResolveConfiguredModel(base, base.LLM.ScanModel); err == nil {
+							base = resolved
+						} else {
+							options := scanOptionsFromConfig(base)
+							options.LLM.Enabled = false
+							return options
+						}
+					}
+					options := scanOptionsFromConfig(base)
+					options.LLM.Enabled = options.LLM.Enabled && base.LLM.ScanModel != ""
+					return options
 				}).
 				WithReadiness(func(ctx context.Context) error { return store.IsReady(ctx, st) }).
 				Handler()
 			// admin 跨用户会话操作（读取/改名/置顶/删除/发消息/审批/取消）统一留痕（U-06）。
 			chatAPI := sessionapi.New(chat, cfg.LLM.Model).
 				WithAudit(auditSvc.Record).
-				WithScopeResolver(sessionapi.AuthzScopeResolver(authzSvc))
+				WithPlatformAccess(platformAccess).
+				// 管理员跨用户列表展示 owner 名称；普通用户列表只含本人，不解析。
+				WithOwnerNames(func(ctx context.Context) (map[string]string, error) {
+					users, err := st.Users().List(ctx)
+					if err != nil {
+						return nil, err
+					}
+					names := make(map[string]string, len(users))
+					for _, u := range users {
+						name := strings.TrimSpace(u.DisplayName)
+						if name == "" {
+							name = u.Username
+						}
+						names[u.ID] = name
+					}
+					return names, nil
+				})
 			sessionHandler := server.CORS(server.DefaultCORS())(
-				server.RequestID(chatAPI.AuthenticatedHandler(authSvc.UserByToken)),
+				server.RequestID(chatAPI.AuthenticatedHandler(authSvc.RecheckToken)),
 			)
 			staticEnabled := cfg.Platform.Server.StaticEnabled
 			if staticEnabled && web.Empty() {
@@ -150,13 +220,39 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 					"hint", "run npm ci && npm run build in web/ before go build")
 			}
 			handler := newRootHandler(platformHandler, sessionHandler, server.NewStaticHandler(web.Dist()), staticEnabled)
+			// 企业 IdP 常用集群自建 CA，镜像的系统信任链不认（platform.auth.oidc_ca_file，
+			// P6 登录网关）。文件读不到就直接起不来：静默回落到系统信任链只会把故障推迟
+			// 到用户点「企业登录」的那一刻，而那时只剩一句「enterprise login unavailable」。
+			var oidcCAPEM []byte
+			if caFile := strings.TrimSpace(cfg.Platform.Auth.OIDCCAFile); caFile != "" {
+				if oidcCAPEM, err = os.ReadFile(caFile); err != nil {
+					return fmt.Errorf("read platform.auth.oidc_ca_file %s: %w", caFile, err)
+				}
+			}
+			if cfg.Platform.Auth.OIDCDisablePKCE {
+				// 关掉 PKCE 是降低安全强度换兼容性，必须在启动日志里留痕，不能让人以为还开着。
+				slog.Warn("OIDC PKCE is disabled by platform.auth.oidc_disable_pkce: authorization code requests are sent without code_challenge; only keep this on for an identity provider that mishandles PKCE")
+			}
+			if cfg.Platform.Auth.OIDCAllowMissingNonce {
+				// 容忍 id_token 缺 nonce 同样是降低安全强度换兼容性，启动日志必须留痕。
+				slog.Warn("OIDC id_token nonce check is relaxed by platform.auth.oidc_allow_missing_nonce: id tokens without a nonce claim are accepted when issued inside the current login transaction; only keep this on for an identity provider that drops the nonce claim")
+			}
+			enterprise, err := auth.NewEnterpriseLogin(cmd.Context(), authSvc, st.Settings(), providerCipher, cfg.Platform.Server.PublicURL, oidcCAPEM, cfg.Platform.Auth.OIDCDisablePKCE, cfg.Platform.Auth.OIDCAllowMissingNonce)
+			if err != nil {
+				return err
+			}
+			browser, err := server.NewBrowserGateway(authSvc, enterprise, auditSvc, cfg.Platform.Server.PublicURL, cfg.Platform.Server.AllowLoopbackHTTP, cfg.Platform.Auth.AllowQuickstartHTTP)
+			if err != nil {
+				return err
+			}
+			handler = server.RequestID(browser.Handler(handler))
 			tls := cfg.Platform.Server.TLS
 			srv := &http.Server{
 				Addr:              listenAddr,
 				Handler:           handler,
 				ReadHeaderTimeout: 10 * time.Second,
 			}
-			logger.Info("k8s-ai server listening",
+			logger.Info("aopsctl server listening",
 				"addr", listenAddr, "store", target, "static_enabled", staticEnabled, "tls", tls.Enabled)
 			errCh := make(chan error, 1)
 			go func() {
@@ -181,8 +277,24 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address override (default from config platform.server.addr, e.g. :8080)")
-	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path override (sqlite driver only; first start reads K8S_AI_ADMIN_PASSWORD)")
+	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path override (sqlite driver only; first start reads AEGISOPS_ADMIN_PASSWORD)")
+	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "Check database readiness without applying migrations (run aopsctl db migrate before starting)")
 	return cmd
+}
+
+// prepareServerStore keeps automatic initialization for direct local starts while
+// allowing deployment jobs to own migrations and server Pods to only check them.
+func prepareServerStore(ctx context.Context, st store.Store, skipMigrations bool) error {
+	if skipMigrations {
+		if err := store.IsReady(ctx, st); err != nil {
+			return fmt.Errorf("database is not ready with --skip-migrations (run aopsctl db migrate first): %w", err)
+		}
+		return nil
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate store: %w", err)
+	}
+	return nil
 }
 
 // newRootHandler 组装顶层路由（P6.11 / D-26）：

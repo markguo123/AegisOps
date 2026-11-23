@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/k8s-ai/k8s-ai/internal/approval"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
 	"github.com/k8s-ai/k8s-ai/internal/executor"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 )
@@ -44,8 +45,8 @@ func NewWriteTools(runner WriteRunner) []Tool {
 // kubectlTool：唯一的写操作工具。
 //
 // 覆盖全部写操作（scale/patch/restart/label/delete/apply/edit…）和读操作（get/list/describe/logs/events）。
-// 读命令（get/describe/list/logs/events，且不含 shell 语法）自动执行；
-// 写命令及所有含 shell 语法的命令必须走人工审批。
+// 可证明只读的单命令/组合（含受控管道与 &&/||/;）自动执行；
+// 写命令及未证明只读的 shell 构造必须走人工审批。
 // 禁止：交互式命令（edit/attach/port-forward/proxy/run/cp/debug）、读取 Secret 资源、--raw 参数。
 type kubectlTool struct{ runner WriteRunner }
 
@@ -64,13 +65,24 @@ func (t *kubectlTool) CheckClusterAccess(ctx context.Context, input json.RawMess
 	if target.Operation == "" || target.Kind == "" {
 		return nil
 	}
-	group, resource, ok := kubectlResourceForKind(target.Kind)
-	if !ok {
-		return nil
-	}
 	checker, ok := t.runner.(interface {
 		CanI(context.Context, string, string, string, string, string) (bool, error)
 	})
+	if !ok {
+		return nil
+	}
+	if target.Operation == "exec" {
+		group, resource, verb := "", "pods/exec", "create"
+		allowed, err := checker.CanI(ctx, verb, group, resource, target.Namespace, target.Name)
+		if err != nil {
+			return nil
+		}
+		if !allowed {
+			return fmt.Errorf("RBAC_DENIED: 当前执行身份不能在 namespace %q 对 Pod %q 执行非交互 exec", target.Namespace, target.Name)
+		}
+		return nil
+	}
+	group, resource, ok := kubectlResourceForKind(target.Kind)
 	if !ok {
 		return nil
 	}
@@ -95,7 +107,19 @@ func (t *kubectlTool) CheckClusterAccess(ctx context.Context, input json.RawMess
 
 func kubectlResourceForKind(kind string) (group, resource string, ok bool) {
 	switch strings.ToLower(kind) {
-	case "deployment", "deployments":
+	case "events", "event", "ev":
+		return "", "events", true
+	case "endpoints", "ep":
+		return "", "endpoints", true
+	case "endpointslice", "endpointslices":
+		return "discovery.k8s.io", "endpointslices", true
+	case "storageclass", "storageclasses", "sc":
+		return "storage.k8s.io", "storageclasses", true
+	case "horizontalpodautoscaler", "horizontalpodautoscalers", "hpa":
+		return "autoscaling", "horizontalpodautoscalers", true
+	case "poddisruptionbudget", "poddisruptionbudgets", "pdb":
+		return "policy", "poddisruptionbudgets", true
+	case "deployment", "deployments", "deploy":
 		return "apps", "deployments", true
 	case "statefulset", "statefulsets":
 		return "apps", "statefulsets", true
@@ -132,15 +156,19 @@ func kubectlResourceForKind(kind string) (group, resource string, ok bool) {
 	}
 }
 
-// SchemaMetadata 说明 kubectl 工具的读写/风险动态性：命令是否只读取决于具体命令，
-// 写命令及所有含 shell 构造的命令都必须走人工审批。
+// SchemaMetadata 说明 kubectl 工具的读写/风险动态性：命令是否只读取决于具体命令。
+// 可证明只读的单命令/组合（含管道 |、&&/||、; 与受控过滤器 grep/head/tail/sort/
+// uniq/wc/cut/tr/jq）自动执行；写命令及未证明只读的 shell 构造必须走人工审批。
 func (t *kubectlTool) SchemaMetadata() string {
-	return "[READ/WRITE][RISK: DEPENDS ON COMMAND][APPROVAL REQUIRED FOR WRITE OR SHELL]"
+	return "[READ/WRITE][RISK: DEPENDS ON COMMAND][APPROVAL REQUIRED FOR WRITE OR UNPROVEN SHELL]"
 }
 
 func (t *kubectlTool) Name() string { return "kubectl" }
 func (t *kubectlTool) Description() string {
-	return "执行 kubectl 命令。支持 shell 构造（pipe |、heredoc <<EOF、redirect >、&& / ||、command substitution $() 等）。\n只读命令（get/describe/list/logs/events，且不含 shell 语法）自动执行；写命令及所有含 shell 语法的命令必须走人工审批。\n禁止：交互式命令（edit/attach/port-forward/proxy/run/cp/debug）、读取 Secret 资源、--raw 参数。\n流式命令（logs -f/get -w）以固定超时采样部分输出。输出自动脱敏并截断。\n写命令安全红线（务必遵守）：(1) delete/删除类操作永远是最后选择，PVC/PV/Deployment/StatefulSet/Service/Namespace 的删除必须先给出更小范围的 patch/annotate/rollout 替代方案并征得用户同意，特别是 PVC 绑定失败必须先 patch storageClassName，只有被 immutable 拒绝+用户明确同意的情况下才允许提出 delete pvc；(2) 任何 delete pvc / delete pv / delete namespace 这种 CRITICAL 级别的删除，必须在同一个回答里同时列出 patch 替代方案给用户选择，不能只提删除。"
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() {
+		return "执行绑定集群的 kubectl argv 命令。资源和 namespace 权限由统一 Authorizer 对实际 API 请求校验。支持 set image、label、annotate、scale、patch、rollout 等现有资源变更，无须转换为 patch；变更逐次真人审批。可证明只读查询及受控 grep/head/tail/jq 管道自动执行。禁止真实 Shell、解释器、插件、本地文件/URL输入、目标/身份覆盖和直接 Secret 访问。创建使用 create_resource 提案通道，exec 优先使用 exec_pod；exec 每次真人确认。命令描述不表示当前用户有权。遇权限拒绝停止同义重试；未知执行结果不得重复写入。"
+	}
+	return "执行 kubectl 命令。支持 shell 构造（pipe |、heredoc <<EOF、redirect >、&& / ||、command substitution $() 等）。\n只读命令自动执行：单条 get/describe/logs/events/top/explain 与可证明只读的组合（kubectl get po -A | grep mysql、kubectl get pods -n team-a | grep -E 'mysql|redis' | head -n 20、kubectl get pods -n team -o json | jq -r '.items[].metadata.name'、以及 &&/||/; 连接的多条只读查询）无需审批；组合内允许的过滤器只有 grep、head、tail、sort、uniq、wc、cut、tr、jq，且参数受限、只处理管道输入。\n写命令及未证明只读的 shell 构造必须走人工审批：awk、sed、xargs、解释器、curl/wget、重定向、命令替换、环境赋值、后台任务与未知参数都不会自动执行。\n非交互 exec 仅允许 `kubectl exec <pod> -n <ns> -- <command>`，且每次必须真人审批；-i/-t/--stdin/--tty 禁止。\n禁止：edit/attach/port-forward/proxy/run/cp/debug、读取 Secret 资源、--raw 参数。Secret 元数据用 get_secret_info，明文诊断只用 get_secret_value。\n流式命令（logs -f/get -w）以固定超时采样部分输出。输出自动脱敏并截断。\n写命令安全红线（务必遵守）：(1) delete/删除类操作永远是最后选择，PVC/PV/Deployment/StatefulSet/Service/Namespace 的删除必须先给出更小范围的 patch/annotate/rollout 替代方案并征得用户同意，特别是 PVC 绑定失败必须先 patch storageClassName，只有被 immutable 拒绝+用户明确同意的情况下才允许提出 delete pvc；(2) 任何 delete pvc / delete pv / delete namespace 这种 CRITICAL 级别的删除，必须在同一个回答里同时列出 patch 替代方案给用户选择，不能只提删除。"
 }
 func (t *kubectlTool) InputSchema() any {
 	return objSchema(map[string]any{
@@ -167,7 +195,7 @@ func (t *kubectlTool) Execute(ctx context.Context, input json.RawMessage) (ToolR
 				Truncated: true,
 			}, nil
 		}
-		return ResultError("kubectl: " + msg), nil
+		return ExecutionError(err), nil
 	}
 	return ToolResult{
 		Text: extractKubectlSummary(res),
@@ -197,12 +225,33 @@ func (t *kubectlTool) Risk(input json.RawMessage) model.RiskLevel {
 	if err != nil {
 		return model.RiskCritical
 	}
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() && !approval.IsReadOnlyCommand(args["command"]) {
+		return model.RiskHigh
+	}
 	return approval.ClassifyCommand(args["command"])
+}
+
+func (t *kubectlTool) RequiresHumanApproval(input json.RawMessage) bool {
+	args, err := ParseArgs(input, "command")
+	if err != nil {
+		return false
+	}
+	if runner, ok := t.runner.(interface{ ProxiedKubectl() bool }); ok && runner.ProxiedKubectl() && !approval.IsReadOnlyCommand(args["command"]) {
+		return true
+	}
+	if _, matched, _ := cmdplan.ParsePodExec(args["command"]); matched {
+		return true
+	}
+	return approval.ParseCommandTarget(args["command"]).Operation == "exec"
 }
 
 // extractKubectlSummary 从 executor.Result 中提取给 LLM 和前端的一行摘要文本。
 // 成功时：取 Stdout 前 200 字符（去除空行）；失败时：拼接 ExitCode + Stderr。
+// 过滤阶段无匹配（grep 退出码 1）单独给出清晰结论，不能被当成查询失败。
 func extractKubectlSummary(res executor.Result) string {
+	if res.NoMatch {
+		return "无匹配：过滤阶段没有命中任何行（查询本身成功，不是集群故障）"
+	}
 	if res.ExitCode != 0 {
 		if res.Stderr != "" {
 			return "exit=" + itoa(res.ExitCode) + " stderr: " + firstLine(res.Stderr)

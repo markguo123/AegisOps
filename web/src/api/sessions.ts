@@ -6,10 +6,14 @@
  */
 
 import type { AgentToken } from './sse'
-import { readToken } from './request'
+import { addCsrfHeader } from './request'
 
 /** 列表项，与服务端 handleListSessions 返回字段一一对应。 */
 export interface SessionSummary {
+  clusterId?:string
+  ownerId?:string
+  /** 管理员跨用户列表时的 owner 展示名；缺失时用 ownerId 兜底。 */
+  ownerName?:string
   id: string
   name: string
   state: string
@@ -37,6 +41,11 @@ export interface ChatMessage {
   displayType?: string
   durationMs?: number
   risk?: string
+  command?: string
+  stdout?: string
+  stderr?: string
+  exitCode?: number
+  errorCode?: string
   content: string
   timestamp: string
 }
@@ -64,10 +73,7 @@ async function sessionFetch<T>(url: string, init: RequestInit = {}): Promise<T> 
   }
   // 会话端点在四期平台进程下同样受鉴权保护：带 Bearer 令牌，
   // 三期 webui（无鉴权）会忽略该头，行为不变。
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+  if (init.method && init.method !== 'GET') addCsrfHeader(headers)
   const response = await fetch(url, { ...init, headers })
   const text = await response.text()
   let data: unknown = null
@@ -96,7 +102,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 }
 
 /** 创建新会话；若传 id 则等同“恢复/获取”该会话。 */
-export async function createSession(payload: { id?: string; name?: string } = {}): Promise<SessionDetail> {
+export async function createSession(payload: { id?: string; name?: string; clusterId?:string } = {}): Promise<SessionDetail> {
   return sessionFetch<SessionDetail>('/api/v1/sessions', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -121,40 +127,103 @@ export async function pinSession(
   )
 }
 
-/** 发起一轮 Chat（webui `POST /api/v1/sessions/{id}/send-message`），SSE 流随后推送事件。
- * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。 */
+/** 发起一轮 Chat（`POST /api/v1/sessions/{id}/send-message`），SSE 流随后推送事件。
+ * Web 端不暴露 skipPermissions；审批跳过只能由部署侧自动化能力配置。
+ * `idempotencyKey` 用于网络重试时复用同一个 turn，不创建第二轮。 */
+export function listChatModels() {
+  return sessionFetch<Array<{ id: string; name?: string; context_window: number }>>('/api/v1/sessions/models')
+}
+
+export interface BranchOrigin {
+  sessionId: string
+  turnId: string
+}
+
+export function getBranchOrigin(id: string) {
+  return sessionFetch<BranchOrigin | null>(`/api/v1/sessions/${encodeURIComponent(id)}/branch`)
+}
+
+export function branchSession(id: string, turnId: string, requestKey: string) {
+  return sessionFetch<{ sessionId: string }>(`/api/v1/sessions/${encodeURIComponent(id)}/branch`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': requestKey },
+    body: JSON.stringify({ turnId }),
+  })
+}
+
 export async function sendMessage(
   id: string,
-  payload: { query: string; skills?: string[] },
-): Promise<{ sessionId: string }> {
+  payload: { query: string; skills?: string[]; idempotencyKey?: string; modelId?: string },
+): Promise<{ sessionId: string; turnId?: string; protocolVersion?: number; duplicate?: boolean }> {
   const body: Record<string, unknown> = { query: payload.query }
+  if (payload.modelId) body.modelId = payload.modelId
   // P3.8.4：显式 @skill 指定的名称只在非空时随请求提交，后端强校验。
   if (payload.skills && payload.skills.length > 0) {
     body.skills = payload.skills
   }
-  return sessionFetch<{ sessionId: string }>(
+  const headers: HeadersInit = {}
+  if (payload.idempotencyKey) {
+    ;(headers as Record<string, string>)['Idempotency-Key'] = payload.idempotencyKey
+  }
+  return sessionFetch<{ sessionId: string; turnId?: string; protocolVersion?: number; duplicate?: boolean }>(
     `/api/v1/sessions/${encodeURIComponent(id)}/send-message`,
-    { method: 'POST', body: JSON.stringify(body) },
+    { method: 'POST', body: JSON.stringify(body), headers },
   )
 }
 
 /** 取消当前会话正在执行的 Chat 运行。 */
-export async function cancelRun(id: string): Promise<{ sessionId: string }> {
+export async function cancelRun(id: string, signal?: AbortSignal): Promise<{ sessionId: string }> {
   return sessionFetch<{ sessionId: string }>(`/api/v1/sessions/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
+    signal,
   })
 }
 
 /** 回传审批选择（webui `POST /api/v1/sessions/{id}/approve`）。choice 不写回响应体。 */
-export async function approveRun(id: string, choice: string): Promise<{ sessionId: string }> {
+export async function approveRun(id: string, choice: string, approvalId?:string, expectedRevision?: number): Promise<{ sessionId: string }> {
   return sessionFetch<{ sessionId: string }>(
     `/api/v1/sessions/${encodeURIComponent(id)}/approve`,
-    { method: 'POST', body: JSON.stringify({ choice }) },
+    { method: 'POST', body: JSON.stringify({ choice,approvalId, expectedRevision }) },
   )
 }
 
 export async function deleteSession(id: string): Promise<{ deleted: string }> {
   return sessionFetch<{ deleted: string }>(`/api/v1/sessions/${encodeURIComponent(id)}`, {
     method: 'DELETE',
+  })
+}
+
+/** 历史工具结果中的问题记录（只读回放，不再用于轮询）。 */
+export interface UserQuestion {
+  id: string
+  session_id: string
+  turn_id: string
+  question: string
+  options: { id: string; label: string; impact: string; recommended?: boolean }[]
+  expires_at: string
+}
+
+/** 从规范 Interaction 提交结构化回答（问题卡与审批卡走各自既有端点）。 */
+export function answerInteraction(
+  sessionId: string,
+  payload: { interactionId: string; turnId: string; status: string; optionId?: string; text?: string },
+): Promise<unknown> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/question`, {
+    method: 'POST',
+    body: JSON.stringify({
+      id: payload.interactionId,
+      session_id: sessionId,
+      turn_id: payload.turnId,
+      status: payload.status,
+      option_id: payload.optionId,
+      text: payload.text,
+    }),
+  })
+}
+
+/** Values are ephemeral and must never be written to the Chat store. */
+export function revealSecret(sessionId: string, target: { namespace: string; name: string; keys: string[] }, signal: AbortSignal): Promise<{ values: Record<string, { value: string; encoding: string }> }> {
+  return sessionFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/secret/reveal`, {
+    method: 'POST', body: JSON.stringify(target), signal, cache: 'no-store',
   })
 }

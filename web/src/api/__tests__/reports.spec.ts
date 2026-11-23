@@ -109,7 +109,7 @@ describe('reports API（P8.11）', () => {
 
     expect(urlOf(fetchMock)).toBe('/api/v1/reports/r1/content?mode=stream')
     const [, init] = fetchMock.mock.calls[0]
-    expect((init.headers as Headers).get('Authorization')).toBe('Bearer tok-demo')
+    expect((init.headers as Headers).get('Authorization')).toBeNull()
     expect(filename).toBe('report-r1-latest-md.md')
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(click).toHaveBeenCalledTimes(1)

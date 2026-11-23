@@ -72,7 +72,7 @@ func (f *reportFixture) waitScan(t *testing.T, token, id string) {
 // 事件与日志，超出 namespace 授权的表达力，operator 有 scan.execute 也不能扫全集群。
 func TestScanClusterScopeRequiresAdmin(t *testing.T) {
 	f := newReportFixture(t, nil)
-	operator := f.userToken(t, "op-cluster", "operator")
+	operator := f.userToken(t, "op-cluster", "user")
 	f.grantNamespaces(t, "u-op-cluster", "app")
 
 	status, _, raw := f.req(t, http.MethodPost, "/api/v1/scans", operator, `{"scope":"cluster"}`)
@@ -97,7 +97,7 @@ func TestScanClusterScopeRequiresAdmin(t *testing.T) {
 // 越权点名拒绝且**不静默裁剪**成已授权子集。
 func TestScanNamespaceScopeRequiresGrant(t *testing.T) {
 	f := newReportFixture(t, nil)
-	operator := f.userToken(t, "op-ns", "operator")
+	operator := f.userToken(t, "op-ns", "user")
 	f.grantNamespaces(t, "u-op-ns", "app")
 
 	status, _, raw := f.req(t, http.MethodPost, "/api/v1/scans", operator,
@@ -146,7 +146,7 @@ func TestScanNamespaceScopeRequiresGrant(t *testing.T) {
 // 哪份是最新的；另一种格式由 /reports/{id}/export 按需渲染。
 func TestScanFormatChoosesSingleArtifact(t *testing.T) {
 	f := newReportFixture(t, nil)
-	operator := f.userToken(t, "op-fmt", "operator")
+	operator := f.userToken(t, "op-fmt", "user")
 	f.grantNamespaces(t, "u-op-fmt", "app")
 
 	status, id := f.postScan(t, operator, `{"scope":"namespace","namespace":"app","format":"markdown"}`)
@@ -171,14 +171,14 @@ func TestScanScopeValidation(t *testing.T) {
 	f := newReportFixture(t, nil)
 	admin := f.adminToken(t)
 	cases := map[string]string{
-		"scope 缺失":         `{"namespace":"app"}`,
-		"scope 野值":         `{"scope":"project","namespace":"app"}`,
-		"namespace 缺失":     `{"scope":"namespace"}`,
+		"scope 缺失":        `{"namespace":"app"}`,
+		"scope 野值":        `{"scope":"project","namespace":"app"}`,
+		"namespace 缺失":    `{"scope":"namespace"}`,
 		"pod 缺 pod":       `{"scope":"pod","namespace":"app"}`,
 		"pod 缺 namespace": `{"scope":"pod","pod":"web-0"}`,
-		"preset 野值":        `{"scope":"namespace","namespace":"app","preset":"ultra"}`,
+		"preset 野值":       `{"scope":"namespace","namespace":"app","preset":"ultra"}`,
 		"format 野值":       `{"scope":"namespace","namespace":"app","format":"yaml"}`,
-		"clusterId 未接入":    `{"scope":"namespace","namespace":"app","clusterId":"c-prod"}`,
+		"clusterId 未接入":   `{"scope":"namespace","namespace":"app","clusterId":"c-prod"}`,
 	}
 	for name, body := range cases {
 		status, _, raw := f.req(t, http.MethodPost, "/api/v1/scans", admin, body)
@@ -192,8 +192,8 @@ func TestScanScopeValidation(t *testing.T) {
 // 且"别人的任务"与"不存在"同形，job id 不成为存在性探测面。
 func TestScanJobOwnerIsolation(t *testing.T) {
 	f := newReportFixture(t, nil)
-	operator := f.userToken(t, "op-owner", "operator")
-	other := f.userToken(t, "op-other", "operator")
+	operator := f.userToken(t, "op-owner", "user")
+	other := f.userToken(t, "op-other", "user")
 	f.grantNamespaces(t, "u-op-owner", "app")
 	f.grantNamespaces(t, "u-op-other", "app")
 

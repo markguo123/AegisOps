@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,10 @@ import (
 // 单机与离线兜底，此时 sqlite_path 必须落在持久卷上。产品不会 CREATE DATABASE，
 // 库与字符集由 DBA 预建。返回的 target 是可直接写日志的安全摘要（不含口令）。
 func openPlatformStore(cfg *config.Config) (store.Store, string, error) {
+	return openPlatformStoreContext(context.Background(), cfg)
+}
+
+func openPlatformStoreContext(ctx context.Context, cfg *config.Config) (store.Store, string, error) {
 	if cfg == nil {
 		return nil, "", fmt.Errorf("config not loaded")
 	}
@@ -26,7 +31,7 @@ func openPlatformStore(cfg *config.Config) (store.Store, string, error) {
 	if sc.IsMySQL() {
 		// 先算安全目标再连接：连接失败时错误也要能指名目标库，且不带口令。
 		target := mysqlTarget(sc.DSN)
-		st, err := store.OpenMySQL(sc.DSN, limit)
+		st, err := store.OpenMySQLContext(ctx, sc.DSN, limit)
 		if err != nil {
 			return nil, "", fmt.Errorf("open store %s: %w", target, err)
 		}

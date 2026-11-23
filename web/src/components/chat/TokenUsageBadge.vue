@@ -9,8 +9,6 @@ import { formatTokenCount } from '@/utils/format'
  * - 会话级累计：打开历史会话时来自落库 Turn 汇总（刷新/重开仍可读），
  *   运行中随 `turn.completed` 的 token 事件累加；
  * 仅展示计数，不含任何敏感数据（对齐 §5.5）。
- *
- * P7.6：由「右下角浮标」改为聊天头部内的常规胶囊 —— 固定定位会正好压在发送按钮上。
  */
 
 const props = withDefaults(

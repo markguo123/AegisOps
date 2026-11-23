@@ -1,13 +1,34 @@
-# k8s-ai
+# AegisOps
+
+> 云原生智能工作台 · 运维伴侣
 
 > 当前版本：**v4.0.0-dev**（四期企业平台；版本约定见 [docs/VERSIONING.md](docs/VERSIONING.md)，变更见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）
 
 企业级 Kubernetes AI 巡检、诊断、对话与受控运维平台。平台统一提供用户身份、会话隔离、
 namespace 授权、Agent Runtime、Skill、审批、审计、配置与 Web 工作台。
 
+## 安装与快速体验
+
+将源码拉到部署端，在项目根目录执行：
+
+```bash
+bash deploy/install.sh
+```
+
+脚本使用**当前检出的源码**构建镜像并部署：minimal（内嵌 Web）、SQLite、本地文件、NodePort 与体验 HTTP 登录兼容、自动生成并复用管理员口令与加密密钥；有默认 StorageClass 自动建 PVC，无默认存储类明确警告并使用临时卷（Pod 重建会丢失数据库及页面配置）。模型、集群和 OIDC 登录后在页面配置。交互终端显示首次初始化口令，非交互运行只给出受限 Secret 领取命令。
+
+镜像分发必须闭环：kind/k3d 集群自动把本地镜像载入集群；普通远程/多节点集群必须把镜像推送到节点可达的仓库（`--IMAGE=<仓库地址>/aegisops --PUSH=true`），部署端 Docker 缓存不会自动对集群可见。缺少构建工具、Helm、kubectl 或分发条件时，脚本在部署前明确退出。脚本必须从完整源码检出运行，不支持单独 `curl | bash`。
+
+生产推荐用户自备 MySQL、S3 兼容对象存储和 HTTPS；两种入口使用同一应用 Helm 模板：
+
+- 脚本：复制 `deploy/install.env.example` 为 `install.env`，把 `IMAGE` 改成你的仓库并填写固定 `TAG`，执行 `bash deploy/install.sh --env-file install.env --yes`（默认 `BUILD=true PUSH=true`，即现场构建并推送镜像；已有 CI 镜像时设 `BUILD=false`）。
+- Helm：按 [Chart 安装说明](deploy/helm/aegisops/README.md) 编辑普通 `values.yaml` 后原生安装，无需项目脚本。
+
+快速体验的 HTTP 登录兼容显式启用，生产默认保留 Secure Cookie。安装不会创建 Kubernetes 集群，也不会自动导入当前 kubeconfig。
+
 ## 项目介绍
 
-k8s-ai 让运维人员执行一次 `k8s-ai scan`，就能快速知道集群哪里有问题、为什么、影响什么、应该怎么排查和怎么修：
+AegisOps 让运维人员执行一次 `aopsctl scan`，就能快速知道集群哪里有问题、为什么、影响什么、应该怎么排查和怎么修：
 
 - **全集群巡检**：Pod / Node / Workload / Storage / Network / 系统组件 / Events
 - **异常自动发现**：35 条内置规则（原有 23 条 + 新增 HPA 副本不匹配/目标缺失、PDB 阻断、RBAC 越权、ConfigRef 缺失、CronJob 挂起、默认拒绝网络策略、Ingress 主机冲突、超副本、存储卷挂载卡住、StorageClass 无 Provisioner、容器健康超时等 12 条）
@@ -15,17 +36,17 @@ k8s-ai 让运维人员执行一次 `k8s-ai scan`，就能快速知道集群哪�
 - **LLM 诊断**：OpenAI 兼容接口（OpenAI / Qwen / DeepSeek / vLLM / Ollama），输出根因、影响、排查/修复/验证命令（只展示，不执行）
 - **报告**：Markdown + JSON（latest / 时间戳 / 终端一屏摘要），健康评分
 
-**安全边界**：只读操作自动执行；写操作（patch/scale/restart/delete/apply 等）必须人工确认；LLM 不是权限主体，真实边界来自 Kubernetes RBAC；shell 构造（pipe/heredoc/redirect）允许在 chat 模式使用，但含写操作的 shell 命令必须走人工审批，shell 命令永不自动执行。
+**安全边界**：只读操作自动执行（含可证明只读的命令组合，如 `kubectl get po -A | grep mysql`）；写操作（patch/scale/restart/delete/apply 等）必须人工确认；LLM 不是权限主体，真实边界来自 Kubernetes RBAC；未能证明只读的 shell 构造（heredoc/redirect/awk/解释器）允许在 chat 模式使用，但必须走人工审批且不被 `--skip-permissions` 免除。
 
 ## chat / web（自然语言 Agent）
 
 ```bash
 # 终端对话（交互 / 单发 / stdin / JSON）
-k8s-ai chat "为什么 payment-api 一直重启？"
-k8s-ai chat --format json "检查下集群健康状态"
+aopsctl chat "为什么 payment-api 一直重启？"
+aopsctl chat --format json "检查下集群健康状态"
 
 # 企业平台（认证 + 会话 + SSE + 审批 + 配置 + 用户权限）
-K8S_AI_ADMIN_PASSWORD='你的强密码' k8s-ai server --addr 127.0.0.1:8080
+AEGISOPS_ADMIN_PASSWORD='你的强密码' aopsctl server --addr 127.0.0.1:8080
 
 # 前端开发
 cd web && npm run dev
@@ -35,35 +56,39 @@ cd web && npm run dev
 
 - **流式输出**：`llm.stream: true` 开启 SSE 流式处理；工具前保留简短进度说明，工具调用与结果分阶段展示，最终报告在工具完成后输出；流式失败自动降级为非流式（兼容不支持 stream 的网关）
 - **Web 流程时间线**：同一轮对话中的思考、工具执行、最终结论按竖向时间线展示，过程状态更清晰；分析期间可点击发送区右侧停止按钮中断 Agent 本轮运行
-- **Agent 工具集**：20 个只读工具（Pod/Node/Workload/存储/网络/Events/日志/ConfigMap/节点资源用量 + 5 个诊断工具 scan*cluster/diagnose*\*，复用一期 Scanner/规则/诊断）+ **1 个写工具**（kubectl，唯一入口：LLM 生成完整命令字符串，含 shell 构造走 `bash -c`，无 shell 走 argv 直调）
+- **Agent 工具集**：只读工具（Pod/Node/Workload/存储/网络/Events/日志/ConfigMap/节点资源用量/Secret 元数据 `get_secret_info` + 5 个诊断工具 scan*cluster/diagnose*\*，复用一期 Scanner/规则/诊断）+ **1 个写工具**（kubectl，唯一入口：LLM 生成完整命令字符串，可证明只读的组合由受控 argv 管道执行，其余 shell 构造走 `bash -c`）
 - **四层意图决策树**：诊断意图→kubectl -o yaml+previous logs+events；浏览意图→结构化摘要工具；ns 级健康→scan_cluster(namespace=X)；集群全景→scan_cluster()+健康检查协议。读操作全走结构化工具；写操作只有 kubectl 一条路径，LLM 生成完整命令（含 shell 构造），统一走审批
 - **集群健康检查**：节点 → 资源使用（metrics API）→ 命名空间 → Pod → 系统组件 → 警告事件 → 规则评分 + LLM 综合评分双轨
 - **批量审批**：LLM 一轮返回多个写操作时，合并为一次审批面板（逐条展示等效 kubectl 命令 + 风险等级），用户选一次→顺序执行→分别回传结果。借鉴 kubectl-ai
 - **安全执行闭环**：诊断 → 询问"需要我修复吗？" → 用户同意 → 写操作审批卡片（等效 kubectl 命令 + 变更说明 + 风险等级）→ 执行 → 验证
 - **拒绝闸门**：同一写操作被用户拒绝 2 次后自动硬拦截，要求 LLM 给出替代方案；kubectl 命令归一化（忽略 --force/--grace-period 等修饰性 flag），防止绕过
-- **会话持久化**：`--session` / `--new-session` / `--list-sessions` / `--delete-session`，落盘 `~/.k8s-ai/sessions`
-- **审计**：用户输入 / LLM / 工具调用 / 审批 / 执行全部留痕 `~/.k8s-ai/audit/<session>.jsonl`（脱敏）
+- **会话持久化**：`--session` / `--new-session` / `--list-sessions` / `--delete-session`，落盘 `~/.aegisops/sessions`
+- **审计**：用户输入 / LLM / 工具调用 / 审批 / 执行全部留痕 `~/.aegisops/audit/<session>.jsonl`（脱敏）
 - **MCP 预留**：Client 接口 + 注册表适配器（当前版本不连接外部服务器）
 
-> 写权限示例见 [deploy/rbac-write.example.yaml](deploy/rbac-write.example.yaml)（默认 clusterrole 保持只读）；安装部署见 [docs/INSTALLATION.md](docs/INSTALLATION.md)。
+> 写权限示例见 [deploy/rbac-write.example.yaml](deploy/rbac-write.example.yaml)（默认 clusterrole 保持只读）；安装部署见 [docs/INSTALLATION.md](docs/03-运维与部署/01-部署与安装.md)。
 
 ## 资源创建与受控执行
 
 - **统一创建 Tool**：`create_resource(manifest, mode, verify, timeout_seconds)`，不按资源类型堆工具；写入路径仍是 `internal/executor`（dynamic + Server-Side Apply）
 - **两阶段协议**：强制先 `dry_run` 产出创建提案（manifest、风险、Skill findings）→ 人工确认 → `apply` → `verify`
 - **安全门禁**：黑名单/白名单/cluster 授权闸门、命名空间存在性、未 dry-run 拒绝、未知 Kind/危险字段升档；详情见 [docs/RESOURCE_CREATE_DESIGN.md](docs/RESOURCE_CREATE_DESIGN.md)
-- **Secret 创建通道**：`agent.secret.access=create_only`，只允许 `$GENERATE`（执行器生成）或 `$ASK`（审批时用户输入）；明文值不进 LLM/会话/审计
+- **Secret 创建与按需诊断**：`agent.secret.access` 支持 `off / create_only / read_on_demand`；
+  创建值只允许 `$GENERATE` 或 `$ASK`。元数据用 `get_secret_info`（普通读取权限，只返回
+  名称/类型/键名）；`read_on_demand` 只允许逐 key 读取，审批由
+  `agent.secret.read_approval` 决定（`always` 缺省逐次真人审批，`auto` 为管理员显式授权），
+  明文仅进入当前轮模型上下文，不进 evidence、UI/SSE、会话、数据库、审计或最终回答
 - **Skill 平台**：`internal/skills/` 提供内置与自定义 Skill、启停、命中统计；Skill 只提供方法与校验，不形成执行通道
 
 ## 安装
 
-> 完整安装/部署/使用手册见 [docs/INSTALLATION.md](docs/INSTALLATION.md)（本地、镜像、集群 CronJob 分步 + 故障排查）。
+> 完整安装/部署/使用手册见 [docs/INSTALLATION.md](docs/03-运维与部署/01-部署与安装.md)（本地、镜像、集群 CronJob 分步 + 故障排查）。
 
 ### 本地构建
 
 ```bash
 make build
-./bin/k8s-ai version
+./bin/aopsctl version
 ```
 
 > `make build` 生成**当前操作系统**的原生二进制（Windows=.exe / Linux / macOS）；交叉编译 Linux amd64 用 `make build-linux`（或自行设置 GOOS/GOARCH）。
@@ -72,7 +97,7 @@ make build
 
 ```powershell
 .\__build.cmd      # CMD / PowerShell 通用，自动注入版本号
-.\bin\k8s-ai.exe version
+.\bin\aopsctl.exe version
 ```
 
 ### Docker 镜像
@@ -88,18 +113,18 @@ make docker VERSION=v4.0.0-dev
 ## 快速开始
 
 ```bash
-k8s-ai config init                       # 生成 ~/.k8s-ai/config.yaml
-k8s-ai config validate                   # 校验配置 + 集群连通性
-k8s-ai scan                              # 全集群巡检（写 reports/latest.md + latest.json）
-k8s-ai scan -n mysql                     # 只巡检 mysql 命名空间（终端直出）
-k8s-ai scan pod web-abc -n mysql         # 只诊断单个 Pod
-k8s-ai scan --report-mode daily          # 日报模式（追加时间戳文件）
-k8s-ai scan --fail-on HIGH              # 达到 HIGH 返回退出码 2（CI 用）
+aopsctl config init                       # 生成 ~/.aegisops/config.yaml
+aopsctl config validate                   # 校验配置 + 集群连通性
+aopsctl scan                              # 全集群巡检（写 reports/latest.md + latest.json）
+aopsctl scan -n mysql                     # 只巡检 mysql 命名空间（终端直出）
+aopsctl scan pod web-abc -n mysql         # 只诊断单个 Pod
+aopsctl scan --report-mode daily          # 日报模式（追加时间戳文件）
+aopsctl scan --fail-on HIGH              # 达到 HIGH 返回退出码 2（CI 用）
 ```
 
 ## 配置
 
-默认配置 `~/.k8s-ai/config.yaml`，优先级：CLI > 环境变量 > YAML > 默认。
+默认配置 `~/.aegisops/config.yaml`，优先级：CLI > 环境变量 > YAML > 默认。
 
 关键项：
 
@@ -118,9 +143,10 @@ k8s-ai scan --fail-on HIGH              # 达到 HIGH 返回退出码 2（CI 用
 | `agent.create.enabled` / `deny_kinds` / `allow_kinds` | true / [] / []             | 资源创建开关与 kind 门禁                              |
 | `agent.create.cluster_kinds`                   | []                               | cluster-scoped 资源授权白名单（默认空即禁止集群级创建） |
 | `agent.create.max_objects_per_call` / `max_manifest_bytes` | 3 / 8192                | 单次创建规模上限                                        |
-| `agent.secret.access`                          | `create_only`                    | `off` / `create_only`；`read_write` 未开放                |
+| `agent.secret.access`                          | `read_on_demand`                 | `off` / `create_only` / `read_on_demand`；按 key 读取 |
+| `agent.secret.read_approval`                   | `always`                         | `always` 逐次真人审批 / `auto` 管理员显式授权按范围免逐次审批 |
 
-环境变量：`KUBECONFIG`、`K8S_AI_LLM_ENDPOINT`、`K8S_AI_LLM_API_KEY`、`K8S_AI_LLM_MODEL` 等。
+环境变量：`KUBECONFIG`、`AEGISOPS_LLM_ENDPOINT`、`AEGISOPS_LLM_API_KEY`、`AEGISOPS_LLM_MODEL` 等。
 
 ### LLM 模型选型
 
@@ -131,7 +157,7 @@ k8s-ai scan --fail-on HIGH              # 达到 HIGH 返回退出码 2（CI 用
 
 ## HTTP API
 
-`k8s-ai server --addr :8080` 提供企业平台 API：登录与权限、`/api/v1/sessions*` 会话与 SSE、
+`aopsctl server --addr :8080` 提供企业平台 API：登录与权限、`/api/v1/sessions*` 会话与 SSE、
 集群、Skill、配置、用户/角色、授权、审批与审计。所有 Session HTTP/SSE 请求都要求登录，
 并按 owner 隔离访问。详见平台 API 文档。
 
@@ -169,13 +195,13 @@ CronJob 特性：`concurrencyPolicy: Forbid`（不并发）、`restartPolicy: On
 
 ### RBAC
 
-`deploy/base/clusterrole.yaml` 只授权只读动词（get/list/watch + pods/log get）；secrets 仅元数据/键级读取，不含 pods/exec、metrics。架构测试会解析清单断言只读约束。
+`deploy/base/clusterrole.yaml` 只授权只读动词（get/list/watch + pods/log get）；secrets 的 `get` 同时服务元数据采集与 `read_on_demand` 结构化诊断，巡检与 Evidence 仍只读取元数据。`metrics.k8s.io` 的 nodes/pods 只开放 get/list。默认角色不含 pods/exec、pods/portforward、pods/attach 或写动词；显式启用写权限时，`deploy/rbac-write.example.yaml` 仅增加 `pods/exec create`，attach/port-forward 仍不授权。
 
 ## 安全
 
-- **审批是唯一安全门**：只读操作自动执行；写操作（含 shell 构造）必须人工确认；shell 命令永不自动执行（不被 `--skip-permissions` 豁免）
-- **放开 shell 构造**：chat 模式允许 pipe/heredoc/redirect/`&&`/`||`/command substitution，但含写操作的 shell 命令必须走审批；交互式命令（edit/attach/port-forward/proxy/run/cp/debug）仍硬拒
-- **Secret 内容值永不进入采集/LLM/会话/审计**（元数据/键级可读）；日志/Events/ConfigMap/注解视为不可信数据，先脱敏再使用
+- **审批是唯一安全门**：只读操作自动执行（含可证明只读的命令组合）；写操作必须人工确认；未证明只读的 shell 构造永不自动执行（不被 `--skip-permissions` 豁免）
+- **放开 shell 构造**：chat 模式允许 pipe/heredoc/redirect/`&&`/`||`/command substitution；可证明只读的组合（kubectl 只读查询 + grep/head/tail/sort/uniq/wc/cut/tr/jq）自动执行且不经 bash，其余构造必须走审批；非交互 `exec` 需 `-- <command>` 且每次真人审批；edit/attach/port-forward/proxy/run/cp/debug 与 exec stdin/tty 仍硬拒
+- **Secret 默认只读元数据**；`read_on_demand` 下按 key 读取的值（always 逐次审批 / auto 配置授权）只进入当前轮模型，UI/SSE/会话/数据库/审计和后续轮次均精确脱敏
 - **双重脱敏**：采集边界 + 报告渲染；`api_key` 只在 Authorization 头，错误消息显式剔除
 - **LLM 无自动执行能力**：写操作必须审批后执行；LLM 不是权限主体，真实边界来自 Kubernetes RBAC
 - **拒绝闸门**：同一写操作被拒绝 2 次后硬拦截；kubectl 命令归一化防绕过
@@ -186,12 +212,12 @@ CronJob 特性：`concurrencyPolicy: Forbid`（不并发）、`restartPolicy: On
 | 检查项           | 保障机制                                      | 验证方式                         |
 | ---------------- | --------------------------------------------- | -------------------------------- |
 | 写操作必须审批   | Approver.Confirm + 风险分级 + 拒绝闸门        | agent 单测（审批/拒绝/硬拦截）   |
-| shell 命令需审批 | `HasShellSyntax()` → `IsReadOnly()=false`     | approval 单测（7 类 shell 构造） |
-| 不读 Secret 内容    | Secret 内容值禁止 + RBAC 仅元数据/键级读取 | AST 扫描 + fake Action 断言      |
+| shell 命令需审批 | 统一 AST 分析；可证明只读的组合自动执行，其余 `NeedsShellApproval()` | approval/cmdplan 单测（只读组合与全部拒绝项） |
+| Secret 按需读取     | 按 key + `read_approval`（always 逐次审批 / auto 配置授权）+ 当前轮模型专用数据 + 非模型出口精确脱敏 | agent/tools/audit/session 回归 |
 | 脱敏             | 采集边界 + 报告渲染双重脱敏                   | security 单测 + LLM 请求泄密测试 |
 | api_key 不泄露   | 仅在 Authorization 头 + 错误显式剔除          | llm httptest                     |
 | LLM 不编造       | Evidence ID 校验 + 命令白名单                 | diagnosis 单测                   |
-| 交互式命令拒绝   | deny_ops 硬拒（edit/attach/port-forward 等）  | executor 单测                    |
+| 交互式命令拒绝   | edit/attach/port-forward 等硬拒；非交互 exec 人工审批 | executor/tools 单测 |
 | 单资源失败不中断 | collection_errors 隔离                        | scanner 错误隔离测试             |
 | RBAC 清单只读    | 解析 deploy/base/clusterrole.yaml 断言             | `tests/arch` RBAC 测试           |
 

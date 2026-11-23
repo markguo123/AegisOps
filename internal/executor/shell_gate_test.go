@@ -18,7 +18,7 @@ func TestRunKubectlShellDisabledGuidance(t *testing.T) {
 	bin := fakeKubectl(t, "echo touched > "+marker)
 	r := NewRunner(Options{KubectlBin: bin, MaxBytes: 4096, ShellEnabled: false})
 
-	res, err := r.RunKubectl(context.Background(), "kubectl get pods -A -o json | jq -r .items")
+	res, err := r.RunKubectl(context.Background(), "kubectl get pods -A -o json | awk '{print $1}'")
 	if err != nil {
 		t.Fatalf("关闭态应返回工具级结果而不是 Go error: %v", err)
 	}

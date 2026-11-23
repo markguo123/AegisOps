@@ -39,15 +39,13 @@ func TestSessionTokenInHistoryAndList(t *testing.T) {
 	defer srv.Close()
 	_, _ = chat.GetOrCreateSession("tok-s1", "", "qwen-plus")
 
-	history, err := readHistory(srv.URL + "/api/v1/sessions/tok-s1/stream")
-	if err != nil {
-		t.Fatalf("read history: %v", err)
+	timeline := getBody(t, srv.URL+"/api/v1/sessions/tok-s1/timeline")
+	if !strings.Contains(string(timeline), `"protocol_version":2`) {
+		t.Fatalf("时间线不是协议 v2: %s", timeline)
 	}
-	if !strings.Contains(history, `"token"`) || !strings.Contains(history, `"totalTokens":18`) {
-		t.Fatalf("历史快照未携带会话级 token 用量: %s", history)
-	}
-	if strings.Contains(history, "prompt_tokens") {
-		t.Fatalf("历史快照 token 字段应为 session.TokenUsage 契约(camelCase): %s", history)
+	// v2 契约：会话级 token 只由规范 Turn 用量承载，不再有旧的 camelCase token 字段。
+	if strings.Contains(string(timeline), `"promptTokens"`) {
+		t.Fatalf("时间线不应再携带旧 token 契约: %s", timeline)
 	}
 
 	resp := getBody(t, srv.URL+"/api/v1/sessions")
@@ -85,12 +83,9 @@ func TestSessionTokenOmitsZeroAndErrors(t *testing.T) {
 			defer srv.Close()
 			_, _ = chat.GetOrCreateSession("tok-s2", "", "qwen-plus")
 
-			history, err := readHistory(srv.URL + "/api/v1/sessions/tok-s2/stream")
-			if err != nil {
-				t.Fatalf("read history: %v", err)
-			}
-			if !strings.Contains(history, `"token":null`) {
-				t.Fatalf("无用量时应显式 null 让前端隐藏统计: %s", history)
+			timeline := getBody(t, srv.URL+"/api/v1/sessions/tok-s2/timeline")
+			if !strings.Contains(string(timeline), `"protocol_version":2`) {
+				t.Fatalf("无用量时时间线也应正常返回: %s", timeline)
 			}
 			resp := getBody(t, srv.URL+"/api/v1/sessions")
 			if strings.Contains(string(resp), `"token"`) {
@@ -107,12 +102,9 @@ func TestSessionTokenAbsentForLegacyService(t *testing.T) {
 	defer srv.Close()
 	_, _ = chat.GetOrCreateSession("legacy-s1", "", "qwen-plus")
 
-	history, err := readHistory(srv.URL + "/api/v1/sessions/legacy-s1/stream")
-	if err != nil {
-		t.Fatalf("read history: %v", err)
-	}
-	if !strings.Contains(history, `"token":null`) {
-		t.Fatalf("三期服务历史快照应为 token:null: %s", history)
+	timeline := getBody(t, srv.URL+"/api/v1/sessions/legacy-s1/timeline")
+	if !strings.Contains(string(timeline), `"protocol_version":2`) {
+		t.Fatalf("三期服务也应返回空的规范时间线: %s", timeline)
 	}
 }
 

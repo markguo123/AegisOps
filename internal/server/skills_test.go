@@ -144,7 +144,7 @@ func TestListSkillsReturnsBuiltins(t *testing.T) {
 	}
 }
 
-// TestListSkillsPermissionDenied 验证权限判定落在 Permission 层：
+// TestUserCanReadEnabledSkills 验证权限判定落在 Permission 层：
 // operator 不持 skill.read，读取应 403。
 func TestListSkillsPermissionDenied(t *testing.T) {
 	p := newPlatformServer(t)
@@ -158,7 +158,7 @@ func TestListSkillsPermissionDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, role := range roles {
-		if role.Name == auth.RoleOperator {
+		if role.Name == auth.RoleUser {
 			opRole = role.ID
 		}
 	}
@@ -174,8 +174,8 @@ func TestListSkillsPermissionDenied(t *testing.T) {
 	}
 	token := p.tokenAs(t, "op-skill1", "op-pw")
 	resp, raw := p.do(t, http.MethodGet, "/api/v1/skills", token, "")
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("无 skill.read 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("普通用户可读取启用的 Skill，预期 200, got %d: %s", resp.StatusCode, raw)
 	}
 }
 
@@ -259,7 +259,7 @@ func TestImportSkillRejectsInvalid(t *testing.T) {
 // operator 不持 skill.manage，导入与启停都 403 且不产生副作用。
 func TestSkillManageRequiresPermission(t *testing.T) {
 	p := newPlatformServer(t)
-	token := createUserWithRole(t, p, "op-manage", auth.RoleOperator)
+	token := createUserWithRole(t, p, "op-manage", auth.RoleUser)
 
 	if resp, raw := p.do(t, http.MethodPost, "/api/v1/skills/import", token, customSkillYAML); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("operator 导入应 403, got %d: %s", resp.StatusCode, raw)
@@ -506,7 +506,7 @@ func TestImportProceduralRejectsInvalid(t *testing.T) {
 // operator 不持 skill.manage，文本与 zip 导入均 403 且不产生副作用。
 func TestProceduralImportRequiresPermission(t *testing.T) {
 	p := newPlatformServer(t)
-	token := createUserWithRole(t, p, "op-proc", auth.RoleOperator)
+	token := createUserWithRole(t, p, "op-proc", auth.RoleUser)
 
 	if resp, raw := p.do(t, http.MethodPost, "/api/v1/skills/import-procedural", token, proceduralSkillMD); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("operator 文本导入应 403, got %d: %s", resp.StatusCode, raw)

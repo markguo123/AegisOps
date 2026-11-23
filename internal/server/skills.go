@@ -49,6 +49,15 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "list skills failed")
 		return
 	}
+	if !serverRoleIsAdmin(RoleFrom(r.Context())) {
+		enabled := make([]*store.Skill, 0, len(list))
+		for _, sk := range list {
+			if sk.Enabled {
+				enabled = append(enabled, sk)
+			}
+		}
+		list = enabled
+	}
 	writeOK(w, r, http.StatusOK, list)
 }
 
@@ -66,6 +75,10 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Warn("server: Skill 单条读取失败", "name", r.PathValue("name"), "error", err)
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "get skill failed")
+		return
+	}
+	if !rec.Enabled && !serverRoleIsAdmin(RoleFrom(r.Context())) {
+		writeError(w, r, 404, codeNotFound, "skill not found")
 		return
 	}
 	writeOK(w, r, http.StatusOK, rec)

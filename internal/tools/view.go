@@ -31,6 +31,9 @@ const (
 	ErrorToolUnavailable    = "TOOL_UNAVAILABLE"
 	ErrorToolFailed         = "TOOL_ERROR"
 	ErrorScopeDenied        = "SCOPE_DENIED"
+	ErrorPolicyDenied       = "POLICY_DENIED"
+	ErrorTargetIsolation    = "TARGET_ISOLATION_DENIED"
+	ErrorExecutionBusy      = "EXECUTION_BUSY"
 )
 
 // ToolPresentation 是 Agent、SSE 和前端共用的结果呈现/状态模型。
@@ -158,6 +161,12 @@ func applyExecutorPresentation(p *ToolPresentation, result executor.Result) {
 		p.Ok = true
 		return
 	}
+	// 过滤阶段无匹配（grep 退出码 1）不是集群故障，也不该让模型反复重试。
+	if result.NoMatch {
+		p.Status = ToolStatusOK
+		p.Ok = true
+		return
+	}
 	if result.ExitCode != 0 {
 		p.Status = ToolStatusError
 		p.Ok = false
@@ -166,6 +175,17 @@ func applyExecutorPresentation(p *ToolPresentation, result executor.Result) {
 }
 
 func classifyToolError(message string) string {
+	for _, code := range []string{ErrorPolicyDenied, ErrorTargetIsolation, ErrorExecutionBusy, ErrorScopeDenied, ErrorRBACDenied, ErrorToolUnavailable, ErrorInvalidArgument, ErrorUnsupported, ErrorConflict, ErrorTimeout} {
+		if strings.HasPrefix(message, code+":") {
+			return code
+		}
+	}
+	if strings.Contains(message, "ACTION_DENIED:") {
+		return ErrorScopeDenied
+	}
+	if strings.Contains(message, executor.ErrTargetIsolation.Error()) {
+		return ErrorTargetIsolation
+	}
 	lower := strings.ToLower(strings.TrimSpace(message))
 	switch {
 	case lower == "":
@@ -181,6 +201,8 @@ func classifyToolError(message string) string {
 	case strings.Contains(lower, "deadline exceeded"), strings.Contains(lower, "timed out"),
 		strings.Contains(lower, "timeout"):
 		return ErrorTimeout
+	case strings.Contains(lower, "connection refused"), strings.Contains(lower, "no route to host"), strings.Contains(lower, "connection reset"), strings.Contains(lower, "service unavailable"), strings.Contains(lower, "i/o timeout"):
+		return ErrorClusterUnavailable
 	case strings.Contains(lower, "executable file not found"), strings.Contains(lower, "kubectl not found"):
 		return ErrorToolUnavailable
 	case strings.Contains(lower, "unsupported"), strings.Contains(lower, "not supported"):
@@ -194,7 +216,7 @@ func classifyToolError(message string) string {
 }
 
 func statusForErrorCode(code string) string {
-	if code == ErrorRBACDenied || code == ErrorAuthentication || code == ErrorScopeDenied {
+	if code == ErrorRBACDenied || code == ErrorAuthentication || code == ErrorScopeDenied || code == ErrorPolicyDenied || code == ErrorTargetIsolation {
 		return ToolStatusDenied
 	}
 	return ToolStatusError

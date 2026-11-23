@@ -82,7 +82,7 @@ func newReportFixture(t *testing.T, reportsOverride reportService) *reportFixtur
 // setScanBaseline 注入页面体检的参数基线。必须在发第一个 scan 请求之前调用。
 func (f *reportFixture) setScanBaseline(opts model.ScanOptions) {
 	f.scanBaseline = opts
-f.server.WithScanBaseline(func(context.Context) model.ScanOptions { return f.scanBaseline })
+	f.server.WithScanBaseline(func(context.Context) model.ScanOptions { return f.scanBaseline })
 }
 
 // req 发一次请求并读完响应体（返回状态码、响应头与原始 body 字符串——同形 404 只能比原始体）。
@@ -421,9 +421,9 @@ func TestSystemReportVisibilityFollowsClusterGrants(t *testing.T) {
 	f.seedReport(t, "r-sys-prod", objectstore.SystemActor, "c-prod", f.putContent(t, "prod 体检", []string{"c-prod", "scan-prod"}))
 	f.seedReport(t, "r-sys-staging", objectstore.SystemActor, "c-staging", f.putContent(t, "staging 体检", []string{"c-staging", "scan-staging"}))
 	f.seedReport(t, "r-sys-nocluster", objectstore.SystemActor, "", f.putContent(t, "无集群标识", []string{"local", "scan-local"}))
-	granted := f.userToken(t, "carol", "operator")
+	granted := f.userToken(t, "carol", "user")
 	f.grantCluster(t, "u-carol", "c-prod")
-	stranger := f.userToken(t, "dave", "operator")
+	stranger := f.userToken(t, "dave", "user")
 
 	_, _, rawList := f.req(t, http.MethodGet, "/api/v1/reports", granted, "")
 	items, page := reportViews(t, rawList)
@@ -592,7 +592,9 @@ func (c *capturingScan) Run(_ context.Context, opts model.ScanOptions) (*model.S
 	return &model.ScanResult{}, nil
 }
 
-func (c *capturingScan) Validate(context.Context, model.ScanOptions) (string, error) { return "ok", nil }
+func (c *capturingScan) Validate(context.Context, model.ScanOptions) (string, error) {
+	return "ok", nil
+}
 
 // TestCreateScanRejectsForgedAttribution 锁方案 17 §8 的白名单请求体：归属字段与连接类
 // 参数一律不在 DTO 里，请求体带上来就是 400，而不是一边接受一边「覆盖」。改造前这里直接
@@ -757,8 +759,8 @@ func TestReportDeleteVisibilityMatchesRead(t *testing.T) {
 	} else {
 		var env struct {
 			Data struct {
-				Deleted []string             `json:"deleted"`
-				Skipped []map[string]string  `json:"skipped"`
+				Deleted []string            `json:"deleted"`
+				Skipped []map[string]string `json:"skipped"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(raw), &env); err != nil {
@@ -819,7 +821,7 @@ func TestReportCleanupUnavailableRow(t *testing.T) {
 		ID: "r-orphan", ClusterID: "c1", ScanID: "scan-orphan", Kind: service.ReportKindLatestMD,
 		// key 必须过 objectstore 的格式校验（末段以 64 位 sha256 开头），否则这条用例会
 		// 在 DeleteReport 的 key 校验处先炸，测不到真正想测的「元数据缺失仍可清理」。
-		BlobKey: "blobs/reports/c1/scan-orphan/" + strings.Repeat("a", 64) + "-gone.md",
+		BlobKey:   "blobs/reports/c1/scan-orphan/" + strings.Repeat("a", 64) + "-gone.md",
 		MediaType: "text/markdown", Size: 10,
 		SHA256: strings.Repeat("a", 64), Findings: 1, CreatedBy: "u-del-orphan",
 		Available: false, CreatedAt: time.Now().UTC(),
@@ -874,4 +876,142 @@ func TestReportDeleteNotConfigured(t *testing.T) {
 		t.Fatalf("未装配时应 401/501，got %d", resp.StatusCode)
 	}
 	decodeData(t, resp, nil)
+}
+
+func TestReportRetentionPreviewRequiresAdmin(t *testing.T) {
+	f := newReportFixture(t, nil)
+	if err := f.st.Clusters().Create(context.Background(), &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/report-retention/preview?clusterId=prod&kind=latest-md&days=30&minimum=5"
+	user := f.userToken(t, "retention-user", "user")
+	if status, _, body := f.req(t, http.MethodGet, path, user, ""); status != http.StatusForbidden {
+		t.Fatalf("user status = %d: %s", status, body)
+	}
+	admin := f.adminToken(t)
+	if status, _, body := f.req(t, http.MethodGet, path, admin, ""); status != http.StatusOK {
+		t.Fatalf("admin status = %d: %s", status, body)
+	}
+}
+
+func TestDiagnosticMemoryAPIOwnerIsolation(t *testing.T) {
+	f := newReportFixture(t, nil)
+	memories := service.NewDiagnosticMemories(f.st, f.authzSvc)
+	f.server.WithDiagnosticMemories(memories)
+	ctx := context.Background()
+	if err := f.st.Clusters().Create(ctx, &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	admin := f.adminToken(t)
+	const path = "/api/v1/me/memories"
+	const input = `{"clusterId":"prod","namespace":"payment","relatedNamespaces":["edge-system"],"workload":"payment-api","text":"Compare gateway error time with pod exit time."}`
+	if status, _, raw := f.req(t, http.MethodPost, path, admin, input); status != http.StatusForbidden {
+		t.Fatalf("disabled create: %d %s", status, raw)
+	}
+	if err := f.st.Settings().Set(ctx, &store.Settings{Group: "memory", Key: "enabled", Value: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	status, _, raw := f.req(t, http.MethodPost, path, admin, input)
+	if status != http.StatusCreated {
+		t.Fatalf("create: %d %s", status, raw)
+	}
+	var created struct{ Data service.DiagnosticMemory }
+	if err := json.Unmarshal([]byte(raw), &created); err != nil || created.Data.ID == "" {
+		t.Fatalf("decode created memory: %v %s", err, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodGet, path, admin, ""); status != http.StatusOK || !strings.Contains(raw, created.Data.Text) {
+		t.Fatalf("owner list: %d %s", status, raw)
+	}
+	other := f.userToken(t, "memory-other", "user")
+	if status, _, raw := f.req(t, http.MethodGet, path, other, ""); status != http.StatusOK || strings.Contains(raw, created.Data.ID) {
+		t.Fatalf("other list: %d %s", status, raw)
+	}
+	idPath := path + "/" + created.Data.ID
+	authorize := func(authz.Target) error { return nil }
+	if notes, ids := memories.Recall(ctx, "admin", "prod", "payment", "payment-api 502", authorize); notes != "" || len(ids) != 0 {
+		t.Fatal("unexpected recall for a mismatched owner ID")
+	}
+	rows, err := f.st.Users().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner string
+	for _, user := range rows {
+		if user.Username == "admin" {
+			owner = user.ID
+		}
+	}
+	if notes, ids := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", authorize); !strings.Contains(notes, created.Data.Text) || len(ids) != 1 {
+		t.Fatalf("expected owner recall: %q %v", notes, ids)
+	}
+	denied := func(target authz.Target) error {
+		if target.Namespace == "edge-system" {
+			return store.ErrNotFound
+		}
+		return nil
+	}
+	if notes, _ := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", denied); notes != "" {
+		t.Fatal("memory with an unauthorized related namespace was recalled")
+	}
+	created.Data.Text = "Check gateway and application timestamps first."
+	update, err := json.Marshal(created.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, _, raw := f.req(t, http.MethodPatch, idPath, admin, string(update)); status != http.StatusOK {
+		t.Fatalf("update: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodPatch, idPath, admin, string(update)); status != http.StatusConflict {
+		t.Fatalf("stale update: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodDelete, idPath, other, ""); status != http.StatusNotFound {
+		t.Fatalf("other delete: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodDelete, idPath, admin, ""); status != http.StatusOK {
+		t.Fatalf("owner delete: %d %s", status, raw)
+	}
+	if notes, _ := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", authorize); notes != "" {
+		t.Fatal("forgotten memory was recalled")
+	}
+}
+
+func TestReportRetentionPolicyRequiresRecentPreviewAndCanStop(t *testing.T) {
+	f := newReportFixture(t, nil)
+	if err := f.st.Clusters().Create(context.Background(), &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	admin := f.adminToken(t)
+	path := "/api/v1/report-retention/policies"
+	body := `{"clusterId":"prod","kind":"latest-md","days":30,"minimum":5,"enabled":true}`
+	if status, _, raw := f.req(t, http.MethodPut, path, admin, body); status != http.StatusConflict {
+		t.Fatalf("no preview: %d %s", status, raw)
+	}
+	previewPath := "/api/v1/report-retention/preview?clusterId=prod&kind=latest-md&days=30&minimum=5"
+	status, _, raw := f.req(t, http.MethodGet, previewPath, admin, "")
+	var preview struct{ Data store.ReportRetentionPreview }
+	if status != http.StatusOK || json.Unmarshal([]byte(raw), &preview) != nil {
+		t.Fatalf("preview: %d %s", status, raw)
+	}
+	input := struct {
+		store.ReportRetentionPolicy
+		Cutoff   time.Time `json:"cutoff"`
+		Eligible int64     `json:"eligible"`
+	}{
+		ReportRetentionPolicy: store.ReportRetentionPolicy{ClusterID: "prod", Kind: "latest-md", Days: 30, Minimum: 5, Enabled: true},
+		Cutoff:                preview.Data.Cutoff, Eligible: preview.Data.Eligible,
+	}
+	for _, enabled := range []bool{true, false} {
+		input.Enabled = enabled
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status, _, raw := f.req(t, http.MethodPut, path, admin, string(encoded)); status != http.StatusOK {
+			t.Fatalf("enabled=%t: %d %s", enabled, status, raw)
+		}
+	}
+	policies, err := f.st.Reports().ReportRetentionPolicies(context.Background())
+	if err != nil || len(policies) != 1 || policies[0].Enabled {
+		t.Fatalf("stopped retention policy: %+v, %v", policies, err)
+	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -118,8 +119,28 @@ func writePage(w http.ResponseWriter, r *http.Request, status int, items any, to
 	})
 }
 
-// writeError 写统一错误响应。
+// writeError 写统一错误响应，并为每条错误留一条结构化日志。
+// 页面上的报错必须能凭响应里的 request_id 在服务端日志中定位；健康探针高频失败会刷屏，
+// 因此 /healthz、/readyz 不在这里记录（就绪状态由启动日志与探针指标负责）。
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	if p := r.URL.Path; p != "/healthz" && p != "/readyz" {
+		attrs := []any{
+			"request_id", RequestIDFrom(r.Context()),
+			"method", r.Method,
+			"path", p,
+			"status", status,
+			"code", code,
+			"message", message,
+		}
+		if u := UserFrom(r.Context()); u != nil {
+			attrs = append(attrs, "user_id", u.ID)
+		}
+		if status >= http.StatusInternalServerError {
+			slog.Error("server: 请求失败", attrs...)
+		} else {
+			slog.Warn("server: 请求被拒绝", attrs...)
+		}
+	}
 	writeResponse(w, r, status, apiResponse{
 		RequestID: RequestIDFrom(r.Context()),
 		Timestamp: time.Now().UTC(),

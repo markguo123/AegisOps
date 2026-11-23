@@ -91,7 +91,7 @@ func TestUsersAdminCRUD(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /roles 应 200, got %d: %s", resp.StatusCode, raw)
 	}
-	for _, want := range []string{auth.RoleAdmin, auth.RoleUser, auth.RoleOperator} {
+	for _, want := range []string{auth.RoleAdmin, auth.RoleUser} {
 		if !strings.Contains(raw, `"name":"`+want+`"`) {
 			t.Fatalf("角色列表缺少 %q", want)
 		}
@@ -139,7 +139,7 @@ func TestUsersAdminCRUD(t *testing.T) {
 func TestUsersPermissionDenied(t *testing.T) {
 	p := newPlatformServer(t)
 	tokens := map[string]string{}
-	for _, role := range []string{auth.RoleUser, auth.RoleOperator} {
+	for _, role := range []string{auth.RoleUser} {
 		tokens[role] = createUserWithRole(t, p, "denied-"+role, role)
 	}
 	// 基线 = bootstrap admin + 两个无权限测试账号；越权请求后数量不得变化。
@@ -168,7 +168,7 @@ func TestUsersPermissionDenied(t *testing.T) {
 	}
 }
 
-// TestUsersProtectedAdmin 验证保守保护：内置 admin 不可删除；
+// TestUsersProtectedAdmin 验证本地管理员生命周期：保留其他可用管理员时可以调整首个账号；
 // 登录用户禁止停用或降级自己的账号。
 func TestUsersProtectedAdmin(t *testing.T) {
 	p := newPlatformServer(t)
@@ -186,20 +186,49 @@ func TestUsersProtectedAdmin(t *testing.T) {
 		t.Fatalf("降级自己的账号应 400, got %d: %s", resp.StatusCode, raw)
 	}
 
-	// 以第二个 admin 验证服务层保守保护：内置 admin 不可删除/停用/降级（403）。
+	// 平台保护最后一个本地管理员，不绑定固定用户名。
 	admin2Body := fmt.Sprintf(`{"username":"admin2","displayName":"Admin 2","password":"admin2-pw-123","roleId":"%s"}`, adminRole)
 	if resp, raw := p.do(t, http.MethodPost, "/api/v1/users", token, admin2Body); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("创建 admin2 应 201, got %d: %s", resp.StatusCode, raw)
 	}
 	token2 := p.tokenAs(t, "admin2", "admin2-pw-123")
-	if resp, raw := p.do(t, http.MethodDelete, "/api/v1/users/"+admin.ID, token2, ""); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("删除内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"disabled"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("有第二个可用本地管理员时允许停用首个账号, got %d: %s", resp.StatusCode, raw)
 	}
-	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"disabled"}`); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("停用内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodGet, "/api/v1/auth/me", token, ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("停用后已有令牌应失效, got %d: %s", resp.StatusCode, raw)
 	}
-	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, patchSelf); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("降级内置 admin 应 403, got %d: %s", resp.StatusCode, raw)
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, `{"status":"active"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("恢复账号: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := p.do(t, http.MethodPatch, "/api/v1/users/"+admin.ID, token2, patchSelf); resp.StatusCode != http.StatusOK {
+		t.Fatalf("保留第二个管理员时可降级首个账号: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := p.do(t, http.MethodDelete, "/api/v1/users/"+admin.ID, token2, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("逻辑删除: %d %s", resp.StatusCode, raw)
+	}
+	deleted, err := p.store.Users().Get(context.Background(), admin.ID)
+	if err != nil || deleted.Status != "deleted" {
+		t.Fatalf("应保留已删除用户的内部身份: %+v %v", deleted, err)
+	}
+
+}
+
+// TestMeReportsAccountSource 锁 /auth/me 的来源字段：未绑定外部身份的账号一律报 local，
+// 前端据此决定右上角显示登录名（本地账号）还是 IdP 回传的登录名（企业 SSO 账号）。
+func TestMeReportsAccountSource(t *testing.T) {
+	p := newPlatformServer(t)
+	token := p.tokenAs(t, "admin", "admin-pw")
+	resp, raw := p.do(t, http.MethodGet, "/api/v1/auth/me", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("读取自身信息应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	var me struct {
+		User store.User `json:"user"`
+	}
+	decodeData(t, mustReplay(t, raw), &me)
+	if me.User.Username != auth.DefaultAdminUsername || me.User.Source != store.UserSourceLocal {
+		t.Fatalf("/auth/me 应回填 source=%s, got %+v", store.UserSourceLocal, me.User)
 	}
 }
 
@@ -231,5 +260,35 @@ func TestUsersNeverEchoPassword(t *testing.T) {
 	}
 	if strings.Contains(raw, plain) {
 		t.Fatal("用户列表泄漏口令明文")
+	}
+}
+
+// TestUsersListMarksSource 锁企业登录账号在用户列表里的可见性：账号本身、
+// 身份资料（displayName/email）与来源标识 source 都要能拿到，
+// 否则管理员只能看到一串 oidc-随机串，分不清账号从哪来。
+func TestUsersListMarksSource(t *testing.T) {
+	p := newPlatformServer(t)
+	token := p.tokenAs(t, "admin", "admin-pw")
+	userRole := roleIDByName(t, p.store, auth.RoleUser)
+
+	candidate := &store.User{
+		ID:          "u-src-ext",
+		Username:    "oidc-SRCOIDC",
+		DisplayName: "外部用户",
+		Email:       "ext@example.com",
+		RoleID:      userRole,
+	}
+	if _, err := p.store.Users().ResolveIdentity(context.Background(), "https://idp.example.com/oidc", "subject-ext", candidate); err != nil {
+		t.Fatalf("resolve identity: %v", err)
+	}
+
+	resp, raw := p.do(t, http.MethodGet, "/api/v1/users", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /users 应 200, got %d: %s", resp.StatusCode, raw)
+	}
+	for _, want := range []string{`"username":"oidc-SRCOIDC"`, `"displayName":"外部用户"`, `"email":"ext@example.com"`, `"source":"oidc"`, `"source":"local"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("用户列表应包含 %s, got %s", want, raw)
+		}
 	}
 }

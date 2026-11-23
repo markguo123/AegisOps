@@ -48,10 +48,16 @@ var staticEngineSections = map[string]bool{"report": true, "agent": true}
 // platformStaticEngineKeys 是平台静态配置文件（server 剖面）允许的引擎侧键白名单。
 // 白名单之外的引擎键出现在平台文件里，就会与配置中心形成双配置源，因此单独告警。
 var platformStaticEngineKeys = map[string]bool{
-	"report.directory":  true,
-	"report.format":     true,
-	"agent.session_dir": true,
-	"agent.audit_dir":   true,
+	"agent.exec_pod.enabled":                     true,
+	"agent.exec_pod.timeout_seconds":             true,
+	"agent.exec_pod.max_timeout_seconds":         true,
+	"agent.exec_pod.max_output_bytes":            true,
+	"agent.exec_pod.max_concurrent_per_instance": true,
+	"agent.exec_pod.max_concurrent_per_user":     true,
+	"report.directory":                           true,
+	"report.format":                              true,
+	"agent.session_dir":                          true,
+	"agent.audit_dir":                            true,
 	// 审计文件副本开关（P8.0）：审计事实源是平台库 audit_events，jsonl 只是可选
 	// 副本，属「这台实例的落盘形状」，不进配置中心动态键。
 	"agent.audit_file_copy": true,
@@ -201,7 +207,7 @@ func Diagnostics(path string, mode ValidateMode) ([]string, error) {
 			if containsString(engineSections, section) {
 				warnings = append(warnings, fmt.Sprintf(
 					"%s: 段是终端直用引擎键，平台侧以配置中心与部署期环境变量为准；终端直用请放 %s",
-					section, "~/.k8s-ai/cli.yaml"))
+					section, "~/.aegisops/cli.yaml"))
 			}
 		case ValidateModeCLI:
 			if section == "platform" {
@@ -216,7 +222,7 @@ func Diagnostics(path string, mode ValidateMode) ([]string, error) {
 	}
 
 	if dsn, ok := leaves["platform.store.dsn"].(string); ok && strings.TrimSpace(dsn) != "" {
-		warnings = append(warnings, "platform.store.dsn 在配置文件里非空：DSN 含口令，应只经 K8S_AI_PLATFORM_STORE_DSN / Secret 注入")
+		warnings = append(warnings, "platform.store.dsn 在配置文件里非空：DSN 含口令，应只经 AEGISOPS_PLATFORM_STORE_DSN / Secret 注入")
 	}
 	warnings = append(warnings, blobsConfigWarnings(leaves)...)
 	return warnings, nil

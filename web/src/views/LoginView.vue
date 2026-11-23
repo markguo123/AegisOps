@@ -13,7 +13,11 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const username = ref('admin')
+const enterprise = ref('')
+onMounted(async () => {
+  try { const res = await fetch('/api/v1/auth/providers'); const { data } = await res.json(); if (data?.oidc) enterprise.value = data.displayName || '企业单点登录' } catch { enterprise.value = '' }
+})
+const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
@@ -108,8 +112,8 @@ async function handleLogin(): Promise<void> {
               </svg>
             </div>
             <div class="brand-text">
-              <strong>K8S-AI</strong>
-              <span>企业级 Kubernetes AI 运维工作台</span>
+              <strong>AegisOps</strong>
+              <span>云原生智能工作台</span>
             </div>
           </div>
           <div class="status"><i></i>在线</div>
@@ -185,6 +189,27 @@ async function handleLogin(): Promise<void> {
           </button>
         </form>
 
+        <!-- 企业单点登录：账号口令之后的次级入口（口径同主流产品） -->
+        <div v-if="enterprise" class="sso">
+          <div class="sso-split"><span>或</span></div>
+          <a class="sso-btn" href="/api/v1/auth/oidc/start">
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+            <span>{{ enterprise }}</span>
+          </a>
+        </div>
+
         <div class="foot">
           <svg
             viewBox="0 0 24 24"
@@ -214,6 +239,69 @@ async function handleLogin(): Promise<void> {
   margin: 0 0 12px;
   color: #f87171;
   font-size: 12px;
+}
+
+/* 企业单点登录入口。不复用 .btn：那条规则靠 width/height 撑开胶囊，而 <a> 默认是
+   inline，宽高不生效，渐变只会画在文字那一小段上（就是之前那个半截按钮）。 */
+.sso {
+  margin-top: 18px;
+}
+.sso-split {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+.sso-split::before,
+.sso-split::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(125, 145, 185, 0.22),
+    transparent
+  );
+}
+.sso-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 46px;
+  border-radius: 12px;
+  border: 1px solid rgba(125, 145, 185, 0.22);
+  background: rgba(8, 11, 18, 0.6);
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  transition:
+    border-color 0.25s,
+    color 0.25s,
+    background 0.25s,
+    box-shadow 0.3s;
+}
+.sso-btn .icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.sso-btn:hover {
+  border-color: rgba(99, 102, 241, 0.6);
+  color: var(--text);
+  background: rgba(99, 102, 241, 0.08);
+  box-shadow: 0 0 22px -8px rgba(99, 102, 241, 0.9);
+}
+.sso-btn:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
 }
 </style>
 

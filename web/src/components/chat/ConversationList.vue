@@ -24,7 +24,40 @@ const props = defineProps<{
   activeId: string | null
   loading: boolean
   collapsed?: boolean
+  /** 会话绑定集群的 ID→名称映射；只用于展示，归属与授权仍由后端判定。 */
+  clusterNames?: Record<string, string>
+  /** 当前登录用户 ID：仅用于区分“我的/他人的”会话，不作为权限判断。 */
+  currentUserId?: string
 }>()
+
+function clusterLabel(session: SessionSummary): string {
+  if (!session.clusterId) {
+    return ''
+  }
+  return props.clusterNames?.[session.clusterId] || session.clusterId
+}
+
+/** 管理员列表中才可能出现他人会话；普通用户列表只含本人。 */
+function isOtherOwner(session: SessionSummary): boolean {
+  return Boolean(
+    props.currentUserId && session.ownerId && session.ownerId !== props.currentUserId,
+  )
+}
+
+function ownerLabel(session: SessionSummary): string {
+  return session.ownerName || session.ownerId || '未知用户'
+}
+
+/** 第二行被 owner 占用时，把完整信息放进 title，避免 ellipsis 后无法核对。 */
+function sessionMetaTitle(session: SessionSummary): string {
+  const parts = [
+    isOtherOwner(session) ? `创建者：${ownerLabel(session)}` : '',
+    clusterLabel(session),
+    `${session.messageCount} 条消息`,
+    formatRelativeTime(session.lastModified),
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
 
 const emit = defineEmits<{
   (e: 'create'): void
@@ -40,18 +73,27 @@ const emit = defineEmits<{
 const editingId = ref<string | null>(null)
 const draftName = ref('')
 const keyword = ref('')
+const clusterFilter = ref('')
+const clusterOptions = computed(() => {
+  const ids = new Set(props.sessions.map(s => s.clusterId).filter((id): id is string => Boolean(id)))
+  return [...ids].map(id => ({ id, name: props.clusterNames?.[id] || `目标不可用（${id}）` }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+})
 
 const collapsed = computed(() => props.collapsed === true)
 
 /** P7.5：搜索按标题与会话 id 做大小写不敏感过滤。 */
 const filteredSessions = computed(() => {
   const query = keyword.value.trim().toLowerCase()
-  if (!query) {
-    return props.sessions
-  }
   return props.sessions.filter(
     (session) =>
-      session.name.toLowerCase().includes(query) || session.id.toLowerCase().includes(query),
+      (!clusterFilter.value || session.clusterId === clusterFilter.value) &&
+      (!query ||
+        session.name.toLowerCase().includes(query) ||
+        session.id.toLowerCase().includes(query) ||
+        clusterLabel(session).toLowerCase().includes(query) ||
+        (session.ownerName ?? '').toLowerCase().includes(query) ||
+        (session.ownerId ?? '').toLowerCase().includes(query)),
   )
 })
 
@@ -136,6 +178,10 @@ function onMenuCommand(session: SessionSummary, command: string): void {
       </button>
     </div>
 
+    <select v-if="!collapsed" v-model="clusterFilter" class="cluster-filter" aria-label="按集群筛选会话">
+      <option value="">全部集群</option>
+      <option v-for="cluster in clusterOptions" :key="cluster.id" :value="cluster.id">{{ cluster.name }}</option>
+    </select>
     <el-input
       v-if="!collapsed"
       v-model="keyword"
@@ -195,8 +241,18 @@ function onMenuCommand(session: SessionSummary, command: string): void {
                     {{ sessionStateLabel(session.state) }}
                   </span>
                 </div>
-                <p class="session-meta">
-                  {{ session.messageCount }} 条 · {{ formatRelativeTime(session.lastModified) }}
+                <p class="session-meta" :title="sessionMetaTitle(session)">
+                  <template v-if="isOtherOwner(session)">
+                    <span class="session-owner">@{{ ownerLabel(session) }}</span>
+                    <span class="faint">· </span>
+                  </template>
+                  <span v-if="clusterLabel(session)" class="session-cluster" :title="clusterLabel(session)">
+                    {{ clusterLabel(session) }} ·
+                  </span>
+                  <template v-if="!isOtherOwner(session)">
+                    {{ session.messageCount }} 条 ·
+                  </template>
+                  {{ formatRelativeTime(session.lastModified) }}
                 </p>
               </template>
             </div>
@@ -290,6 +346,7 @@ function onMenuCommand(session: SessionSummary, command: string): void {
 .list-search {
   flex: none;
 }
+.cluster-filter { width: 100%; flex: none; padding: 7px 9px; border: 1px solid var(--app-hairline); border-radius: 6px; background: var(--app-surface); color: var(--app-text); }
 
 .list-body {
   flex: 1;
@@ -437,7 +494,22 @@ function onMenuCommand(session: SessionSummary, command: string): void {
   letter-spacing: 0;
 }
 
-/* 第二行：消息数 · 时间（单行省略，不再换行成竖条） */
+.session-cluster {
+  color: var(--app-accent-2);
+}
+
+/* 管理员列表的 owner 标记：只占第二行，不新增行高；长名省略，完整值看 title。 */
+.session-owner {
+  display: inline-block;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--app-warning);
+  font-weight: 600;
+}
+
+/* 第二行：集群 · 消息数 · 时间（单行省略，不再换行成竖条） */
 .session-meta {
   margin: 0;
   /* 右侧预留悬浮操作的宽度：hover 时文字不跳动 */

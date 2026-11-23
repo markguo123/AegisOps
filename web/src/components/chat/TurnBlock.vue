@@ -1,38 +1,54 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ArrowDown, WarningFilled } from '@element-plus/icons-vue'
 
-import type { TurnUiData } from './turn'
+import type { TurnItem, TurnUiData } from './turn'
 import { formatDuration } from './turn'
-import AgentStepper, { type AgentStep, type StepState } from './AgentStepper.vue'
+import ProcessGroup from './ProcessGroup.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
+import QuestionInteraction from './QuestionInteraction.vue'
 import MarkdownView from './MarkdownView.vue'
+import MessageActionBar from './MessageActionBar.vue'
 
 /**
- * P2.7 TurnBlock：单回合容器。
- * 头部：序号 + 状态摘要 + 用户输入 + 耗时 + token；body 可折叠，
- * 内含 思考面板 / 步进器 / 工具卡 / 审批卡 / 最终报告（markdown）。
+ * 单回合容器：用户输入 + 真实过程条目（消息/工具/问题/审批/告警）。
+ * 不再渲染固定“思考→工具→观察→报告”步进器，运行状态只来自 Turn 状态与 activity。
  */
 
 const props = withDefaults(
   defineProps<{
     turn: TurnUiData
+    latest?: boolean
+    questionHighlighted?: boolean
+    canBranch?: boolean
     /** P2.9 当前用户是否有权审批（本人自确认）。 */
     canDecide?: boolean
+    /** P12.4 当前会话绑定的集群名称。 */
+    clusterName?: string
   }>(),
   {
     canDecide: true,
+    canBranch: false,
+    clusterName: '',
   },
 )
 
 const emit = defineEmits<{
-  (e: 'approve', value: string): void
-  (e: 'reject'): void
+  (e: 'branch', turnId: string): void
+  (e: 'approve', value: string,id?:string): void
+  (e: 'reject',id?:string): void
+  (e: 'answer', payload: { interactionId: string; status: 'selected' | 'text' | 'skipped'; optionId?: string; text?: string }): void
 }>()
 
 const open = ref(true)
+watch(() => props.questionHighlighted, (highlighted) => {
+  if (highlighted) open.value = true
+}, { immediate: true })
+const lastActionableReply = computed(() => [...props.turn.items].reverse().find(
+  item => item.type === 'report' && item.data.purpose === 'final' && item.data.done,
+))
 // P7.4：展开/折叠全部工具卡（数值信号驱动子卡片），报告完成后未手动操作过的卡片自动折叠。
 const collapseAllSignal = ref(0)
 const expandAllSignal = ref(0)
@@ -47,6 +63,8 @@ const statusType = computed<'primary' | 'success' | 'danger' | 'warning' | 'info
       return 'danger'
     case 'waiting':
       return 'warning'
+    case 'canceled':
+      return 'info'
     default:
       return 'info'
   }
@@ -55,15 +73,49 @@ const statusType = computed<'primary' | 'success' | 'danger' | 'warning' | 'info
 const statusLabel = computed(() => {
   switch (props.turn.status) {
     case 'running':
-      return '运行中'
+      return activityText.value || '运行中'
     case 'completed':
       return '已完成'
     case 'failed':
       return '失败'
+    case 'canceled':
+      return '已取消'
     case 'waiting':
-      return '待处理'
+      return waitText.value
+    case 'pending':
+      return '已接收'
     default:
       return props.turn.status
+  }
+})
+
+/** 等待原因来自 turn.wait_reason，不与连接状态混用。 */
+const waitText = computed(() => {
+  switch (props.turn.waitReason) {
+    case 'question':
+      return '等待你选择'
+    case 'approval':
+      return '等待你审批'
+    case 'secret':
+      return '等待敏感输入'
+    default:
+      return '等待你的确认'
+  }
+})
+
+/** 运行中措辞只由真实 activity 产生。 */
+const activityText = computed(() => {
+  switch (props.turn.activity) {
+    case 'checking':
+      return '检查中'
+    case 'generating':
+      return '生成回复'
+    case 'executing':
+      return '执行中'
+    case 'verifying':
+      return '验证中'
+    default:
+      return ''
   }
 })
 
@@ -76,87 +128,27 @@ function turnDurationMs(turn: TurnUiData): number | null {
   return (Number.isNaN(end) ? Date.now() : end) - start
 }
 
-const tokenTotal = computed(() => {
-  const total = props.turn.token?.total_tokens
-  const prompt = props.turn.token?.prompt_tokens
-  const completion = props.turn.token?.completion_tokens
-  if (total !== undefined && total !== null) return total
-  if (prompt === undefined && completion === undefined) return null
-  return (prompt ?? 0) + (completion ?? 0)
-})
-
-const reportDone = computed(() =>
-  props.turn.items.some((item) => item.type === 'report' && item.data.done),
+const unknownTask = computed(() =>
+  props.turn.items.some(item => item.type === 'tool' && item.data.status === 'unknown'),
 )
 
-const hasToolCards = computed(() => props.turn.items.some((item) => item.type === 'tool'))
+const reportDone = computed(() =>
+  props.turn.items.some((item) => item.type === 'report' && item.data.purpose === 'final' && item.data.done),
+)
 
-const steps = computed<AgentStep[]>(() => {
-  const turn = props.turn
-  const reasoningItems = turn.items.filter((item) => item.type === 'reasoning')
-  const toolItems = turn.items.filter((item) => item.type === 'tool')
-  const reportItems = turn.items.filter((item) => item.type === 'report')
-
-  const lastReasoning = reasoningItems[reasoningItems.length - 1]
-  const lastReport = reportItems[reportItems.length - 1]
-  const hasTool = toolItems.length > 0
-  const toolRunning = toolItems.some((item) => item.data.status === 'running')
-  const toolDone = toolItems.some((item) => item.data.status === 'done')
-  const hasObservation = toolItems.some(
-    (item) => item.data.status === 'done' && item.data.ok !== undefined && item.data.ok !== null,
-  )
-
-  const reportRunning = !!lastReport?.data.streaming
-  const reportDone = !!lastReport?.data.done
-
-  const result: AgentStep[] = [
-    {
-      key: 'reason',
-      label: '思考',
-      state: (lastReasoning
-        ? lastReasoning.data.streaming
-          ? 'active'
-          : 'done'
-        : turn.status === 'failed' || turn.status === 'completed'
-          ? 'error'
-          : 'pending') as StepState,
-    },
-    {
-      key: 'tool',
-      label: '工具',
-      state: (toolRunning
-        ? 'active'
-        : toolDone
-          ? 'done'
-          : hasTool
-            ? 'pending'
-            : 'idle') as StepState,
-    },
-    {
-      key: 'observe',
-      label: '观察',
-      state: (hasObservation
-        ? 'done'
-        : toolRunning
-          ? 'active'
-          : hasTool
-            ? 'pending'
-            : 'idle') as StepState,
-    },
-    {
-      key: 'report',
-      label: '报告',
-      state: (reportRunning
-        ? 'active'
-        : reportDone
-          ? 'done'
-          : turn.status === 'failed'
-            ? 'error'
-            : 'pending') as StepState,
-    },
-  ]
+const groups = computed(() => {
+  const result: Array<{ key: string; process: boolean; items: TurnItem[] }> = []
+  for (const item of props.turn.items) {
+    const process = item.type === 'tool' || item.type === 'reasoning' ||
+      (item.type === 'report' && item.data.purpose !== 'final')
+    const previous = result[result.length - 1]
+    if (process && previous?.process) previous.items.push(item)
+    else result.push({ key: item.data.key, process, items: [item] })
+  }
   return result
 })
+
+
 
 function timeLabel(value?: string): string {
   if (!value) return ''
@@ -173,32 +165,10 @@ function timeLabel(value?: string): string {
 function itemAnchor(item: { data: { key: string } }): string {
   return `step-${props.turn.key}-${item.data.key}`
 }
-
-const navSteps = computed<AgentStep[]>(() => {
-  const lastOf = (type: 'reasoning' | 'tool' | 'report') =>
-    [...props.turn.items].reverse().find((item) => item.type === type)
-  const anchors: Record<string, ReturnType<typeof lastOf>> = {
-    reason: lastOf('reasoning'),
-    tool: lastOf('tool'),
-    observe: lastOf('tool'),
-    report: lastOf('report'),
-  }
-  return steps.value.map((step) => {
-    const target = anchors[step.key]
-    return { ...step, anchor: target ? itemAnchor(target) : undefined }
-  })
-})
-
-function locateStep(step: AgentStep): void {
-  if (!step.anchor) {
-    return
-  }
-  document.getElementById(step.anchor)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-}
 </script>
 
 <template>
-  <section class="turn" :class="turn.status">
+  <section :id="`turn-${turn.key}`" class="turn" :class="turn.status">
     <header class="turn-head">
       <button type="button" class="turn-toggle" @click="open = !open" :aria-expanded="open">
         <el-icon class="turn-caret" :class="{ open }"><ArrowDown /></el-icon>
@@ -206,11 +176,7 @@ function locateStep(step: AgentStep): void {
         <span class="turn-input">{{ turn.input || '（历史会话）' }}</span>
       </button>
       <div class="turn-meta">
-        <span v-if="turn.startedAt" class="turn-time">{{ timeLabel(turn.startedAt) }}</span>
         <span v-if="duration" class="turn-duration">{{ duration }}</span>
-        <span v-if="tokenTotal !== null" class="turn-token" :title="`提示词 + 生成 tokens`"
-          >{{ tokenTotal }} tokens</span
-        >
         <el-tag size="small" effect="plain" :type="statusType" class="turn-status">{{
           statusLabel
         }}</el-tag>
@@ -219,20 +185,12 @@ function locateStep(step: AgentStep): void {
 
     <div v-if="open" class="turn-body">
       <!-- 用户输入：与原型一致，回合内先回显用户诉求，再展示执行过程 -->
-      <article v-if="turn.input" class="turn-question">
-        <span class="question-role">你</span>
-        <p class="question-text">{{ turn.input }}</p>
-      </article>
-
-      <AgentStepper :steps="navSteps" @select="locateStep" />
-
-      <div v-if="hasToolCards" class="turn-tools">
-        <button type="button" class="turn-tools-btn" @click="expandAllSignal += 1">
-          展开全部
-        </button>
-        <button type="button" class="turn-tools-btn" @click="collapseAllSignal += 1">
-          折叠全部
-        </button>
+      <div v-if="turn.input" class="message-shell question-shell" :class="{ latest: latest && !lastActionableReply }">
+        <article :id="`question-${turn.key}`" class="turn-question" :class="{ 'question-highlight': questionHighlighted }">
+          <span class="question-role">你</span>
+          <div><p class="question-text">{{ turn.input }}</p></div>
+        </article>
+        <MessageActionBar :text="turn.input" :timestamp="turn.startedAt" :time-label="timeLabel(turn.startedAt)" />
       </div>
 
       <div v-if="turn.error" class="turn-error">
@@ -240,9 +198,18 @@ function locateStep(step: AgentStep): void {
         <span>{{ turn.error }}</span>
       </div>
 
+      <p v-if="unknownTask" class="turn-error" role="alert">有操作结果未知，请先核实集群现场，不要直接重试。</p>
       <div class="turn-items">
+        <component
+          :is="group.process ? ProcessGroup : 'div'"
+          v-for="group in groups"
+          :key="group.key"
+          :items="group.process ? group.items : undefined"
+          :completed="turn.status === 'completed' && reportDone"
+          :failed="turn.status === 'failed' || turn.status === 'canceled'"
+        >
         <template
-          v-for="item in turn.items"
+          v-for="item in group.items"
           :key="item.type === 'reasoning' || item.type === 'report' ? item.data.key : item.data.key"
         >
           <ReasoningPanel
@@ -257,6 +224,8 @@ function locateStep(step: AgentStep): void {
             :id="itemAnchor(item)"
             class="turn-item"
             :tool="item.data"
+            :session-id="turn.sessionId"
+            :auto-open="false"
             :report-done="reportDone"
             :collapse-all="collapseAllSignal"
             :expand-all="expandAllSignal"
@@ -266,28 +235,96 @@ function locateStep(step: AgentStep): void {
             class="turn-item"
             :approval="item.data"
             :can-decide="canDecide"
-            @approve="emit('approve', $event)"
-            @reject="emit('reject')"
+            :cluster-label="clusterName"
+            @approve="(v,id)=>emit('approve',v,id)"
+            @reject="emit('reject',$event)"
           />
-          <article
-            v-else-if="item.type === 'report'"
-            :id="itemAnchor(item)"
-            class="turn-item report-block"
-            :class="{ streaming: item.data.streaming }"
+          <QuestionInteraction
+            v-else-if="item.type === 'question'"
+            class="turn-item"
+            :question="item.data"
+            @answer="(payload)=>emit('answer',payload)"
+          />
+          <p
+            v-else-if="item.type === 'notice'"
+            class="turn-item notice"
+            :class="item.data.severity"
           >
-            <div class="report-head">
-              <span class="report-label">最终报告</span>
-              <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
-            </div>
-            <MarkdownView :text="item.data.text" />
-          </article>
+            {{ item.data.message }}
+          </p>
+          <div
+            v-else-if="item.type === 'report'"
+            class="message-shell"
+            :class="{ latest: latest && item.data.key === lastActionableReply?.data.key }"
+          >
+            <article
+              :id="itemAnchor(item)"
+              class="turn-item report-block"
+              :class="{ streaming: item.data.streaming, commentary: item.data.purpose !== 'final' }"
+            >
+              <div class="report-head">
+                <span class="report-label">{{ item.data.purpose === 'final' ? '诊断回复' : '分析' }}</span>
+                <span v-if="item.data.streaming" class="report-hint">正在生成…</span>
+              </div>
+              <MarkdownView :text="item.data.text" />
+            </article>
+            <MessageActionBar
+              v-if="item.data.purpose === 'final' && item.data.done"
+              :text="item.data.text"
+              :can-branch="canBranch && turn.status === 'completed' && !!item.data.text.trim()"
+              :timestamp="turn.completedAt"
+              :time-label="timeLabel(turn.completedAt)"
+              @branch="emit('branch', turn.key)"
+            />
+          </div>
         </template>
+        </component>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
+.message-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.question-shell {
+  align-self: flex-end;
+  max-width: min(100%, 820px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-shell > .message-action-bar {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease;
+  }
+
+  .message-shell.latest > .message-action-bar,
+  .message-shell:hover > .message-action-bar,
+  .message-shell:focus-within > .message-action-bar {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-shell > .message-action-bar {
+    transition: none;
+  }
+}
+.report-block.commentary {
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  color: var(--app-muted);
+}
+.report-block.commentary .report-head { display: none; }
+
 .turn {
   /* 对齐原型：回合本身是透明的时间线分组（卡片感由内部工具卡/报告块提供） */
   display: flex;
@@ -357,12 +394,6 @@ function locateStep(step: AgentStep): void {
   flex: none;
 }
 
-.turn-time {
-  font-size: 11px;
-  color: var(--app-muted);
-  font-variant-numeric: tabular-nums;
-}
-
 .turn-duration {
   font-size: 11px;
   color: var(--app-muted);
@@ -388,13 +419,24 @@ function locateStep(step: AgentStep): void {
 }
 
 .turn-question {
+  scroll-margin-block: 16px;
   /* 对齐原型 .msg.user：accent 描边 + accent-soft 底色，右对齐 */
-  align-self: flex-end;
-  max-width: 820px;
   padding: 11px 14px;
   border: 1px solid var(--app-accent);
   border-radius: var(--app-radius);
   background: var(--app-accent-soft);
+  transition: box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.turn-question.question-highlight {
+  box-shadow: 0 0 0 3px var(--app-accent);
+  background: var(--app-surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-question {
+    transition: none;
+  }
 }
 
 .question-role {
@@ -496,5 +538,27 @@ function locateStep(step: AgentStep): void {
 /* P7.2：Run Bar 定位时避开 sticky 顶栏 */
 .turn-item {
   scroll-margin-top: 56px;
+}
+
+.notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-2);
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.notice.warning {
+  border-color: var(--app-warning-border, var(--app-border));
+  color: var(--app-warning, var(--app-text));
+}
+
+.notice.error {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
 }
 </style>

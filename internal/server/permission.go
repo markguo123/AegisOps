@@ -42,6 +42,7 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/auth/login", Access: permission.AccessPublic},
 		permission.Rule{Method: "POST", Path: "/api/v1/auth/logout", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "GET", Path: "/api/v1/auth/me", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "GET", Path: "/api/v1/auth/access", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "GET", Path: "/api/v1/auth/scope", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "POST", Path: "/api/v1/auth/password", Access: permission.AccessAuthenticated},
 		// 发起体检单独立权限位 scan.execute（方案 17 §4.1）：借 chat.write 会让「能聊天」
@@ -55,12 +56,24 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/scans/{id}/cancel", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "POST", Path: "/api/v1/clusters", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "POST", Path: "/api/v1/clusters/test", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "POST", Path: "/api/v1/clusters/contexts", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "PATCH", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterManage},
+		permission.Rule{Method: "POST", Path: "/api/v1/clusters/{id}/check", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters", Access: permission.AccessPermission, Permission: permission.ClusterRead},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters/current", Access: permission.AccessPermission, Permission: permission.ClusterRead},
 		permission.Rule{Method: "GET", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterRead},
+		// 工作台只返回当前用户可用的目标（后端逐条按 EffectiveAccess 过滤），
+		// 因此这里只要求登录，不要求 cluster.read：只读操作员也需要选择自己的目标。
+		// 必须登记在 `/clusters/{id}` 之后：策略按后登记优先，否则会被参数路由覆盖。
+		permission.Rule{Method: "GET", Path: "/api/v1/clusters/workspace", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "DELETE", Path: "/api/v1/clusters/{id}", Access: permission.AccessPermission, Permission: permission.ClusterManage},
 		permission.Rule{Method: "GET", Path: "/api/v1/settings/{group}", Access: permission.AccessPermission, Permission: permission.SettingsRead},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/{group}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
+		permission.Rule{Method: "POST", Path: "/api/v1/settings/model/{action}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
+		permission.Rule{Method: "GET", Path: "/api/v1/settings/model/profiles", Access: permission.AccessPermission, Permission: permission.SettingsRead},
+		permission.Rule{Method: "POST", Path: "/api/v1/settings/model/profiles", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
+		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/model/profiles/{id}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
+		permission.Rule{Method: "DELETE", Path: "/api/v1/settings/model/profiles/{id}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
 		permission.Rule{Method: "GET", Path: "/api/v1/users", Access: permission.AccessPermission, Permission: permission.UserManage},
 		permission.Rule{Method: "POST", Path: "/api/v1/users", Access: permission.AccessPermission, Permission: permission.UserManage},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/users/{id}", Access: permission.AccessPermission, Permission: permission.UserManage},
@@ -81,6 +94,10 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "POST", Path: "/api/v1/skills/import-zip", Access: permission.AccessPermission, Permission: permission.SkillManage},
 		permission.Rule{Method: "POST", Path: "/api/v1/skills/import", Access: permission.AccessPermission, Permission: permission.SkillManage},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/skills/{name}/enabled", Access: permission.AccessPermission, Permission: permission.SkillManage},
+		// 审计中心（P4.7 / 方案 28 §2）：列表与详情都要求 audit.read。admin 的 "*"
+		// 天然满足；其他角色只有被显式授予 audit.read 才能读，网关不放宽。
+		permission.Rule{Method: "GET", Path: "/api/v1/audit/events", Access: permission.AccessPermission, Permission: permission.AuditRead},
+		permission.Rule{Method: "GET", Path: "/api/v1/audit/events/{id}", Access: permission.AccessPermission, Permission: permission.AuditRead},
 		// 报告（P8.5）：只登记「必须登录」，可见性由 owner 与集群授权在 handler 里判定。
 		// 这里刻意不加 report.read 权限位——四期没有独立的报告权限域，凭空造一个恒真的
 		// 权限位会让人误以为存在「授予后即可读所有报告」的开关（方案 15 §12.2）。
@@ -98,6 +115,13 @@ func DefaultAPIPolicy() *permission.Policy {
 		// admin），不新增权限位（方案 15 v1.12 §18）。
 		permission.Rule{Method: "DELETE", Path: "/api/v1/reports/{id}", Access: permission.AccessAuthenticated},
 		permission.Rule{Method: "POST", Path: "/api/v1/reports/cleanup", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "GET", Path: "/api/v1/me/memories", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "POST", Path: "/api/v1/me/memories", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "PATCH", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "DELETE", Path: "/api/v1/me/memories/{id}", Access: permission.AccessAuthenticated},
+		permission.Rule{Method: "GET", Path: "/api/v1/report-retention/preview", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "GET", Path: "/api/v1/report-retention/policies", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "PUT", Path: "/api/v1/report-retention/policies", Access: permission.AccessPermission, Permission: "*"},
 		// 对象存储健康：权限复用 settings.read（已代表「能看平台运行形态」），不新增权限位。
 		permission.Rule{Method: "GET", Path: "/api/v1/storage/health", Access: permission.AccessPermission, Permission: permission.SettingsRead},
 	)

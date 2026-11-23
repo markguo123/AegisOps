@@ -49,16 +49,20 @@ var tokenStatuses = map[string]bool{
 
 // Grant 是授权委派的 API 视图：namespaces / permissions 以 []string 表达。
 type Grant struct {
-	ID            string     `json:"id"`
-	PrincipalType string     `json:"principalType"`
-	PrincipalID   string     `json:"principalId"`
-	ClusterID     string     `json:"clusterId,omitempty"`
-	Namespaces    []string   `json:"namespaces"`
-	Permissions   []string   `json:"permissions"`
-	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	CreatedBy     string     `json:"createdBy,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	ScopeType       string     `json:"scopeType"`
+	ResourceProfile string     `json:"resourceProfile"`
+	Actions         []string   `json:"actions"`
+	UserID          string     `json:"userId"`
+	ID              string     `json:"id"`
+	PrincipalType   string     `json:"principalType"`
+	PrincipalID     string     `json:"principalId"`
+	ClusterID       string     `json:"clusterId,omitempty"`
+	Namespaces      []string   `json:"namespaces"`
+	Permissions     []string   `json:"permissions"`
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	CreatedBy       string     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 // Token 是 API Token 的 API 视图（TokenHash 永不回显，仅 createdAt 等元数据）。
@@ -272,6 +276,7 @@ func (s *Service) GetGrant(ctx context.Context, id string) (*Grant, error) {
 
 // CreateGrant 创建一条 namespace 授权/销毁委派，createdBy 记录操作者。
 func (s *Service) CreateGrant(ctx context.Context, req CreateGrantRequest, createdBy string) (*Grant, error) {
+	defer InvalidateAuthorization()
 	if err := validateGrant(req.PrincipalType, req.PrincipalID, req.Namespaces, req.Permissions, req.ExpiresAt); err != nil {
 		return nil, err
 	}
@@ -304,6 +309,7 @@ func (s *Service) CreateGrant(ctx context.Context, req CreateGrantRequest, creat
 
 // UpdateGrant 部分更新授权委派（不可变更 principalType/principalId）。
 func (s *Service) UpdateGrant(ctx context.Context, id string, req UpdateGrantRequest) (*Grant, error) {
+	defer InvalidateAuthorization()
 	g, err := s.st.AuthzGrants().Get(ctx, id)
 	if err != nil {
 		return nil, mapGetErr(err, ErrGrantNotFound, "grant")
@@ -356,6 +362,7 @@ func (s *Service) DeleteGrant(ctx context.Context, id string) error {
 	if err := s.st.AuthzGrants().Delete(ctx, id); err != nil {
 		return mapGetErr(err, ErrGrantNotFound, "grant")
 	}
+	InvalidateAuthorization()
 	return nil
 }
 
@@ -513,7 +520,7 @@ func toGrantView(g *store.AuthzGrant) (*Grant, error) {
 		return nil, fmt.Errorf("authz: decode permissions: %w", err)
 	}
 	return &Grant{
-		ID:            g.ID,
+		ID: g.ID, ScopeType: g.ScopeType, ResourceProfile: g.ResourceProfile, Actions: permissions, UserID: g.PrincipalID,
 		PrincipalType: g.PrincipalType,
 		PrincipalID:   g.PrincipalID,
 		ClusterID:     g.ClusterID,

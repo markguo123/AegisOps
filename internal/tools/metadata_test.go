@@ -53,7 +53,7 @@ func TestKubectlSchemaMetadata(t *testing.T) {
 		if spec.Name != "kubectl" {
 			continue
 		}
-		for _, want := range []string{"[READ/WRITE]", "[RISK: DEPENDS ON COMMAND]", "[APPROVAL REQUIRED FOR WRITE OR SHELL]"} {
+		for _, want := range []string{"[READ/WRITE]", "[RISK: DEPENDS ON COMMAND]", "[APPROVAL REQUIRED FOR WRITE OR UNPROVEN SHELL]"} {
 			if !strings.Contains(spec.Description, want) {
 				t.Fatalf("kubectl description 缺少 %q: %q", want, spec.Description)
 			}

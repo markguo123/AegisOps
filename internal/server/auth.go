@@ -88,6 +88,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "authentication required")
 		return
 	}
+	// 来源口径与 auth.ListUsers 一致：users 表没有 source 列，未绑定外部身份即本地口令账号。
+	if u.Source == "" {
+		u.Source = store.UserSourceLocal
+	}
 	writeOK(w, r, http.StatusOK, map[string]any{"user": u, "role": role})
 }
 

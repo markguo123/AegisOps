@@ -27,6 +27,20 @@ func TestBasePromptIncludesR6CreateProtocol(t *testing.T) {
 	}
 }
 
+func TestBasePromptUsesAegisOpsIdentity(t *testing.T) {
+	p := basePrompt()
+	for _, want := range []string{
+		"你是 AegisOps（云原生智能工作台）",
+		"你的云原生智能工作台与运维伴侣",
+		"必须自称 AegisOps",
+		"不得自称 k8s-ai",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("basePrompt 缺少产品身份约束 %q", want)
+		}
+	}
+}
+
 func TestBasePromptRoutesCreateIntentAwayFromKubectl(t *testing.T) {
 	p := basePrompt()
 	for _, want := range []string{
@@ -61,5 +75,15 @@ func TestShimPromptIncludesCreateProtocol(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("shimPrompt missing %q", want)
 		}
+	}
+}
+
+func TestPromptUsesDecisionToolWithoutForcedAlternatives(t *testing.T) {
+	p := basePrompt()
+	if !strings.Contains(p, "ask_user_question") || strings.Contains(p, "≥2 条") {
+		t.Fatal("decision guidance missing or forced alternatives remain")
+	}
+	if !strings.Contains(p, "选择方案不授权具体写操作") {
+		t.Fatal("approval boundary missing")
 	}
 }

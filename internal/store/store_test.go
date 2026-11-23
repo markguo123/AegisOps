@@ -459,7 +459,18 @@ func runMemoryStore(t *testing.T, s Store) {
 	if err != nil || len(list) != 1 || list[0].Content != "updated" {
 		t.Fatalf("list: %v %+v", err, list)
 	}
-	if err := s.Memories().Delete(ctx, "m1"); err != nil {
+	owned, err := s.Memories().ListOwned(ctx, "u1", 1)
+	if err != nil || len(owned) != 1 || owned[0].ID != "m1" {
+		t.Fatalf("owner list: %v %+v", err, owned)
+	}
+	other, err := s.Memories().ListOwned(ctx, "u2", 1)
+	if err != nil || len(other) != 0 {
+		t.Fatalf("other owner list: %v %+v", err, other)
+	}
+	if err := s.Memories().DeleteOwned(ctx, "u2", "m1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other owner delete: %v", err)
+	}
+	if err := s.Memories().DeleteOwned(ctx, "u1", "m1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := s.Memories().Get(ctx, "m1"); !errors.Is(err, ErrNotFound) {
@@ -667,6 +678,7 @@ func runAllStoreCRUD(t *testing.T, s Store) {
 	runClusterCredentialCRUD(t, s)
 	runAuthzGrantCRUD(t, s)
 	runApiTokenCRUD(t, s)
+	runUserSource(t, s)
 }
 
 // TestStoresSQLite 覆盖 SQLite 默认驱动的全量 CRUD。

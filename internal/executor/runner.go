@@ -2,7 +2,11 @@ package executor
 
 import (
 	"context"
+	"github.com/k8s-ai/k8s-ai/internal/cmdplan"
+	"github.com/k8s-ai/k8s-ai/internal/k8sgateway"
+	"io"
 	"log/slog"
+	"net/http"
 	"os/exec"
 	"sync"
 	"time"
@@ -20,14 +24,21 @@ const shellBinary = "bash"
 
 // Runner 同时实现 kubectl 执行与 client-go 结构化写操作。
 type Runner struct {
+	targetID      string
 	bin           string
 	kubeconfig    string
+	targetBound   bool
+	targetCheck   func(context.Context) error
+	requestCheck  func(*http.Request) error
+	gateway       k8sgateway.Gateway
 	maxBytes      int
 	denyOps       []string
 	shellEnabled  bool
 	cs            kubernetes.Interface
 	ns            string
 	streamTimeout time.Duration
+	execPod       ExecPodOptions
+	podStream     func(context.Context, cmdplan.PodExecRequest, []string, io.Writer, io.Writer) error
 
 	// 三期创建通道（R2）：dyn/mapper 可直接注入（测试），否则由 restConfig 惰性构造。
 	restConfig   *rest.Config
@@ -45,8 +56,13 @@ type Runner struct {
 // NewRunner 创建执行器。
 func NewRunner(opts Options) *Runner {
 	r := &Runner{
+		targetID:      opts.TargetID,
 		bin:           opts.KubectlBin,
 		kubeconfig:    opts.Kubeconfig,
+		targetBound:   opts.TargetBound,
+		targetCheck:   opts.TargetCheck,
+		requestCheck:  opts.RequestCheck,
+		gateway:       opts.Gateway,
 		maxBytes:      opts.MaxBytes,
 		denyOps:       opts.DenyOps,
 		shellEnabled:  opts.ShellEnabled,
@@ -60,6 +76,10 @@ func NewRunner(opts Options) *Runner {
 	}
 	if r.bin == "" {
 		r.bin = "kubectl"
+	}
+	r.execPod = DefaultExecPodOptions()
+	if opts.ExecPod != nil {
+		r.execPod = *opts.ExecPod
 	}
 	if r.maxBytes <= 0 {
 		r.maxBytes = 64 * 1024
@@ -108,7 +128,7 @@ var toolchainLogOnce sync.Once
 // 关闭态缺工具是 INFO（无 shell 镜像变体的预期形态）。
 func logToolchain(st ToolchainStatus) {
 	if !st.ShellEnabled {
-		slog.Info("executor: shell 通道已关闭（platform.exec.shell_enabled=false），含管道构造的命令将被策略级拒绝",
+		slog.Info("executor: shell 通道已关闭（platform.exec.shell_enabled=false），安全只读受控组合仍可执行",
 			"kubectl", st.KubectlPath, "kubectl_found", st.KubectlFound)
 		return
 	}

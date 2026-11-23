@@ -145,14 +145,13 @@ describe('users API（P3.12 用户与权限前端契约）', () => {
     const fetchMock = vi.fn().mockResolvedValue(envelopeResponse(201, created))
     vi.stubGlobal('fetch', fetchMock)
     const grant = await createGrant({
-      principalType: 'user',
-      principalId: 'alice',
+      userId:'alice',clusterId:'c1',scopeType:'namespace',
       namespaces: ['ns-a', 'ns-b'],
-      permissions: ['*'],
+      actions: ['read'],
     })
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toMatchObject({ principalId: 'alice', namespaces: ['ns-a', 'ns-b'] })
+    expect(JSON.parse(init.body as string)).toMatchObject({ userId: 'alice', namespaces: ['ns-a', 'ns-b'] })
     expect(grant.principalId).toBe('alice')
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(envelopeResponse(200, created)))
@@ -160,12 +159,12 @@ describe('users API（P3.12 用户与权限前端契约）', () => {
 
     const updateMock = vi.fn().mockResolvedValue(envelopeResponse(200, { ...created, permissions: ['destroy'] }))
     vi.stubGlobal('fetch', updateMock)
-    await updateGrant('g-1', { permissions: ['destroy'], expiresAt: '2031-01-01T00:00:00Z' })
+    await updateGrant('g-1', { actions: ['destroy'], expiresAt: '2031-01-01T00:00:00Z' })
     const [url, updateInit] = updateMock.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('/grants/g-1')
     expect(updateInit.method).toBe('PATCH')
     expect(JSON.parse(updateInit.body as string)).toEqual({
-      permissions: ['destroy'],
+      actions: ['destroy'],
       expiresAt: '2031-01-01T00:00:00Z',
     })
 

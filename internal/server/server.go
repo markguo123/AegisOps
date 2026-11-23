@@ -35,13 +35,15 @@ const (
 
 // ScanJob 内存任务。
 type ScanJob struct {
-	ID        string            `json:"id"`
-	Status    ScanStatus        `json:"status"`
-	Result    *model.ScanResult `json:"result,omitempty"`
-	Error     string            `json:"error,omitempty"`
-	CreatedAt time.Time         `json:"createdAt"`
-	StartedAt *time.Time        `json:"startedAt,omitempty"`
-	EndedAt   *time.Time        `json:"endedAt,omitempty"`
+	ClusterID     string            `json:"clusterId,omitempty"`
+	CoverageLevel int               `json:"-"`
+	ID            string            `json:"id"`
+	Status        ScanStatus        `json:"status"`
+	Result        *model.ScanResult `json:"result,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	StartedAt     *time.Time        `json:"startedAt,omitempty"`
+	EndedAt       *time.Time        `json:"endedAt,omitempty"`
 	// Owner 是发起人的用户 ID（P8.13）。任务结果含被扫命名空间的问题清单，
 	// 没有 owner 就没法判「谁的任务」，GET 只能对全体登录用户开放。
 	Owner string `json:"owner,omitempty"`
@@ -55,12 +57,18 @@ type ScanJob struct {
 
 // Server 最小化 HTTP 服务。
 type Server struct {
-	svc  service.ScanService
-	auth authService
+	memories      *service.DiagnosticMemories
+	modelChecks   modelChecks
+	modelProfiles modelProfiles
+	platform      *service.PlatformAccess
+	svc           service.ScanService
+	auth          authService
 	// settings 是配置中心应用服务（P1.10），nil 时配置端点返回 501。
 	settings settingsService
 	// auditlog 写系统事件（LOGIN/LOGOUT 等，P1.11），nil 时跳过。
 	auditlog auditWriter
+	// auditQuery 是审计只读查询面（P4.7），nil 时审计端点返回 501。
+	auditQuery auditQueryService
 	// clusterSvc 是集群管理应用服务（P3.1-P3.3），nil 时集群端点返回 501。
 	clusterSvc clusterService
 	// skillsSvc 是 Skill 平台应用服务（P3.5），nil 时 Skill 端点返回 501。
@@ -194,6 +202,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
+	mux.HandleFunc("GET /api/v1/auth/access", s.handleAccess)
 	mux.HandleFunc("GET /api/v1/auth/scope", s.handleMyScope)
 	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)
 	mux.HandleFunc("POST /api/v1/scans", s.handleCreateScan)
@@ -201,12 +210,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/scans/{id}/cancel", s.handleCancelScan)
 	mux.HandleFunc("POST /api/v1/clusters", s.handleCreateCluster)
 	mux.HandleFunc("POST /api/v1/clusters/test", s.handleTestCluster)
+	mux.HandleFunc("POST /api/v1/clusters/contexts", s.handleClusterContexts)
+	mux.HandleFunc("GET /api/v1/clusters/workspace", s.handleClusterWorkspace)
+	mux.HandleFunc("PATCH /api/v1/clusters/{id}", s.handleUpdateCluster)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/check", s.handleCheckCluster)
 	mux.HandleFunc("GET /api/v1/clusters", s.handleListClusters)
 	mux.HandleFunc("GET /api/v1/clusters/current", s.handleCurrentCluster)
 	mux.HandleFunc("GET /api/v1/clusters/{id}", s.handleGetCluster)
 	mux.HandleFunc("DELETE /api/v1/clusters/{id}", s.handleDeleteCluster)
 	mux.HandleFunc("GET /api/v1/settings/{group}", s.handleGetSettings)
 	mux.HandleFunc("PATCH /api/v1/settings/{group}", s.handlePatchSettings)
+	mux.HandleFunc("POST /api/v1/settings/model/{action}", s.handleModelCheck)
+	mux.HandleFunc("GET /api/v1/settings/model/profiles", s.handleModelProfiles)
+	mux.HandleFunc("POST /api/v1/settings/model/profiles", s.handleModelProfiles)
+	mux.HandleFunc("PATCH /api/v1/settings/model/profiles/{id}", s.handleModelProfiles)
+	mux.HandleFunc("DELETE /api/v1/settings/model/profiles/{id}", s.handleModelProfiles)
 	mux.HandleFunc("GET /api/v1/users", s.handleListUsers)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
 	mux.HandleFunc("PATCH /api/v1/users/{id}", s.handleUpdateUser)
@@ -227,6 +245,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/skills/import-procedural", s.handleImportProceduralDocs)
 	mux.HandleFunc("POST /api/v1/skills/import-zip", s.handleImportProceduralZip)
 	mux.HandleFunc("PATCH /api/v1/skills/{name}/enabled", s.handlePatchSkillEnabled)
+	mux.HandleFunc("GET /api/v1/audit/events", s.handleListAuditEvents)
+	mux.HandleFunc("GET /api/v1/audit/events/{id}", s.handleGetAuditEvent)
 	mux.HandleFunc("GET /api/v1/reports", s.handleListReports)
 	// 总览必须在 {id} 之前登记：Go 的 mux 让静态段优先于通配段，登记顺序只是把
 	// 「summary 不是一个报告 ID」这件事写给读代码的人看。
@@ -237,13 +257,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/reports/{id}/report", s.handleGetReportStructured)
 	mux.HandleFunc("DELETE /api/v1/reports/{id}", s.handleDeleteReport)
 	mux.HandleFunc("POST /api/v1/reports/cleanup", s.handleCleanupReports)
+	mux.HandleFunc("GET /api/v1/report-retention/preview", s.handleReportRetentionPreview)
+	mux.HandleFunc("GET /api/v1/report-retention/policies", s.handleReportRetentionPolicies)
+	mux.HandleFunc("PUT /api/v1/report-retention/policies", s.handleReportRetentionPolicies)
+	mux.HandleFunc("GET /api/v1/me/memories", s.handleDiagnosticMemories)
+	mux.HandleFunc("POST /api/v1/me/memories", s.handleDiagnosticMemories)
+	mux.HandleFunc("PATCH /api/v1/me/memories/{id}", s.handleDiagnosticMemories)
+	mux.HandleFunc("DELETE /api/v1/me/memories/{id}", s.handleDiagnosticMemories)
 	mux.HandleFunc("GET /api/v1/storage/health", s.handleStorageHealth)
 	// 未登记的 /api/v1/* 一律回统一 JSON 错误体，不能被 SPA fallback 吞成 index.html
 	// （P6.11：前端拿到 HTML 会比 404 更难排查）。
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		mux.HandleFunc(method+" /api/v1/{path...}", s.handleAPINotFound)
 	}
-	return WithMiddleware(mux, DefaultCORS(), s.perms, s.principal)
+	managed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutation := r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS"
+		if s.platform != nil && mutation && serverRoleIsAdmin(RoleFrom(r.Context())) && r.URL.Path != "/api/v1/auth/login" && r.URL.Path != "/api/v1/auth/logout" {
+			if !s.auditPolicy(w, r, "platform.change.request") {
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return WithMiddleware(managed, DefaultCORS(), s.perms, s.principal)
 }
 
 // principal 由 Token 解析当前用户与角色；未配置认证服务时视为未认证。

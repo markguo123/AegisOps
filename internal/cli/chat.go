@@ -235,6 +235,7 @@ func runChatInteractive(cmd *cobra.Command, chat service.ChatService, sessionID 
 		events, err := chat.Chat(cmd.Context(), service.ChatRequest{
 			SessionID:       sessionID,
 			Query:           query,
+			Ask:             terminalDecision(cmd.InOrStdin(), in, w),
 			SkipPermissions: f.skipPermissions,
 		}, respond)
 		if err != nil {
@@ -311,7 +312,7 @@ func newChatInput(in io.Reader, out io.Writer) chatInput {
 			Stdin:        f,
 			Stdout:       out,
 			Stderr:       os.Stderr,
-			HistoryFile:  filepath.Join(os.TempDir(), "k8s-ai-history"),
+			HistoryFile:  filepath.Join(os.TempDir(), "aopsctl-history"),
 			HistoryLimit: 1000,
 		})
 		if err == nil {

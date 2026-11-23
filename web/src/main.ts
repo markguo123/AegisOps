@@ -21,10 +21,11 @@ const app = createApp(App)
 const pinia = createPinia()
 
 app.use(pinia)
-app.use(router)
+
 app.use(ElementPlus, { locale: zhCn })
 
 // P2.3：应用启动时恢复本地会话并通过 /auth/me 校正角色。
-void useAuthStore(pinia).restore()
-
-app.mount('#app')
+void useAuthStore(pinia).restore().then(() => {
+  app.use(router)
+  app.mount('#app')
+})

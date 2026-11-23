@@ -17,10 +17,18 @@ describe('路由守卫（P2.2 未登录不可访问业务页）', () => {
   })
 
   it('未登录访问业务页跳登录并带上回跳地址', async () => {
-    const path = await goto('/app/approval')
+    const path = await goto('/app/audit')
     expect(path).toContain('/login')
     expect(path).toContain('redirect=')
-    expect(decodeURIComponent(path)).toContain('/app/approval')
+    expect(decodeURIComponent(path)).toContain('/app/audit')
+  })
+
+  it('独立审批中心已取消：/app/approval 不再注册，回落问诊页', async () => {
+    localStorage.setItem(TOKEN_KEY, 'tok-1')
+    localStorage.setItem(USER_KEY, JSON.stringify({ userId: 'u1', username: 'admin', role: 'admin' }))
+    setActivePinia(createPinia())
+    await goto('/app/chat')
+    expect(await goto('/app/approval')).toBe('/app/chat')
   })
 
   it('已登录访问 /login 回到问诊页，业务页保持可达', async () => {

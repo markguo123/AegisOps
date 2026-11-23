@@ -13,9 +13,11 @@ import copyText from '@/composables/useClipboard'
  */
 
 export interface ApprovalUiData {
+ id?:string
   key: string
   title?: string
   operation?: string
+  toolCallId?: string
   command?: string
   prompt: string
   options: Array<{ label: string; value: string }>
@@ -54,15 +56,18 @@ const props = withDefaults(
      * 默认 true：未接入权限上下文的场景（如三期回放）保持原有可操作行为。
      */
     canDecide?: boolean
+    /** P12.4 会话绑定集群的展示名；为空时回退显示后端返回的 ClusterID。 */
+    clusterLabel?: string
   }>(),
   {
     canDecide: true,
+    clusterLabel: '',
   },
 )
 
 const emit = defineEmits<{
-  (e: 'approve', value: string): void
-  (e: 'reject'): void
+  (e: 'approve', value: string,id?:string): void
+  (e: 'reject',id?:string): void
 }>()
 
 const secretValue = ref('')
@@ -134,8 +139,15 @@ const targetText = computed(() => {
   return parts.join(' · ')
 })
 
+/** 审批目标必须同时显示集群；名称优先，未知名称时回退稳定 ClusterID。 */
+const clusterText = computed(() => {
+  const id = props.approval.target?.cluster
+  if (!id) return ''
+  return props.clusterLabel || id
+})
+
 function optionLabel(option: { label: string; value: string }): string {
-  if (option.value === 'yes') return '确认执行'
+  if (option.value === 'yes') return props.approval.operation === 'secret.read' ? '同意读取' : '确认执行'
   if (option.value === 'yes_and_dont_ask_again') return '本次会话不再询问'
   return option.label || option.value
 }
@@ -164,13 +176,13 @@ function resolveSecret(optionValue: string): string {
 
 function approve(option: { label: string; value: string }): void {
   const value = props.approval.secret ? resolveSecret(option.value) : option.value
-  emit('approve', value)
+  if(props.approval.id) emit('approve',value,props.approval.id);else emit('approve',value)
   // 值不入流，提交后即清空。
   secretValue.value = ''
 }
 
 function reject(): void {
-  emit('reject')
+  if(props.approval.id) emit('reject',props.approval.id);else emit('reject')
   secretValue.value = ''
 }
 </script>
@@ -208,13 +220,13 @@ function reject(): void {
       </el-tag>
     </div>
 
-    <p v-if="showLegacyPrompt && approval.prompt" class="approval-prompt">{{ approval.prompt }}</p>
+    <p v-if="(showLegacyPrompt || approval.operation === 'secret.read') && approval.prompt" class="approval-prompt">{{ approval.prompt }}</p>
 
     <div v-if="targetText" class="approval-target">
       <span class="approval-section-label">目标资源</span>
       <strong>{{ targetText }}</strong>
-      <span v-if="approval.target?.cluster" class="approval-target-cluster">
-        {{ approval.target.cluster }}
+      <span v-if="clusterText" class="approval-target-cluster">
+        集群：{{ clusterText }}
       </span>
     </div>
 

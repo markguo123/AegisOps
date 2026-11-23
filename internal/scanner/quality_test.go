@@ -46,6 +46,21 @@ func hasKind(list []string, want string) bool {
 
 func joined(parts []string) string { return strings.Join(parts, "\n") }
 
+func TestCollectionQualityScoped(t *testing.T) {
+	for _, pod := range []string{"", "web"} {
+		opts := model.ScanOptions{Namespace: "prod", PodTarget: pod, CollectEvents: true}
+		snap := qualSnapshot()
+		q := CollectionQuality(snap, opts, nil)
+		if q.Integrity != model.IntegrityComplete || q.Coverage != 1 || q.Planned != 13 {
+			t.Fatalf("unexpected scoped quality: %+v", q)
+		}
+		snap.CollectionErrors = append(snap.CollectionErrors, collectErr("list_pods", "Pod", "prod"))
+		if q := CollectionQuality(snap, opts, nil); q.Integrity != model.IntegrityInsufficient {
+			t.Fatalf("missing Pod evidence must prevent a healthy conclusion: %+v", q)
+		}
+	}
+}
+
 func TestCollectionQualityComplete(t *testing.T) {
 	snap := qualSnapshot("prod", "kube-system")
 	targets := []model.ResourceRef{{Kind: "Pod", Namespace: "prod", Name: "web-1"}}

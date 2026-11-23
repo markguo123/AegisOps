@@ -33,7 +33,7 @@ func ComputeHealthScoreWithQuality(findings []model.Finding, q *model.Collection
 	hs.Coverage = q.Coverage
 	switch q.Integrity {
 	case model.IntegrityInsufficient:
-		capScore(&hs, 60, "关键数据（Pod/Node/工作负载/Events）采集不完整，结论可信度受限")
+		capScore(&hs, 60, "本次体检范围内的关键数据采集不完整")
 	case model.IntegrityPartial:
 		capScore(&hs, 85, "部分资源类型采集失败，报告范围不完整")
 	}
@@ -118,17 +118,23 @@ func BuildConclusion(r *model.ScanResult) *model.Conclusion {
 		c.Headline = fmt.Sprintf("检测到 %d 项业务异常，需优先排查", len(businessRoots))
 	case integrity == model.IntegrityInsufficient:
 		c.Level = "unknown"
-		c.Headline = "关键数据采集不完整，无法判定集群是否健康"
+		c.Headline = "关键数据采集不完整，无法判定" + inspectionTarget(r.Meta) + "是否健康"
 	case len(suggestionRoots) > 0:
 		c.Level = "attention"
 		c.Headline = fmt.Sprintf("未发现业务故障，存在 %d 项治理建议", len(suggestionRoots))
+	case integrity == model.IntegrityPartial:
+		c.Level = "attention"
+		c.Headline = inspectionTarget(r.Meta) + "在已采集数据中未发现异常，但部分检查未完成"
 	default:
 		c.Level = "healthy"
-		c.Headline = "本次体检未发现异常"
+		c.Headline = inspectionTarget(r.Meta) + "在已采集数据中未发现异常"
 	}
 
 	var parts []string
-	parts = append(parts, fmt.Sprintf("健康评分 %d/%d", r.HealthScore.Score, r.HealthScore.Max))
+	parts = append(parts, "体检目标："+inspectionTarget(r.Meta), fmt.Sprintf("健康评分 %d/%d", r.HealthScore.Score, r.HealthScore.Max))
+	if r.Meta.Pod != "" {
+		parts = append(parts, "资源汇总包含用于关联分析的命名空间上下文，结论仅针对目标 Pod 及其关联资源")
+	}
 	if r.HealthScore.Capped {
 		parts = append(parts, "评分已因数据完整性封顶（"+r.HealthScore.CapReason+"）")
 	}
@@ -185,6 +191,17 @@ func BuildConclusion(r *model.ScanResult) *model.Conclusion {
 	c.Priorities = priorityList(r)
 	c.DataCaveats = dataCaveats(r)
 	return c
+}
+
+func inspectionTarget(meta model.ScanMeta) string {
+	switch {
+	case meta.Pod != "":
+		return "Pod " + meta.Namespace + "/" + meta.Pod
+	case meta.Namespace != "":
+		return "命名空间 " + meta.Namespace
+	default:
+		return "集群"
+	}
 }
 
 func diagnosisModeText(mode string) string {
@@ -352,7 +369,7 @@ func DomainHealthList(r *model.ScanResult) []model.DomainHealth {
 		dh := model.DomainHealth{Domain: d, Total: total, Unhealthy: unhealthy[d], Critical: critical[d]}
 		switch {
 		case dh.Unhealthy == 0 && total > 0:
-			dh.Detail = "未发现异常"
+			dh.Detail = "已采集数据中未发现异常"
 		case dh.Unhealthy > 0:
 			dh.Detail = fmt.Sprintf("%d 项异常，其中 %d 项高风险及以上", dh.Unhealthy, dh.Critical)
 		default:

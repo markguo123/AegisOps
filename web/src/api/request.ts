@@ -11,10 +11,11 @@ import {
 /** API 前缀。下载类端点要自己拼 fetch（响应体不是 JSON），因此必须导出。 */
 export const API_BASE = '/api/v1'
 
-export const TOKEN_KEY = 'k8s_ai_token'
-export const USER_KEY = 'k8s_ai_user'
+export const TOKEN_KEY = 'aegisops_token'
+export const USER_KEY = 'aegisops_user'
 
 export interface RequestOptions {
+  signal?: AbortSignal
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   body?: unknown
   /**
@@ -54,8 +55,9 @@ export class ApiRequestError extends Error {
   }
 }
 
-export function readToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+export function addCsrfHeader(headers: Headers): void {
+  const cookie = document.cookie.split('; ').find((v) => v.startsWith('__Host-aegisops_csrf=') || v.startsWith('aegisops_dev_csrf='))
+  if (cookie) headers.set('X-CSRF-Token', cookie.slice(cookie.indexOf('=') + 1))
 }
 
 export function readStoredUser<T>(): T | null {
@@ -70,8 +72,8 @@ export function readStoredUser<T>(): T | null {
   }
 }
 
-export function saveSession(token: string, user: unknown): void {
-  localStorage.setItem(TOKEN_KEY, token)
+export function saveSession(user: unknown): void {
+  localStorage.removeItem(TOKEN_KEY)
   localStorage.setItem(USER_KEY, JSON.stringify(user))
 }
 
@@ -150,12 +152,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<A
   } else if (formData === undefined && body !== undefined) {
     headers.set('Content-Type', 'application/json')
   }
-  const token = readToken()
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+  if (method !== 'GET') addCsrfHeader(headers)
 
-  const init: RequestInit = { method, headers }
+  const init: RequestInit = { method, headers, signal: options.signal }
   if (rawBody !== undefined) {
     init.body = rawBody
   } else if (formData !== undefined) {
@@ -219,8 +218,8 @@ export function apiGet<T>(
   return request<T>(path, { method: 'GET', query, filters })
 }
 
-export function apiPost<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-  return request<T>(path, { method: 'POST', body })
+export function apiPost<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<ApiResponse<T>> {
+  return request<T>(path, { method: 'POST', body, signal })
 }
 
 /** 以文本/YAML 原始请求体发送 POST（导入端点专用，P3.6）。 */

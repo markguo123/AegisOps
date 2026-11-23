@@ -5,6 +5,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -273,6 +274,9 @@ func (s *snapCollector) addEvents(items []corev1.Event) {
 
 // Phase1 执行全量轻量采集，返回 ClusterSnapshot。
 func (c *collector) Phase1(ctx context.Context, opts model.ScanOptions) (*model.ClusterSnapshot, error) {
+	if opts.PodTarget != "" && opts.Namespace == "" {
+		return nil, errors.New("target Pod requires a namespace")
+	}
 	concurrency := opts.Concurrency
 	if concurrency <= 0 {
 		concurrency = 8 // 默认 Phase1 并发（FR-024）
@@ -281,16 +285,18 @@ func (c *collector) Phase1(ctx context.Context, opts model.ScanOptions) (*model.
 	collect := &snapCollector{snap: snap}
 
 	// 1. 命名空间必须先拉取：它决定后续 events 的采集范围。
-	namespaces, err := c.reader.ListNamespaces(ctx)
-	if err != nil {
-		collect.addError(model.CollectionError{
-			Resource:  model.ResourceRef{Kind: "Namespace"},
-			Operation: "list_namespaces",
-			Message:   err.Error(),
-			Time:      time.Now().UTC().Format(time.RFC3339),
-		})
-	} else {
-		collect.addNamespaces(namespaces)
+	if opts.Namespace == "" {
+		namespaces, err := c.reader.ListNamespaces(ctx)
+		if err != nil {
+			collect.addError(model.CollectionError{
+				Resource:  model.ResourceRef{Kind: "Namespace"},
+				Operation: "list_namespaces",
+				Message:   err.Error(),
+				Time:      time.Now().UTC().Format(time.RFC3339),
+			})
+		} else {
+			collect.addNamespaces(namespaces)
+		}
 	}
 
 	// 2. 组装 25 类资源 list 任务 + 每 namespace 一次 events 任务。
@@ -356,13 +362,21 @@ func (c *collector) Phase1(ctx context.Context, opts model.ScanOptions) (*model.
 // resourceTasks 返回 25 类资源的 list 任务（不含 events，含 Secret 元数据）。
 func (c *collector) resourceTasks(collect *snapCollector, opts model.ScanOptions) []phase1Task {
 	ns := opts.Namespace
-	return []phase1Task{
+	tasks := []phase1Task{
 		{operation: "list_pods", kind: "Pod", fn: func(ctx context.Context) error {
 			pods, err := c.reader.ListPods(ctx, ns)
 			if err != nil {
 				return err
 			}
 			collect.addPods(pods)
+			if opts.PodTarget != "" {
+				for _, pod := range pods {
+					if pod.Name == opts.PodTarget {
+						return nil
+					}
+				}
+				return fmt.Errorf("target Pod %s/%s not found", ns, opts.PodTarget)
+			}
 			return nil
 		}},
 		{operation: "list_nodes", kind: "Node", fn: func(ctx context.Context) error {
@@ -550,6 +564,14 @@ func (c *collector) resourceTasks(collect *snapCollector, opts model.ScanOptions
 			return nil
 		}},
 	}
+	scoped := tasks[:0]
+	for _, task := range tasks {
+		if collectionInScope(task.operation, opts) {
+			task.namespace = ns
+			scoped = append(scoped, task)
+		}
+	}
+	return scoped
 }
 
 // eventNamespaces 决定 events 采集范围：指定 namespace 时只用该 ns，否则用全部命名空间。

@@ -166,6 +166,26 @@ func (t *createTool) parseInput(input json.RawMessage) (createArgs, error) {
 	return args, nil
 }
 
+func (t *createTool) OperationFacts(input json.RawMessage) (OperationFacts, error) {
+	args, err := t.parseInput(input)
+	if err != nil {
+		return OperationFacts{}, err
+	}
+	var objects []manifestx.Object
+	if args.apply {
+		var code string
+		objects, code, _ = t.resolveApplyObjects(args)
+		if code != "" {
+			return OperationFacts{}, errUnproven
+		}
+	} else {
+		objects, err = manifestx.Parse(args.manifest, t.parseOptions())
+		if err != nil {
+			return OperationFacts{}, err
+		}
+	}
+	return ObjectOperationFacts(objects)
+}
 func (t *createTool) Execute(ctx context.Context, input json.RawMessage) (ToolResult, error) {
 	args, err := t.parseInput(input)
 	if err != nil {

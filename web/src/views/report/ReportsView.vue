@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CircleClose,
@@ -14,7 +14,7 @@ import {
   View,
 } from '@element-plus/icons-vue'
 
-import { myScope } from '@/api/auth'
+import {useClusterAccess} from '@/composables/useClusterAccess'
 import { listClusters } from '@/api/clusters'
 import {
   cleanupReports,
@@ -26,6 +26,11 @@ import {
   getReportSummary,
   getStorageHealth,
   listReports,
+  previewReportRetention,
+  listReportRetentionPolicies,
+  saveReportRetentionPolicy,
+  type ReportRetentionPolicy,
+  type ReportRetentionPreview,
 } from '@/api/reports'
 import {
   SCAN_FORMATS,
@@ -43,7 +48,7 @@ import {
 } from '@/api/scans'
 import type {
   Cluster,
-  EffectiveScope,
+
   ReportOverview,
   ReportView,
   ScanJob,
@@ -58,6 +63,80 @@ import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 // 这里只传筛选条件、不做任何归属推断；跨 owner 下载的审计也由后端落，前端只提示。
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
+
+const retentionOpen = ref(false)
+const retentionPolicies = ref<ReportRetentionPolicy[]>([])
+const retentionLoading = ref(false)
+const retentionResult = ref<ReportRetentionPreview | null>(null)
+const retentionCluster = ref('')
+const retentionKind = ref('latest-md')
+const retentionDays = ref(90)
+const retentionMinimum = ref(5)
+const canPreviewRetention = computed(() => auth.user?.role === 'admin')
+
+async function openRetentionPreview() {
+  retentionCluster.value = filterCluster.value
+  retentionResult.value = null
+  retentionOpen.value = true
+  retentionPolicies.value = []
+  try {
+    retentionPolicies.value = await listReportRetentionPolicies()
+  } catch (err) {
+    ElMessage.error(describeReportError('读取保留策略', err))
+  }
+}
+
+async function changeRetentionPolicy(enabled: boolean, saved?: ReportRetentionPolicy) {
+  if (retentionLoading.value || (enabled && !retentionResult.value)) return
+  const preview = retentionResult.value ?? undefined
+  const policy = saved ?? {
+    clusterId: retentionCluster.value,
+    kind: retentionKind.value,
+    days: retentionDays.value,
+    minimum: retentionMinimum.value,
+  }
+  retentionLoading.value = true
+  try {
+    if (enabled) {
+      try {
+        await ElMessageBox.confirm(
+          '启用后将定时删除符合策略的报告引用，范围包含所选集群和类型下各用户的报告。',
+          '启用报告自动清理',
+          { confirmButtonText: '启用', type: 'warning' },
+        )
+      } catch {
+        return
+      }
+    }
+    await saveReportRetentionPolicy({ ...policy, enabled }, preview)
+    retentionResult.value = null
+    ElMessage.success(enabled ? '已启用报告自动清理' : '已停用报告自动清理')
+    retentionPolicies.value = await listReportRetentionPolicies()
+  } catch (err) {
+    ElMessage.error(describeReportError('更新保留策略', err))
+  } finally {
+    retentionLoading.value = false
+  }
+}
+
+async function loadRetentionPreview() {
+  if (retentionLoading.value) return
+  retentionLoading.value = true
+  retentionResult.value = null
+  try {
+    retentionResult.value = await previewReportRetention(
+      retentionCluster.value,
+      retentionKind.value,
+      retentionDays.value,
+      retentionMinimum.value,
+    )
+  } catch (err) {
+    ElMessage.error(describeReportError('计算保留预览', err))
+  } finally {
+    retentionLoading.value = false
+  }
+}
 
 const reports = ref<ReportView[]>([])
 const clusters = ref<Cluster[]>([])
@@ -90,7 +169,8 @@ const canSeeStorage = computed(() => hasPermission(permissionsOf(auth.role), PER
 const canScan = computed(() => hasPermission(permissionsOf(auth.role), PERM.scanExecute))
 
 /** 「全集群」的可见性与后端同一判据：角色持全域权限 `*`（不是"看起来像管理员"）。 */
-const canClusterScope = computed(() => hasPermission(permissionsOf(auth.role), '*'))
+const {clusters:targets,target,rules,refresh:refreshTargets}=useClusterAccess()
+const canClusterScope=computed(()=>rules.value.some(r=>r.scopeType==='cluster'&&r.actions.includes('read'))&&['read','logs'].every(a=>rules.value.some(r=>r.namespaces?.includes('*')&&r.actions.includes(a))))
 
 const KIND_LABELS: Record<string, string> = {
   'latest-md': '体检报告',
@@ -139,10 +219,28 @@ const mismatchText = computed(() => {
   return parts.length ? `历史对象待迁移：${parts.join('、')}` : ''
 })
 
+/**
+ * 目标下拉的选项来源：管理员走 /clusters 全量列表；普通用户没有 cluster.read
+ * 时退回 /auth/access 的授权集群。两者合并后同一 ClusterID 只出现一次，
+ * 名称只用于展示，筛选仍按稳定 ID 提交。
+ */
+const clusterOptions = computed<Array<{ id: string; name: string }>>(() => {
+  const map = new Map<string, { id: string; name: string }>()
+  for (const item of clusters.value) {
+    map.set(item.id, { id: item.id, name: item.name || item.id })
+  }
+  for (const item of targets.value) {
+    if (!map.has(item.id)) {
+      map.set(item.id, { id: item.id, name: item.name || item.id })
+    }
+  }
+  return [...map.values()]
+})
+
 const clusterName = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
-  for (const item of clusters.value) {
-    map[item.id] = item.name || item.id
+  for (const item of clusterOptions.value) {
+    map[item.id] = item.name
   }
   return map
 })
@@ -376,6 +474,8 @@ async function loadSidePanels(): Promise<void> {
     // 集群列表只服务于筛选项：拿不到就只留"全部集群"，不该连带打断报告列表。
     clusters.value = []
   }
+  // 普通用户没有 cluster.read，但报告页仍需要自己有权目标的名称/筛选项。
+  await refreshTargets()
   if (!canSeeStorage.value) {
     return
   }
@@ -470,7 +570,7 @@ async function copyPresign(): Promise<void> {
 }
 
 /** 只有 s3 后端有直连能力；其余后端不显示这个按钮，省得点了才知道不支持。 */
-const canPresign = computed(() => health.value?.driver === 's3' && health.value?.ready === true)
+const canPresign = computed(() => false)
 
 // ------------------------------------------------------- 发起体检（P8.13）
 
@@ -484,8 +584,7 @@ const scanPreset = ref<ScanPreset>('standard')
 const scanFormat = ref<ScanFormat>('json')
 
 /** 自己的授权范围只用来填下拉候选；真正的判定在后端，拉不到也不该拦住发起。 */
-const scopeInfo = ref<EffectiveScope | null>(null)
-const namespaceOptions = computed(() => scopeInfo.value?.namespaces ?? [])
+const namespaceOptions=computed(()=>[...new Set(rules.value.flatMap(r=>r.namespaces??[]))].filter(n=>n!=='*'))
 
 const activeJob = ref<ScanJob | null>(null)
 const activePreset = ref('')
@@ -500,7 +599,7 @@ let pollTimer: number | undefined
  * 状态，就能把进度横幅重新挂上。用 sessionStorage 而不是 localStorage——换一张标签页
  * 就是新会话，不该把别的窗口那次的进度搬过来。
  */
-const ACTIVE_SCAN_KEY = 'k8s-ai.activeScan'
+const ACTIVE_SCAN_KEY = 'aegisops.activeScan'
 
 function readStoredScan(): { id: string; preset: string } | null {
   try {
@@ -610,12 +709,7 @@ function stopPolling(): void {
 }
 
 async function loadScope(): Promise<void> {
-  try {
-    scopeInfo.value = await myScope()
-  } catch {
-    // 只影响候选列表：管理员可以直接输入，普通用户仍可手输名字，后端照样逐次判定。
-    scopeInfo.value = null
-  }
+  await refreshTargets()
   if (!scanNamespace.value && namespaceOptions.value.length === 1) {
     scanNamespace.value = namespaceOptions.value[0]
   }
@@ -623,12 +717,13 @@ async function loadScope(): Promise<void> {
 
 function openScanDialog(): void {
   scanOpen.value = true
-  if (!namespaceOptions.value.length && !canClusterScope.value) {
+  {
     void loadScope()
   }
 }
 
 function submitScan(): void {
+  if(!target.value){ElMessage.warning('请选择已授权集群');return}
   const ns = scanNamespace.value.trim()
   const pod = scanPod.value.trim()
   if (scanScope.value !== 'cluster' && !ns) {
@@ -643,9 +738,8 @@ function submitScan(): void {
   void (async () => {
     try {
       const job = await createScan({
-        scope: scanScope.value,
-        namespace: ns,
-        pod,
+        scope:scanScope.value,clusterId:target.value,
+        namespace:scanScope.value==='cluster'?'':ns,pod:scanScope.value==='pod'?pod:'',
         preset: scanPreset.value,
         format: scanFormat.value,
       })
@@ -772,15 +866,92 @@ function clearScanFilter(): void {
   void Promise.all([loadReports(), loadOverview()])
 }
 
-onMounted(() => {
-  void refreshAll()
-  void resumeActiveScan()
+/**
+ * P12.4 集群工作台入口：
+ *  - `?cluster=<id>` 按该目标筛选报告；
+ *  - `?cluster=<id>&scan=1` 预选目标并打开体检抽屉。
+ * 目标必须是当前用户可用的集群；不可用时明确提示，不悄悄换成别的目标。
+ */
+async function applyClusterEntry(): Promise<void> {
+  // 组件测试可在没有 router 的环境挂载；没有路由上下文时视为无入口参数。
+  if (!route) {
+    return
+  }
+  const cluster = route.query.cluster
+  if (typeof cluster !== 'string' || !cluster) {
+    return
+  }
+  await refreshTargets()
+  if (!targets.value.some((item) => item.id === cluster)) {
+    ElMessage.warning('该集群未接入或你无权访问；未自动改用其它目标')
+    return
+  }
+  filterCluster.value = cluster
+  target.value = cluster
+  page.value = 1
+  await Promise.all([loadReports(), loadOverview()])
+  if (route.query.scan === '1') {
+    await loadScope()
+    target.value = cluster
+    scanOpen.value = true
+  }
+}
+
+onMounted(async () => {
+  await refreshAll()
+  await resumeActiveScan()
+  await applyClusterEntry()
 })
 onBeforeUnmount(stopPolling)
 </script>
 
 <template>
   <section class="report-page">
+    <el-dialog v-if="canPreviewRetention" v-model="retentionOpen" title="报告保留策略" width="min(500px, 92vw)">
+      <el-form label-position="top" :disabled="retentionLoading" @submit.prevent="loadRetentionPreview">
+        <el-form-item label="集群">
+          <el-select v-model="retentionCluster" filterable @change="retentionResult = null">
+            <el-option v-for="cluster in clusters" :key="cluster.id" :label="cluster.name" :value="cluster.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="报告类型">
+          <el-select v-model="retentionKind" @change="retentionResult = null">
+            <el-option label="Markdown" value="latest-md" />
+            <el-option label="JSON" value="latest-json" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="保留天数">
+          <el-input-number v-model="retentionDays" :min="1" :max="36500" :precision="0" @change="retentionResult = null" />
+        </el-form-item>
+        <el-form-item label="至少保留最近份数">
+          <el-input-number v-model="retentionMinimum" :min="1" :max="1000000" :precision="0" @change="retentionResult = null" />
+        </el-form-item>
+        <el-button native-type="submit" type="primary" :loading="retentionLoading"
+          :disabled="!retentionCluster || !retentionDays || !retentionMinimum">
+          计算预览
+        </el-button>
+      </el-form>
+      <div v-if="retentionResult" aria-live="polite">
+        <p>共 {{ retentionResult.total }} 份，按策略保护 {{ retentionResult.protected }} 份，可清理 {{ retentionResult.eligible }} 份，无法确认扫描终态 {{ retentionResult.excluded }} 份。</p>
+        <el-button type="danger" :disabled="retentionLoading" @click="changeRetentionPolicy(true)">
+          启用自动清理
+        </el-button>
+        <p>到期截止时间 {{ retentionResult.cutoff }}</p>
+        <p>包含该集群和报告类型下各用户的报告。扫描终态无法确认的报告会保留。</p>
+      </div>
+      <div v-for="policy in retentionPolicies" :key="policy.clusterId + ':' + policy.kind">
+        <p>
+          {{ clusters.find(cluster => cluster.id === policy.clusterId)?.name || '集群名称不可用' }}
+          · {{ policy.kind === 'latest-md' ? 'Markdown' : 'JSON' }}
+          · {{ policy.enabled ? '已启用' : '已停用' }}
+          · {{ policy.days }} 天 / 至少 {{ policy.minimum }} 份
+        </p>
+        <p v-if="policy.enabled">下次执行 {{ new Date(policy.nextRun).toLocaleString() }}</p>
+        <p v-if="policy.lastRun">上次清理 {{ new Date(policy.lastRun).toLocaleString() }}，删除 {{ policy.lastDeleted }} 份</p>
+        <el-button v-if="policy.enabled" size="small" :disabled="retentionLoading"
+          @click="changeRetentionPolicy(false, policy)">停用</el-button>
+      </div>
+    </el-dialog>
     <div class="page-head">
       <h2 class="title">智能体检中心</h2>
       <span class="desc"> 开始体检并查看根因分析、故障关联分析与证据；报告正文按需从对象存储取回 </span>
@@ -803,11 +974,14 @@ onBeforeUnmount(stopPolling)
         >
           开始体检
         </el-button>
+        <el-button v-if="canPreviewRetention" @click="openRetentionPreview">
+          报告保留
+        </el-button>
         <el-button :icon="Refresh" :loading="loading" @click="refreshAll">刷新</el-button>
       </div>
     </div>
 
-    <p v-if="mismatchText" class="mismatch">{{ mismatchText }}，请执行 k8s-ai blobs migrate</p>
+    <p v-if="mismatchText" class="mismatch">{{ mismatchText }}，请执行 aopsctl blobs migrate</p>
 
     <div v-if="activeJob" class="scan-banner" :class="activeTone">
       <div class="scan-head">
@@ -941,7 +1115,7 @@ onBeforeUnmount(stopPolling)
           >
             <el-option label="全部集群" value="" />
             <el-option
-              v-for="item in clusters"
+              v-for="item in clusterOptions"
               :key="item.id"
               :label="item.name || item.id"
               :value="item.id"
@@ -1083,6 +1257,7 @@ onBeforeUnmount(stopPolling)
 
     <el-dialog v-model="scanOpen" title="开始体检" width="540px" top="6vh">
       <div class="scan-form">
+        <label>目标集群 <el-select v-model="target" @change="scanNamespace='';scanScope='namespace'"><el-option v-for="c in targets" :key="c.id" :value="c.id" :label="c.name"/></el-select></label>
         <div class="field">
           <span class="field-label">体检维度</span>
           <el-radio-group v-model="scanScope">
@@ -1108,7 +1283,7 @@ onBeforeUnmount(stopPolling)
 
         <div v-if="scanScope === 'pod'" class="field">
           <span class="field-label">Pod 名称</span>
-          <el-input v-model="scanPod" placeholder="例如 k8s-ai-server-846ffd68bf-gd5dr" />
+          <el-input v-model="scanPod" placeholder="例如 aegisops-server-846ffd68bf-gd5dr" />
         </div>
 
         <div class="field">

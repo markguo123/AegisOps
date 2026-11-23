@@ -345,10 +345,10 @@ func TestRegisterAllCount(t *testing.T) {
 	if err := RegisterAll(reg, testReader()); err != nil {
 		t.Fatal(err)
 	}
-	if len(reg.All()) != 22 {
-		t.Fatalf("工具数 = %d, want 22", len(reg.All()))
+	if len(reg.All()) != 23 {
+		t.Fatalf("工具数 = %d, want 23", len(reg.All()))
 	}
-	for _, want := range []string{"get_pod", "get_logs", "get_previous_logs", "get_resources", "get_events", "get_node_usage", "get_configmap", "get_configmaps"} {
+	for _, want := range []string{"get_pod", "get_logs", "get_previous_logs", "get_resources", "get_events", "get_node_usage", "get_configmap", "get_configmaps", "get_secret_info"} {
 		if _, ok := reg.Lookup(want); !ok {
 			t.Fatalf("缺少工具 %s", want)
 		}

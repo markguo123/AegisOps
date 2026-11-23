@@ -60,6 +60,12 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, codeConflict, "该次体检已经结束，无需停止")
 		return
 	}
+	if s.platform != nil && job.Owner != u.ID {
+		if !s.auditPolicy(w, r, "scan.governance.cancel") {
+			s.mu.Unlock()
+			return
+		}
+	}
 	ended := time.Now().UTC()
 	job.Status = StatusCancelled
 	job.EndedAt = &ended

@@ -18,6 +18,15 @@ const messages: ChatMessage[] = [
 ]
 
 describe('buildSessionMarkdown（P7.5 导出）', () => {
+  it('导出脱敏终端事实和错误，移除数据定界标签', () => {
+    const md = buildSessionMarkdown([{ role: 'tool', type: 'tool-call-response', name: 'kubectl', ok: false, summary: '访问被拒绝', command: 'kubectl get pods -n other', stderr: 'forbidden', errorCode: 'SCOPE_DENIED', exitCode: 1, content: '<untrusted_k8s_data>\n访问被拒绝\n</untrusted_k8s_data>', timestamp: '2026-11-17T10:00:00Z', arguments: { token: 'never-export' }, data: { ModelOnly: 'never-export' } }], { id: 's' })
+    expect(md).toContain('访问被拒绝')
+    expect(md).toContain('kubectl get pods -n other')
+    expect(md).toContain('SCOPE_DENIED')
+    expect(md).toContain('forbidden')
+    expect(md).not.toContain('untrusted_k8s_data')
+    expect(md).not.toContain('never-export')
+  })
   it('按 提问 → 思考 → 工具 → 报告 的顺序导出，并带上会话元信息', () => {
     const md = buildSessionMarkdown(messages, {
       id: '20261015-c851',
@@ -61,10 +70,10 @@ describe('buildSessionMarkdown（P7.5 导出）', () => {
 })
 
 describe('markdownFileName', () => {
-  it('生成 k8s-ai-<会话名>-<时间>.md 并过滤非法字符', () => {
+  it('生成 aegisops-<会话名>-<时间>.md 并过滤非法字符', () => {
     expect(markdownFileName('default 体检 / prod:01', new Date('2026-10-15T09:05:00'))).toBe(
-      'k8s-ai-default-体检-prod-01-20261015-0905.md',
+      'aegisops-default-体检-prod-01-20261015-0905.md',
     )
-    expect(markdownFileName('', new Date('2026-10-15T09:05:00'))).toBe('k8s-ai-session-20261015-0905.md')
+    expect(markdownFileName('', new Date('2026-10-15T09:05:00'))).toBe('aegisops-session-20261015-0905.md')
   })
 })

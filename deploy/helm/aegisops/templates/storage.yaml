@@ -1,0 +1,44 @@
+{{- /*
+Dual independent PVCs (P6.2 / P6.5 / D-31): /data on aegisops-data, /reports on
+aegisops-reports, separating capacity and lifecycle management.
+RWO restricts read-write access to one node, not one mount path.
+Both volumes gate on persistence.enabled; the
+legacy single "size" value is the fallback for either capacity.
+*/ -}}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "aegisops.name" . }}-data
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "aegisops.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ default .Values.persistence.size .Values.persistence.dataSize }}
+{{- end }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingReportsClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "aegisops.name" . }}-reports
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "aegisops.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ default .Values.persistence.size .Values.persistence.reportsSize }}
+{{- end }}

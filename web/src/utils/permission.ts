@@ -2,7 +2,7 @@
  * P2.9 前端权限口径：与后端 `internal/permission` 的 Permission 常量、
  * `internal/auth` 的默认角色权限保持一致。
  *
- * 在四期平台里，真实权限由后端判定（P1.6 权限门禁 + P4 审批中心）：
+ * 在四期平台里，真实权限由后端判定（P1.6 权限门禁 + P4 审计中心）：
  * 前端只负责「不展示无权操作的入口」，隐藏按钮不是安全机制。
  */
 
@@ -14,8 +14,6 @@ export const PERM = {
   chatWrite: 'chat.write',
   clusterRead: 'cluster.read',
   clusterManage: 'cluster.manage',
-  approvalRead: 'approval.read',
-  approvalExecute: 'approval.execute',
   auditRead: 'audit.read',
   settingsRead: 'settings.read',
   settingsWrite: 'settings.write',
@@ -35,8 +33,7 @@ export const PERM = {
  */
 export const ROLE_PERMISSIONS: Record<Role, string[]> = {
   admin: ['*'],
-  operator: ['scan.execute'],
-  user: [],
+  user: ['scan.execute','skill.read'],
 }
 
 /**
@@ -77,10 +74,10 @@ export function permissionsOf(role: Role | null | undefined): string[] {
  * 后端仍会独立校验审批策略与权限，前端隐藏不是安全机制。
  */
 export function canDecideApproval(role: Role | null | undefined): boolean {
-  return role === 'admin' || role === 'operator' || role === 'user'
+  return role === 'admin' || role === 'user'
 }
 
-/** 是否可查看审批与审计（用于治理菜单的入口显隐）。 */
+/** 是否可查看审计中心（治理菜单的入口显隐；后端仍按 audit.read 强校验）。 */
 export function canReadGovernance(role: Role | null | undefined): boolean {
-  return hasPermission(permissionsOf(role), PERM.approvalRead)
+  return hasPermission(permissionsOf(role), PERM.auditRead)
 }

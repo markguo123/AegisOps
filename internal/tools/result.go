@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/k8s-ai/k8s-ai/internal/security"
 )
@@ -23,6 +24,23 @@ const (
 // 如 get_pods 只有 "pods=20" 而没有 Pod 列表，会导致模型反复调用同一工具）。
 // maxBytes<=0 时使用默认 8KB。
 func MarshalForLLM(result ToolResult, maxBytes int) (string, bool) {
+	payload, truncated := marshalSafePayload(result, maxBytes)
+	if result.ModelOnly != nil {
+		if raw, err := json.Marshal(result.ModelOnly); err == nil && len(raw) > 0 {
+			payload += "\n<model_only_sensitive_secret_values>\n" + string(raw) + "\n</model_only_sensitive_secret_values>"
+		}
+	}
+	return untrustedPrefix + payload + untrustedSuffix, truncated
+}
+
+// MarshalSafe 返回可进入 UI、SSE、会话与审计的安全表示：永不包含 ModelOnly
+// 或 SensitiveValues，只保留已脱敏的 Text/Data。
+func MarshalSafe(result ToolResult, maxBytes int) (string, bool) {
+	payload, truncated := marshalSafePayload(result, maxBytes)
+	return untrustedPrefix + payload + untrustedSuffix, truncated
+}
+
+func marshalSafePayload(result ToolResult, maxBytes int) (string, bool) {
 	if maxBytes <= 0 {
 		maxBytes = 8 * 1024
 	}
@@ -39,7 +57,7 @@ func MarshalForLLM(result ToolResult, maxBytes int) (string, bool) {
 	payload := strings.Join(parts, "\n")
 	payload = redactor.Redact(payload)
 	truncated := truncate(&payload, maxBytes)
-	return untrustedPrefix + payload + untrustedSuffix, truncated
+	return payload, truncated
 }
 
 // Redacted 判断文本是否需要脱敏（供测试与摘要）。
@@ -52,12 +70,28 @@ func truncate(s *string, maxBytes int) bool {
 	if len(*s) <= maxBytes {
 		return false
 	}
-	head := maxBytes / 4
-	tail := maxBytes - head - len("\n…[TRUNCATED]…\n")
+	const marker = "\n…[TRUNCATED]…\n"
+	if maxBytes <= len(marker) {
+		n := maxBytes
+		for n > 0 && !utf8.RuneStart((*s)[n]) {
+			n--
+		}
+		*s = (*s)[:n]
+		return true
+	}
+	head := min(maxBytes/4, maxBytes-len(marker))
+	for head > 0 && !utf8.RuneStart((*s)[head]) {
+		head--
+	}
+	tail := maxBytes - head - len(marker)
 	if tail < 0 {
 		tail = 0
 	}
-	*s = (*s)[:head] + "\n…[TRUNCATED]…\n" + (*s)[len(*s)-tail:]
+	tailStart := len(*s) - tail
+	for tailStart < len(*s) && !utf8.RuneStart((*s)[tailStart]) {
+		tailStart++
+	}
+	*s = (*s)[:head] + marker + (*s)[tailStart:]
 	return true
 }
 
