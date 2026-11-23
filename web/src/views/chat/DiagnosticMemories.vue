@@ -4,7 +4,17 @@ import type { DiagnosticMemoryDraft } from './diagnosticMemoryDraft'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/request'
 
-const props = defineProps<{ clusterId?: string; namespace?: string; referencedIds?: string[] }>()
+const props = defineProps<{
+  clusterId?: string
+  clusters: ReadonlyArray<{ id: string; name: string }>
+  namespace?: string
+  referencedIds?: string[]
+}>()
+
+function clusterName(id?: string): string {
+  if (!id) return '未绑定集群'
+  return props.clusters.find(cluster => cluster.id === id)?.name || '集群名称不可用'
+}
 
 interface Memory {
   id?: string
@@ -114,14 +124,14 @@ async function forget(id?: string) {
           <p>当前范围不可用</p>
         </template>
         <template v-else>
-          <p>{{ memory.clusterId }} / {{ memory.namespace }} / {{ memory.workload }}</p>
+          <p>{{ clusterName(memory.clusterId) }} / {{ memory.namespace }} / {{ memory.workload }}</p>
           <p>{{ memory.text }}</p>
           <el-button size="small" :disabled="busy" @click="edit(memory)">编辑</el-button>
         </template>
         <el-button size="small" :disabled="busy" @click="forget(memory.id)">遗忘</el-button>
       </div>
       <el-form v-if="draft" label-position="top" :disabled="busy" @submit.prevent="save">
-        <el-form-item label="集群"><el-input v-model="draft.clusterId" readonly /></el-form-item>
+        <el-form-item label="集群"><el-input :model-value="clusterName(draft.clusterId)" readonly /></el-form-item>
         <el-form-item label="主命名空间"><el-input v-model="draft.namespace" /></el-form-item>
         <el-form-item label="关联命名空间（逗号分隔）"><el-input v-model="related" /></el-form-item>
         <el-form-item label="工作负载名称"><el-input v-model="draft.workload" /></el-form-item>

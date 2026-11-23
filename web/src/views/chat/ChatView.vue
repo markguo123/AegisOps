@@ -730,7 +730,7 @@ watch(
           </span>
         </div>
         <div v-if="activeSession" class="chat-meta">
-          <DiagnosticMemories v-if="!viewingOthersSession" ref="diagnosticMemories" :cluster-id="activeSession.clusterId"
+          <DiagnosticMemories v-if="!viewingOthersSession" ref="diagnosticMemories" :cluster-id="activeSession.clusterId" :clusters="clusters"
             :referenced-ids="contextBudget?.memory_ids" />
           <el-button v-if="branchOrigin" text size="small" @click="openBranchSource">继承历史问答 · 查看来源</el-button>
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
