@@ -167,6 +167,20 @@ func (t *Tx) DeleteReport(ctx context.Context, id, blobKey string) (bool, error)
 	return changed > 0, nil
 }
 
+// DeleteReportReference removes a report and releases its blob in one transaction.
+// A report can outlive its object ledger entry after GC has cleared it.
+func (t *Tx) DeleteReportReference(ctx context.Context, id, key string) (deleted, missingReference bool, err error) {
+	deleted, err = t.DeleteReport(ctx, id, key)
+	if err != nil || !deleted {
+		return deleted, false, err
+	}
+	err = t.Release(ctx, key)
+	if errors.Is(err, ErrNotFound) || errors.Is(err, errRefUnderflow) {
+		return true, true, nil
+	}
+	return true, false, err
+}
+
 // Acquire 给对象加一次引用，必须在写下引用它的业务行的同一事务里调用。
 //
 // 三条规则：

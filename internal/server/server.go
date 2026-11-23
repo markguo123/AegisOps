@@ -57,6 +57,7 @@ type ScanJob struct {
 
 // Server 最小化 HTTP 服务。
 type Server struct {
+	memories      *service.DiagnosticMemories
 	modelChecks   modelChecks
 	modelProfiles modelProfiles
 	platform      *service.PlatformAccess
@@ -256,6 +257,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/reports/{id}/report", s.handleGetReportStructured)
 	mux.HandleFunc("DELETE /api/v1/reports/{id}", s.handleDeleteReport)
 	mux.HandleFunc("POST /api/v1/reports/cleanup", s.handleCleanupReports)
+	mux.HandleFunc("GET /api/v1/report-retention/preview", s.handleReportRetentionPreview)
+	mux.HandleFunc("GET /api/v1/me/memories", s.handleDiagnosticMemories)
+	mux.HandleFunc("POST /api/v1/me/memories", s.handleDiagnosticMemories)
+	mux.HandleFunc("PATCH /api/v1/me/memories/{id}", s.handleDiagnosticMemories)
+	mux.HandleFunc("DELETE /api/v1/me/memories/{id}", s.handleDiagnosticMemories)
 	mux.HandleFunc("GET /api/v1/storage/health", s.handleStorageHealth)
 	// 未登记的 /api/v1/* 一律回统一 JSON 错误体，不能被 SPA fallback 吞成 index.html
 	// （P6.11：前端拿到 HTML 会比 404 更难排查）。

@@ -101,7 +101,7 @@ func TestCommitChatSnapshotAndReplay(t *testing.T) {
 	if len(snap.Turns) != 1 || snap.Turns[0].Status != sse.TurnRunning {
 		t.Fatalf("snapshot turn mismatch: %+v", snap.Turns)
 	}
-	if budget := snap.Turns[0].ContextBudget; budget == nil || *budget != (sse.ContextBudget{Window: 131072, OutputReserve: 4096, InputEstimate: 83804}) {
+	if budget := snap.Turns[0].ContextBudget; budget == nil || budget.Window != 131072 || budget.OutputReserve != 4096 || budget.InputEstimate != 83804 || len(budget.MemoryIDs) != 0 {
 		t.Fatalf("snapshot budget mismatch: %+v", budget)
 	}
 

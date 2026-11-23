@@ -149,6 +149,7 @@ export type ChatItem =
   | { type: 'notice'; item_order: number; notice: ChatNotice }
 
 export interface ChatContextBudget {
+  memory_ids?: string[]
   model_id?: string
   window: number
   output_reserve: number

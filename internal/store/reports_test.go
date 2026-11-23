@@ -163,3 +163,25 @@ func TestReportGetRoundTrip(t *testing.T) {
 		t.Fatalf("不存在的报告应 ErrNotFound, got %v", err)
 	}
 }
+
+func TestReportRetentionPreviewProtectsMinimumAndCutoff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	cutoff := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	old := cutoff.Add(-time.Hour)
+	insertTestReport(t, s, "at-cutoff", "prod", "latest-md", "u1", cutoff)
+	insertTestReport(t, s, "old-1", "prod", "latest-md", "u1", old)
+	insertTestReport(t, s, "old-2", "prod", "latest-md", "u2", old)
+	insertTestReport(t, s, "other-kind", "prod", "latest-json", "u2", old)
+	insertTestReport(t, s, "other-cluster", "stage", "latest-md", "u2", old)
+
+	for _, tc := range []struct {
+		minimum int
+		want    int64
+	}{{1, 2}, {2, 1}, {3, 0}} {
+		got, err := s.Reports().PreviewRetention(ctx, "prod", "latest-md", cutoff, tc.minimum)
+		if err != nil || got.Total != 3 || got.Potential != tc.want || got.Protected != 3-tc.want {
+			t.Fatalf("minimum %d: got %+v, err %v", tc.minimum, got, err)
+		}
+	}
+}

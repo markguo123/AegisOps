@@ -176,12 +176,13 @@ type RuntimeConfigBinder interface {
 type ChatResultStoreBinder interface{ SetResultStore(agent.ResultStore) }
 
 type chatService struct {
-	cfg            *config.Config
-	sessions       *session.Manager
-	llmFactory     func(llm.Options) llm.LLMClient
-	newReader      func() (scanner.Reader, error)
-	scanFactory    func() tools.ScanRunner
-	newWriteRunner func() (tools.WriteRunner, error)
+	diagnosticMemories *DiagnosticMemories
+	cfg                *config.Config
+	sessions           *session.Manager
+	llmFactory         func(llm.Options) llm.LLMClient
+	newReader          func() (scanner.Reader, error)
+	scanFactory        func() tools.ScanRunner
+	newWriteRunner     func() (tools.WriteRunner, error)
 	// proposals 跨轮次保存创建提案指纹：每轮 Chat 都会重建工具实例，
 	// dry run 与 apply 通常不在同一轮，所以缓存必须挂在服务上。
 	proposals *tools.ProposalStore
@@ -743,7 +744,28 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 			req.AccessScope = &bound
 		}
 	}
+	var recallMemory func(context.Context) (string, []string)
+	if s.diagnosticMemories != nil && req.UserID != "" && req.UserID == sess.UserID && req.AccessScope != nil {
+		clusterID, namespace := sess.Cluster, sess.Namespace
+		recallMemory = func(ctx context.Context) (string, []string) {
+			ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			defer cancel()
+			access := req.AccessScope
+			if access.Refresh != nil {
+				fresh, err := access.Refresh(ctx)
+				if err != nil {
+					return "", nil
+				}
+				access = fresh
+			}
+			if access == nil || access.Policy == nil {
+				return "", nil
+			}
+			return s.diagnosticMemories.Recall(ctx, req.UserID, clusterID, namespace, req.Query, access.Policy.Check)
+		}
+	}
 	ag := agent.New(agent.Options{
+		RecallMemory:   recallMemory,
 		LLM:            client,
 		Tools:          reg,
 		Session:        sess,

@@ -26,6 +26,8 @@ import {
   getReportSummary,
   getStorageHealth,
   listReports,
+  previewReportRetention,
+  type ReportRetentionPreview,
 } from '@/api/reports'
 import {
   SCAN_FORMATS,
@@ -59,6 +61,39 @@ import { hasPermission, PERM, permissionsOf } from '@/utils/permission'
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
+
+const retentionOpen = ref(false)
+const retentionLoading = ref(false)
+const retentionResult = ref<ReportRetentionPreview | null>(null)
+const retentionCluster = ref('')
+const retentionKind = ref('latest-md')
+const retentionDays = ref(90)
+const retentionMinimum = ref(5)
+const canPreviewRetention = computed(() => auth.user?.role === 'admin')
+
+function openRetentionPreview() {
+  retentionCluster.value = filterCluster.value
+  retentionResult.value = null
+  retentionOpen.value = true
+}
+
+async function loadRetentionPreview() {
+  if (retentionLoading.value) return
+  retentionLoading.value = true
+  retentionResult.value = null
+  try {
+    retentionResult.value = await previewReportRetention(
+      retentionCluster.value,
+      retentionKind.value,
+      retentionDays.value,
+      retentionMinimum.value,
+    )
+  } catch (err) {
+    ElMessage.error(describeReportError('计算保留预览', err))
+  } finally {
+    retentionLoading.value = false
+  }
+}
 
 const reports = ref<ReportView[]>([])
 const clusters = ref<Cluster[]>([])
@@ -829,6 +864,36 @@ onBeforeUnmount(stopPolling)
 
 <template>
   <section class="report-page">
+    <el-dialog v-if="canPreviewRetention" v-model="retentionOpen" title="报告保留预览" width="min(500px, 92vw)">
+      <el-form label-position="top" :disabled="retentionLoading" @submit.prevent="loadRetentionPreview">
+        <el-form-item label="集群">
+          <el-select v-model="retentionCluster" filterable @change="retentionResult = null">
+            <el-option v-for="cluster in clusters" :key="cluster.id" :label="cluster.name" :value="cluster.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="报告类型">
+          <el-select v-model="retentionKind" @change="retentionResult = null">
+            <el-option label="Markdown" value="latest-md" />
+            <el-option label="JSON" value="latest-json" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="保留天数">
+          <el-input-number v-model="retentionDays" :min="1" :max="36500" :precision="0" @change="retentionResult = null" />
+        </el-form-item>
+        <el-form-item label="至少保留最近份数">
+          <el-input-number v-model="retentionMinimum" :min="1" :precision="0" @change="retentionResult = null" />
+        </el-form-item>
+        <el-button native-type="submit" type="primary" :loading="retentionLoading"
+          :disabled="!retentionCluster || !retentionDays || !retentionMinimum">
+          计算预览
+        </el-button>
+      </el-form>
+      <div v-if="retentionResult" aria-live="polite">
+        <p>共 {{ retentionResult.total }} 份，保护 {{ retentionResult.protected }} 份，潜在候选 {{ retentionResult.potential }} 份。</p>
+        <p>到期截止时间 {{ retentionResult.cutoff }}</p>
+        <p>按报告元数据估算，包含该集群和报告类型下各用户的报告。预览不会删除报告。</p>
+      </div>
+    </el-dialog>
     <div class="page-head">
       <h2 class="title">智能体检中心</h2>
       <span class="desc"> 开始体检并查看根因分析、故障关联分析与证据；报告正文按需从对象存储取回 </span>
@@ -850,6 +915,9 @@ onBeforeUnmount(stopPolling)
           @click="openScanDialog"
         >
           开始体检
+        </el-button>
+        <el-button v-if="canPreviewRetention" @click="openRetentionPreview">
+          保留预览
         </el-button>
         <el-button :icon="Refresh" :loading="loading" @click="refreshAll">刷新</el-button>
       </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DiagnosticMemories from './DiagnosticMemories.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -700,6 +701,8 @@ watch(
           </span>
         </div>
         <div v-if="activeSession" class="chat-meta">
+          <DiagnosticMemories v-if="!viewingOthersSession" :cluster-id="activeSession.clusterId"
+            :referenced-ids="contextBudget?.memory_ids" />
           <el-button v-if="branchOrigin" text size="small" @click="openBranchSource">继承历史问答 · 查看来源</el-button>
           <span class="cluster-badge" :title="activeSession.clusterId || ''">
             目标集群：{{ activeClusterName || '未绑定' }}

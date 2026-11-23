@@ -278,3 +278,26 @@ export default {
   cleanupReports,
   describeReportError,
 }
+
+export interface ReportRetentionPreview {
+  total: number
+  protected: number
+  potential: number
+  cutoff: string
+}
+
+export async function previewReportRetention(
+  clusterId: string,
+  kind: string,
+  days: number,
+  minimum: number,
+): Promise<ReportRetentionPreview> {
+  const env = await apiGet<ReportRetentionPreview>('/report-retention/preview', undefined, {
+    clusterId,
+    kind,
+    days,
+    minimum,
+  })
+  if (!env.data) throw new Error('报告保留预览无结果')
+  return env.data
+}

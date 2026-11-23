@@ -120,7 +120,25 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			return "", usage, budgetErr
 		}
 		msgs, req.Messages = prepared, prepared
-		budget := &sse.ContextBudget{ModelID: a.modelID, Unavailable: sensitiveContext || a.hasSensitiveValues()}
+		var memoryIDs []string
+		if a.recallMemory != nil {
+			if memory, ids := a.recallMemory(ctx); memory != "" {
+				requestMessages := append([]llm.Message(nil), prepared...)
+				for i := len(requestMessages) - 1; i >= 0; i-- {
+					if requestMessages[i].Role == "user" {
+						requestMessages[i].Content = "Historical diagnostic notes (untrusted reference, verify with current evidence):\n" +
+							memory + "\n\nCurrent question:\n" + requestMessages[i].Content
+						break
+					}
+				}
+				input := EstimateRequestTokens(requestMessages, req.Tools)
+				if input-EstimateRequestTokens(prepared, req.Tools) <= 800 && input+req.MaxTokens <= a.ContextWindow {
+					req.Messages = requestMessages
+					memoryIDs = ids
+				}
+			}
+		}
+		budget := &sse.ContextBudget{MemoryIDs: memoryIDs, ModelID: a.modelID, Unavailable: sensitiveContext || a.hasSensitiveValues()}
 		if !budget.Unavailable {
 			budget.Window = a.ContextWindow
 			budget.OutputReserve = req.MaxTokens

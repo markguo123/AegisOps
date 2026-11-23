@@ -100,6 +100,8 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			// Chat 会话与平台 API 使用同一认证服务和 Store；会话归属由
 			// sessionapi.AuthenticatedHandler 统一校验。
 			chat := service.NewChatWithStoreAndConfig(cfg, st)
+			diagnosticMemories := service.NewDiagnosticMemories(st, authzSvc)
+			service.BindDiagnosticMemories(chat, diagnosticMemories)
 			if binder, ok := chat.(service.SkillPlatformBinder); ok {
 				binder.SetSkillPlatform(skillPlat)
 			}
@@ -148,6 +150,7 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 				WithClusters(clusterSvc).
 				WithSkills(skillPlat).
 				WithAuthz(authzSvc).
+				WithDiagnosticMemories(diagnosticMemories).
 				WithReports(service.NewReportPlatform(st, blobGW)).
 				WithStorage(blobGW).
 				// P4.7：审计中心只读查询面，与写入口共用同一 Store。

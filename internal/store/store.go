@@ -176,6 +176,9 @@ type ApprovalStore interface {
 
 // MemoryStore 存取按作用域隔离的长期记忆（P5.2/P5.3）。
 type MemoryStore interface {
+	UpdateOwned(ctx context.Context, next *Memory, previousContent string) error
+	ListOwned(ctx context.Context, ownerID string, limit int) ([]*Memory, error)
+	DeleteOwned(ctx context.Context, ownerID, id string) error
 	Create(ctx context.Context, m *Memory) error
 	Get(ctx context.Context, id string) (*Memory, error)
 	Update(ctx context.Context, m *Memory) error

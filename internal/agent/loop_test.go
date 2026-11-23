@@ -803,3 +803,41 @@ func TestDeclineKeyKubectlNormalization(t *testing.T) {
 		t.Fatal("不同参数的结构化工具 key 应不同")
 	}
 }
+
+func TestDiagnosticMemoryOnlyEntersEligibleModelRequests(t *testing.T) {
+	executed := 0
+	client := &fakeLLM{responses: []*llm.ChatResponse{
+		toolCallResp(call("c1", "get_pod", `{"namespace":"prod","name":"payment-api"}`)),
+		{Content: "done"},
+	}}
+	a, sess := testAgent(t, client, []tools.Tool{&stubTool{name: "get_pod", readonly: true, executed: &executed}}, nil)
+	recalls := 0
+	const note = "compare gateway and termination timestamps"
+	a.recallMemory = func(context.Context) (string, []string) {
+		recalls++
+		if recalls == 1 {
+			return note, []string{"memory-1"}
+		}
+		return "", nil
+	}
+	if _, _, err := a.Chat(context.Background(), "Why did payment-api return 502?"); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.captured) != 2 || !containsMemoryNote(client.captured[0], note) || containsMemoryNote(client.captured[1], note) {
+		t.Fatalf("unexpected model requests: %+v", client.captured)
+	}
+	for _, message := range sess.Messages {
+		if strings.Contains(message.Content, note) {
+			t.Fatal("memory text was copied into persisted input")
+		}
+	}
+}
+
+func containsMemoryNote(messages []llm.Message, note string) bool {
+	for _, message := range messages {
+		if strings.Contains(message.Content, note) {
+			return true
+		}
+	}
+	return false
+}

@@ -877,3 +877,100 @@ func TestReportDeleteNotConfigured(t *testing.T) {
 	}
 	decodeData(t, resp, nil)
 }
+
+func TestReportRetentionPreviewRequiresAdmin(t *testing.T) {
+	f := newReportFixture(t, nil)
+	if err := f.st.Clusters().Create(context.Background(), &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/report-retention/preview?clusterId=prod&kind=latest-md&days=30&minimum=5"
+	user := f.userToken(t, "retention-user", "user")
+	if status, _, body := f.req(t, http.MethodGet, path, user, ""); status != http.StatusForbidden {
+		t.Fatalf("user status = %d: %s", status, body)
+	}
+	admin := f.adminToken(t)
+	if status, _, body := f.req(t, http.MethodGet, path, admin, ""); status != http.StatusOK {
+		t.Fatalf("admin status = %d: %s", status, body)
+	}
+}
+
+func TestDiagnosticMemoryAPIOwnerIsolation(t *testing.T) {
+	f := newReportFixture(t, nil)
+	memories := service.NewDiagnosticMemories(f.st, f.authzSvc)
+	f.server.WithDiagnosticMemories(memories)
+	ctx := context.Background()
+	if err := f.st.Clusters().Create(ctx, &store.Cluster{ID: "prod", Name: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	admin := f.adminToken(t)
+	const path = "/api/v1/me/memories"
+	const input = `{"clusterId":"prod","namespace":"payment","relatedNamespaces":["edge-system"],"workload":"payment-api","text":"Compare gateway error time with pod exit time."}`
+	if status, _, raw := f.req(t, http.MethodPost, path, admin, input); status != http.StatusForbidden {
+		t.Fatalf("disabled create: %d %s", status, raw)
+	}
+	if err := f.st.Settings().Set(ctx, &store.Settings{Group: "memory", Key: "enabled", Value: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	status, _, raw := f.req(t, http.MethodPost, path, admin, input)
+	if status != http.StatusCreated {
+		t.Fatalf("create: %d %s", status, raw)
+	}
+	var created struct{ Data service.DiagnosticMemory }
+	if err := json.Unmarshal([]byte(raw), &created); err != nil || created.Data.ID == "" {
+		t.Fatalf("decode created memory: %v %s", err, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodGet, path, admin, ""); status != http.StatusOK || !strings.Contains(raw, created.Data.Text) {
+		t.Fatalf("owner list: %d %s", status, raw)
+	}
+	other := f.userToken(t, "memory-other", "user")
+	if status, _, raw := f.req(t, http.MethodGet, path, other, ""); status != http.StatusOK || strings.Contains(raw, created.Data.ID) {
+		t.Fatalf("other list: %d %s", status, raw)
+	}
+	idPath := path + "/" + created.Data.ID
+	authorize := func(authz.Target) error { return nil }
+	if notes, ids := memories.Recall(ctx, "admin", "prod", "payment", "payment-api 502", authorize); notes != "" || len(ids) != 0 {
+		t.Fatal("unexpected recall for a mismatched owner ID")
+	}
+	rows, err := f.st.Users().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner string
+	for _, user := range rows {
+		if user.Username == "admin" {
+			owner = user.ID
+		}
+	}
+	if notes, ids := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", authorize); !strings.Contains(notes, created.Data.Text) || len(ids) != 1 {
+		t.Fatalf("expected owner recall: %q %v", notes, ids)
+	}
+	denied := func(target authz.Target) error {
+		if target.Namespace == "edge-system" {
+			return store.ErrNotFound
+		}
+		return nil
+	}
+	if notes, _ := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", denied); notes != "" {
+		t.Fatal("memory with an unauthorized related namespace was recalled")
+	}
+	created.Data.Text = "Check gateway and application timestamps first."
+	update, err := json.Marshal(created.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, _, raw := f.req(t, http.MethodPatch, idPath, admin, string(update)); status != http.StatusOK {
+		t.Fatalf("update: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodPatch, idPath, admin, string(update)); status != http.StatusConflict {
+		t.Fatalf("stale update: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodDelete, idPath, other, ""); status != http.StatusNotFound {
+		t.Fatalf("other delete: %d %s", status, raw)
+	}
+	if status, _, raw := f.req(t, http.MethodDelete, idPath, admin, ""); status != http.StatusOK {
+		t.Fatalf("owner delete: %d %s", status, raw)
+	}
+	if notes, _ := memories.Recall(ctx, owner, "prod", "payment", "payment-api 502", authorize); notes != "" {
+		t.Fatal("forgotten memory was recalled")
+	}
+}

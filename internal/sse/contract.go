@@ -355,11 +355,12 @@ type Notice struct {
 }
 
 type ContextBudget struct {
-	ModelID       string `json:"model_id,omitempty"`
-	Window        int    `json:"window"`
-	OutputReserve int    `json:"output_reserve"`
-	InputEstimate int    `json:"input_estimate"`
-	Unavailable   bool   `json:"unavailable,omitempty"`
+	MemoryIDs     []string `json:"memory_ids,omitempty"`
+	ModelID       string   `json:"model_id,omitempty"`
+	Window        int      `json:"window"`
+	OutputReserve int      `json:"output_reserve"`
+	InputEstimate int      `json:"input_estimate"`
+	Unavailable   bool     `json:"unavailable,omitempty"`
 }
 
 // TurnView 是快照与 turn.status 共用的完整 Turn 状态。

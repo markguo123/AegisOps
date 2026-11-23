@@ -297,38 +297,24 @@ func (p *ReportPlatform) Delete(ctx context.Context, id string, scope ReportScop
 		return ReportView{}, store.ErrNotFound
 	}
 
-	// 引用能不能减，必须在事务开始前就知道（WithTx 回调里不能再调非事务入口）。
-	skipRelease := false
-	meta, err := p.st.Objects().Get(ctx, row.BlobKey)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		skipRelease = true
-	case err != nil:
-		return ReportView{}, err
-	case meta.RefCount <= 0:
-		// 计数已归零：GC 已认领它，再 Release 就是下溢报错。业务行照删。
-		skipRelease = true
-	}
-	if skipRelease {
-		slog.Warn("report: 清理时对象引用已不存在，仅删除业务行",
-			"report_id", row.ID, "blob_key", row.BlobKey)
-	}
-
+	var missingReference bool
 	err = p.st.WithTx(ctx, func(tx *store.Tx) error {
-		changed, err := tx.DeleteReport(ctx, row.ID, row.BlobKey)
+		changed, missing, err := tx.DeleteReportReference(ctx, row.ID, row.BlobKey)
 		if err != nil {
 			return err
 		}
 		if !changed {
 			return store.ErrNotFound
 		}
-		if skipRelease {
-			return nil
-		}
-		return tx.Release(ctx, row.BlobKey)
+		missingReference = missing
+		return nil
 	})
 	if err != nil {
 		return ReportView{}, err
+	}
+	if missingReference {
+		slog.Warn("report: 清理时对象引用已不存在，仅删除业务行",
+			"report_id", row.ID, "blob_key", row.BlobKey)
 	}
 	return toReportView(row), nil
 }
