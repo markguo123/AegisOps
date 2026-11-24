@@ -360,6 +360,7 @@ type ContextBudget struct {
 	Window        int      `json:"window"`
 	OutputReserve int      `json:"output_reserve"`
 	InputEstimate int      `json:"input_estimate"`
+	InputActual   int      `json:"input_actual,omitempty"`
 	Unavailable   bool     `json:"unavailable,omitempty"`
 }
 

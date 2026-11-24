@@ -505,13 +505,13 @@ func TestChatApprovalYesAndNoAskAgain(t *testing.T) {
 	}
 }
 
-func TestChatTurnBudget(t *testing.T) {
+func TestChatBatchPreviewBudget(t *testing.T) {
 	executed := 0
 	fl := &fakeLLM{responses: []*llm.ChatResponse{
 		toolCallResp(call("c1", "get_pod", `{}`), call("c2", "get_pod", `{}`)),
 		{Content: "基于现有证据回答"},
 	}}
-	a, sess := testAgent(t, fl, []tools.Tool{&stubTool{name: "get_pod", readonly: true, executed: &executed}}, nil)
+	a, sess := testAgent(t, fl, []tools.Tool{&stubTool{name: "get_pod", readonly: true, executed: &executed, result: &tools.ToolResult{Text: strings.Repeat("日志", 150)}}}, nil)
 	a.ResultMaxBytes = 128
 	a.TurnMaxBytes = 64
 	answer, _, err := a.Chat(context.Background(), "q")
@@ -521,11 +521,17 @@ func TestChatTurnBudget(t *testing.T) {
 	if answer != "基于现有证据回答" {
 		t.Fatalf("answer = %q", answer)
 	}
-	if executed != 1 {
-		t.Fatalf("超预算后应停止执行剩余工具: executed=%d", executed)
+	if executed != 2 {
+		t.Fatalf("want both tools to complete, got %d", executed)
 	}
-	if !strings.Contains(sess.Messages[1].Content, "turn context budget exceeded") {
-		t.Fatalf("缺少预算提示: %s", sess.Messages[1].Content)
+	last := fl.captured[1]
+	for _, m := range last[len(last)-2:] {
+		if m.Role != "tool" || !strings.Contains(m.Content, "Tool result ok=true") || !strings.Contains(m.Content, "TRUNCATED") {
+			t.Fatalf("missing bounded tool observation: %+v", m)
+		}
+	}
+	if !strings.Contains(sess.Messages[1].Content, strings.Repeat("日志", 10)) {
+		t.Fatal("lost the safe session preview")
 	}
 }
 

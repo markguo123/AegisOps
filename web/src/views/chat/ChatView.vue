@@ -116,14 +116,15 @@ const contextBudget = computed(() => {
 const contextPercent = computed(() => {
   const sample = contextBudget.value
   if (!sample || sample.unavailable || sample.window <= sample.output_reserve) return null
-  return (100 * sample.input_estimate) / (sample.window - sample.output_reserve)
+  return (100 * (sample.input_actual ?? sample.input_estimate)) / (sample.window - sample.output_reserve)
 })
 const contextDetails = computed(() => {
   const sample = contextBudget.value
   const percent = contextPercent.value
   if (!sample || percent === null) return '暂无可展示的请求预算'
   const inputBudget = sample.window - sample.output_reserve
-  return `总窗口 ${sample.window.toLocaleString()} · 输出预留 ${sample.output_reserve.toLocaleString()} · 可用输入 ${inputBudget.toLocaleString()} · 估算已用 ${sample.input_estimate.toLocaleString()} · 约剩余 ${Math.max(0, Math.round(100 - percent))}%`
+  const input = sample.input_actual == null ? `本地估算 ${sample.input_estimate.toLocaleString()}` : `网关计量 ${sample.input_actual.toLocaleString()}`
+  return `总窗口 ${sample.window.toLocaleString()} · 输出预留 ${sample.output_reserve.toLocaleString()} · 可用输入 ${inputBudget.toLocaleString()} · ${input} · 约剩余 ${Math.max(0, Math.round(100 - percent))}%`
 })
 const stoppingSession = ref('')
 const branchOrigin = ref<BranchOrigin | null>(null)

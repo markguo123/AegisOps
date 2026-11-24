@@ -123,8 +123,17 @@ func (c *resultCache) Execute(ctx context.Context, input json.RawMessage) (tools
 	return tools.ToolResult{Data: map[string]any{"result_id": args.ID, "offset": args.Offset, "next_offset": end, "total_bytes": len(text), "eof": end == len(text), "content": text[args.Offset:end]}}, nil
 }
 
-func (a *Agent) resultForModel(ctx context.Context, call llm.ToolCall, tr tools.ToolResult) string {
-	preview, truncated := tools.MarshalForLLM(tr, a.ResultMaxBytes)
+func (a *Agent) resultForModel(ctx context.Context, call llm.ToolCall, tr tools.ToolResult, previewBytes int) string {
+	if call.Name == "read_tool_result" {
+		// A bounded page includes both content and its next offset. Keep it
+		// intact even when an ordinary result would get a smaller preview.
+		previewBytes = max(previewBytes, 6*resultPageBytes+1024)
+	}
+	preview, truncated := tools.MarshalForLLM(tr, previewBytes)
+	if truncated {
+		// Preserve execution outcome even if the inline preview is only a few bytes.
+		preview = fmt.Sprintf("Tool result ok=%t.\n%s", tools.Present(tr).Ok, preview)
+	}
 	// Never spill a sensitive turn or spill the reader itself into a new result.
 	if !truncated || tr.ModelOnly != nil || a.hasSensitiveValues() || a.resultCache == nil || call.Name == "read_tool_result" {
 		return preview

@@ -807,7 +807,7 @@ POST   /api/sessions/{id}/choose-option  # 审批/选项响应
 ```yaml
 agent:
   result_max_bytes: 8192 # 单次 ToolResult 上限
-  turn_max_bytes: 32768 # 单轮累积 Tool 结果上限
+  turn_max_bytes: 32768 # 每批工具的内联结果预览字节上限
   cmd_max_bytes: 65536 # kubectl 输出上限
   history_turns: 20 # 保留最近 N 轮
 llm:

@@ -386,7 +386,7 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
     await vi.waitFor(() => expect(postCallsSuffix('/cancel')).toHaveLength(1))
   })
 
-  it('会话级 Token 随 turn.status 的累计用量更新', async () => {
+  it('分别展示会话累计 Token 和上次请求的网关计量', async () => {
     const wrapper = await mountChat([
       {
         protocol_version: 2,
@@ -400,10 +400,14 @@ describe('ChatView 全链路冒烟（协议 v2）', () => {
           status: 'done',
           input: '再查一次',
           usage: { prompt_tokens: 16, completion_tokens: 12, total_tokens: 28 },
+          context_budget: { window: 128000, output_reserve: 4096, input_estimate: 90000, input_actual: 30976 },
         },
       },
     ])
-    await vi.waitFor(() => expect(wrapper.text()).toContain('Token 用量46'))
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('Token 用量46')
+      expect(wrapper.find('.chat-budget-button').text()).toContain('约 25%')
+    })
   })
 
   it('P3.8.4：@技能名 从查询剥离并随 skills 字段提交', async () => {

@@ -18,7 +18,7 @@ func newResultAgent() *Agent {
 func TestLargeResultPagingAndOwnership(t *testing.T) {
 	a := newResultAgent()
 	a.AccessScope = &tools.AccessScope{Namespaces: []string{"prod"}}
-	preview := a.resultForModel(context.Background(), call("c1", "get_logs", `{"namespace":"prod","name":"web-0"}`), tools.ToolResult{Text: strings.Repeat("日志 data ", 100)})
+	preview := a.resultForModel(context.Background(), call("c1", "get_logs", `{"namespace":"prod","name":"web-0"}`), tools.ToolResult{Text: strings.Repeat("日志 data ", 100)}, a.ResultMaxBytes)
 	if !strings.Contains(preview, "result_id=") || len(a.resultCache.entries) != 1 {
 		t.Fatal("missing scoped reference")
 	}
@@ -75,7 +75,7 @@ func TestSensitiveResultsAndReaderNeverSpill(t *testing.T) {
 			if mode == "reader" {
 				name = "read_tool_result"
 			}
-			a.resultForModel(context.Background(), call("c1", name, `{}`), tr)
+			a.resultForModel(context.Background(), call("c1", name, `{}`), tr, a.ResultMaxBytes)
 			if len(a.resultCache.entries) != 0 {
 				t.Fatal("sensitive or recursive result stored")
 			}
@@ -85,7 +85,7 @@ func TestSensitiveResultsAndReaderNeverSpill(t *testing.T) {
 
 func TestReaderRejectsUnknownReferencesAndBudgets(t *testing.T) {
 	a := newResultAgent()
-	a.resultForModel(context.Background(), call("c1", "read", `{}`), tools.ToolResult{Text: strings.Repeat("x", 2000)})
+	a.resultForModel(context.Background(), call("c1", "read", `{}`), tools.ToolResult{Text: strings.Repeat("x", 2000)}, a.ResultMaxBytes)
 	var id string
 	for key := range a.resultCache.entries {
 		id = key

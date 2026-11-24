@@ -154,6 +154,7 @@ export interface ChatContextBudget {
   window: number
   output_reserve: number
   input_estimate: number
+  input_actual?: number
   unavailable?: boolean
 }
 

@@ -148,7 +148,7 @@ var catalog = map[string][]Definition{
 		{Key: "agent_timeout", Kind: KindDuration, Default: "5m", Example: "5m", Source: "agent.timeout", Desc: "单轮超时"},
 		{Key: "agent_tool_calling", Kind: KindString, Default: "native", Enum: []string{"native", "shim", "auto"}, Source: "agent.tool_calling", Desc: "工具调用方式"},
 		{Key: "agent_result_max_bytes", Kind: KindInt, Default: 8192, Min: 1, Source: "agent.result_max_bytes", Desc: "工具结果字节上限"},
-		{Key: "agent_turn_max_bytes", Kind: KindInt, Default: 32768, Min: 1, Source: "agent.turn_max_bytes", Desc: "单轮上下文字节上限"},
+		{Key: "agent_turn_max_bytes", Kind: KindInt, Default: 32768, Min: 1, Source: "agent.turn_max_bytes", Desc: "每批工具的内联结果预览字节上限"},
 		{Key: "agent_history_turns", Kind: KindInt, Default: 20, Min: 1, Source: "agent.history_turns", Desc: "携带历史轮数"},
 		{Key: "agent_context_window", Kind: KindInt, Default: 65536, Min: 8192, Max: 4194304, Source: "agent.context_window", Desc: "部署默认窗口（Token）。平台问诊使用所选模型的上下文窗口"},
 		{Key: "agent_session_dir", Kind: KindString, Default: "~/.aegisops/sessions", Example: "~/.aegisops/sessions", Source: "agent.session_dir", Desc: "会话目录（旧数据兼容）"},
