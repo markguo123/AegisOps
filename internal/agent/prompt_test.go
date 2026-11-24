@@ -78,6 +78,22 @@ func TestShimPromptIncludesCreateProtocol(t *testing.T) {
 	}
 }
 
+func TestClarificationRuleAppliesToNativeAndShimPrompts(t *testing.T) {
+	for _, prompt := range []string{basePrompt(), shimPrompt("[]", "")} {
+		for _, clause := range []string{
+			"适用于所有任务",
+			"在当前授权范围内只读核实候选",
+			"能可靠确定任务意图、目标、范围及必要参数时，直接推进",
+			"只有剩余歧义会实质改变操作、目标、范围、结果或风险时，才用 ask_user_question",
+			"工具不可用时，在回复中提出问题并等待用户下一轮回答",
+		} {
+			if !strings.Contains(prompt, clause) {
+				t.Errorf("missing clarification clause %q", clause)
+			}
+		}
+	}
+}
+
 func TestPromptUsesDecisionToolWithoutForcedAlternatives(t *testing.T) {
 	p := basePrompt()
 	if !strings.Contains(p, "ask_user_question") || strings.Contains(p, "≥2 条") {
