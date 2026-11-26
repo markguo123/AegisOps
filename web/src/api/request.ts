@@ -125,12 +125,13 @@ function errorCodeForStatus(status: number): string {
 
 function redirectToLogin(): void {
   const currentPath = `${window.location.pathname}${window.location.search}`
+  const via = readStoredUser<{ source?: string }>()?.source === 'portal' ? '&via=portal' : ''
   clearSession()
   if (window.location.pathname === '/login') {
     return
   }
   const redirect = encodeURIComponent(currentPath)
-  window.location.assign(`/login?redirect=${redirect}`)
+  window.location.assign(`/login?redirect=${redirect}${via}`)
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<ApiResponse<T>> {

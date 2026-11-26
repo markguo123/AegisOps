@@ -286,6 +286,19 @@ func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPa
 }
 
 // validateRole 解析并校验角色存在于角色表且名称命中三角色白名单。
+func (s *Service) defaultUserRoleID(ctx context.Context) (string, error) {
+	roles, err := s.roles.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, role := range roles {
+		if role.Name == RoleUser {
+			return role.ID, nil
+		}
+	}
+	return "", errors.New("user role unavailable")
+}
+
 func (s *Service) validateRole(ctx context.Context, roleID string) (*store.Role, error) {
 	roleID = strings.TrimSpace(roleID)
 	if roleID == "" {

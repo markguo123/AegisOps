@@ -16,9 +16,11 @@ import (
 // 见 auth.Service.issue。local=只有本地口令，oidc=只有外部身份，
 // local+oidc=本地口令账号已绑定外部身份（两种登录方式都可用）。
 const (
-	UserSourceLocal = "local"
-	UserSourceOIDC  = "oidc"
-	UserSourceBoth  = "local+oidc"
+	UserSourceLocal            = "local"
+	UserSourceOIDC             = "oidc"
+	UserSourceBoth             = "local+oidc"
+	UserSourcePortal           = "portal"
+	PortalIdentityIssuerPrefix = "portal:"
 )
 
 // User 是产品内用户（D-05：仅作用于 Web/API，不进入 CLI）。

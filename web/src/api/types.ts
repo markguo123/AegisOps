@@ -59,8 +59,8 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
 
-/** 账号来源（对应后端 store.UserSource*）：本地口令 / 企业 OIDC / 两者并存。 */
-export type AuthUserSource = 'local' | 'oidc' | 'local+oidc'
+/** 账号来源，对应后端 store.UserSource*。 */
+export type AuthUserSource = 'local' | 'oidc' | 'local+oidc' | 'portal'
 
 /** 认证端点（auth.go / store.User 结构化字段，PasswordHash 永不外泄）。 */
 export interface AuthUser {

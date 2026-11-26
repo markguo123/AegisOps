@@ -108,8 +108,9 @@ async function handleUserCommand(command: string | number | object): Promise<voi
  }catch(e){if(e instanceof Error)ElMessage.error(e.message)};return
  }
   if (command === 'logout') {
-    auth.logout()
-    router.push({ name: 'login' })
+    const via = auth.user?.source === 'portal' ? 'portal' : undefined
+    await auth.logout()
+    await router.push({ name: 'login', query: { via } })
   } else if (command === 'password') {
     passwordDialogVisible.value = true
   }

@@ -47,7 +47,7 @@ const SECTION_META: Array<{ key: SectionKey; title: string; desc: string }> = [
   { key: 'users', title: '用户管理', desc: '账号、角色与状态' },
   { key: 'roles', title: '角色与权限', desc: '两角色权限矩阵' },
   { key: 'grants', title: '授权委派', desc: 'namespace 授权与销毁委派' },
-  { key: 'enterprise', title: '企业登录', desc: 'OIDC 单点登录与准入' },
+  { key: 'enterprise', title: '企业登录', desc: '登录方式与准入配置' },
 ]
 const activeSection = ref<SectionKey>('users')
 
@@ -117,11 +117,12 @@ function principalTypeText(type?: string): string {
   return type === 'group' ? '组' : '用户'
 }
 
-/** 账号来源标签：后端只给 local / oidc / local+oidc，未知值原样展示不猜。 */
+/** 账号来源标签，未知值原样展示。 */
 const SOURCE_LABELS: Record<string, string> = {
   local: '本地',
   oidc: '企业SSO',
   'local+oidc': '本地+SSO',
+  portal: '效能平台',
 }
 
 function sourceLabel(source?: string): string {

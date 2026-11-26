@@ -109,11 +109,11 @@ type loginTransaction struct {
 	state, nonce, verifier string
 	expires                time.Time
 	// started 是事务创建时刻，用于在 IdP 不回填 nonce 时靠 iat 判断令牌是不是这次登录刚签发的。
-	started                time.Time
-	revision               uint64
-	bindID                 string
-	bindVersion            int64
-	bindSession            string
+	started     time.Time
+	revision    uint64
+	bindID      string
+	bindVersion int64
+	bindSession string
 }
 type EnterpriseLogin struct {
 	auth         *Service
@@ -485,19 +485,9 @@ func (e *EnterpriseLogin) Finish(ctx context.Context, key, state, code, sessionT
 		}
 		e.auth.revokeUser(tx.bindID)
 	}
-	roles, err := e.auth.roles.List(ctx)
+	roleID, err := e.auth.defaultUserRoleID(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var roleID string
-	for _, r := range roles {
-		if r.Name == RoleUser {
-			roleID = r.ID
-			break
-		}
-	}
-	if roleID == "" {
-		return nil, errors.New("user role unavailable")
 	}
 	uid := newSecretToken()
 	// 登录名按 Dex 的 claim 口径取（preferred_username → 覆盖键 → name → email），

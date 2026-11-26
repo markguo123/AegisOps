@@ -245,6 +245,9 @@ func newServerCmd(deps Dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := browser.LoadPortalSettings(cmd.Context(), st.Settings()); err != nil {
+				return fmt.Errorf("load Portal login settings: %w", err)
+			}
 			handler = server.RequestID(browser.Handler(handler))
 			tls := cfg.Platform.Server.TLS
 			srv := &http.Server{

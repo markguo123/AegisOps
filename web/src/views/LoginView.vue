@@ -14,8 +14,28 @@ const route = useRoute()
 const router = useRouter()
 
 const enterprise = ref('')
+const localEnabled = ref(false)
+const portal = ref('')
+const providerError = ref('')
+const portalErrors: Record<string, string> = {
+  disabled: '管理员尚未启用效能平台登录。',
+  rejected: '效能平台凭证无效或账户不可用，请从效能平台重新进入。',
+  unavailable: '暂时无法完成效能平台认证，请稍后重试。',
+  changed: '登录配置已更新，请从效能平台重新进入。',
+  'rate-limit': '登录请求过于频繁，请稍后重试。',
+  cancelled: '已取消效能平台登录。',
+}
 onMounted(async () => {
-  try { const res = await fetch('/api/v1/auth/providers'); const { data } = await res.json(); if (data?.oidc) enterprise.value = data.displayName || '企业单点登录' } catch { enterprise.value = '' }
+  try {
+    const res = await fetch('/api/v1/auth/providers')
+    const { data } = await res.json()
+    if (!res.ok || !data) throw new Error()
+    localEnabled.value = data.local === true
+    enterprise.value = data.oidc ? data.displayName || '企业单点登录' : ''
+    portal.value = data.portalHomeUrl || ''
+  } catch {
+    providerError.value = '无法读取登录方式，请刷新重试。'
+  }
 })
 const username = ref('')
 const password = ref('')
@@ -124,7 +144,12 @@ async function handleLogin(): Promise<void> {
           <p>登录后即可体检、诊断并处置集群异常</p>
         </div>
 
-        <form class="form" novalidate @submit.prevent="handleLogin">
+        <p v-if="providerError" class="error">{{ providerError }}</p>
+        <p v-else-if="typeof route.query.portalError === 'string'" class="error">
+          {{ portalErrors[route.query.portalError] || '效能平台登录失败，请重新进入。' }}
+        </p>
+        <p v-else-if="portal && route.query.via === 'portal'">请从效能平台重新进入 AegisOps。</p>
+        <form v-if="localEnabled" class="form" novalidate @submit.prevent="handleLogin">
           <div class="field">
             <label class="field-label" for="login-username">账号</label>
             <div class="field-box">
@@ -190,9 +215,9 @@ async function handleLogin(): Promise<void> {
         </form>
 
         <!-- 企业单点登录：账号口令之后的次级入口（口径同主流产品） -->
-        <div v-if="enterprise" class="sso">
-          <div class="sso-split"><span>或</span></div>
-          <a class="sso-btn" href="/api/v1/auth/oidc/start">
+        <div v-if="enterprise || portal" class="sso">
+          <div v-if="localEnabled" class="sso-split"><span>或</span></div>
+          <a v-if="enterprise" class="sso-btn" href="/api/v1/auth/oidc/start">
             <svg
               class="icon"
               viewBox="0 0 24 24"
@@ -208,6 +233,7 @@ async function handleLogin(): Promise<void> {
             </svg>
             <span>{{ enterprise }}</span>
           </a>
+          <a v-if="portal" class="sso-btn portal-btn" :href="portal">前往效能平台</a>
         </div>
 
         <div class="foot">
@@ -245,6 +271,9 @@ async function handleLogin(): Promise<void> {
    inline，宽高不生效，渐变只会画在文字那一小段上（就是之前那个半截按钮）。 */
 .sso {
   margin-top: 18px;
+}
+.sso-btn + .portal-btn {
+  margin-top: 12px;
 }
 .sso-split {
   display: flex;

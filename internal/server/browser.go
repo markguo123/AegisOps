@@ -25,19 +25,23 @@ type failedLogin struct {
 	until time.Time
 }
 type BrowserGateway struct {
-	auth       *auth.Service
-	enterprise *auth.EnterpriseLogin
-	audit      auditWriter
-	publicURL  string
-	dev        bool
-	quickstart bool
-	key        [32]byte
-	mu         sync.Mutex
-	fails      map[string]failedLogin
+	loginPolicy    sync.RWMutex
+	portal         auth.PortalConfig
+	portalStore    store.SettingsStore
+	portalRevision uint64
+	auth           *auth.Service
+	enterprise     *auth.EnterpriseLogin
+	audit          auditWriter
+	publicURL      string
+	dev            bool
+	quickstart     bool
+	key            [32]byte
+	mu             sync.Mutex
+	fails          map[string]failedLogin
 }
 
 func NewBrowserGateway(a *auth.Service, e *auth.EnterpriseLogin, audit auditWriter, origin string, dev bool, quickstart ...bool) (*BrowserGateway, error) {
-	g := &BrowserGateway{auth: a, enterprise: e, audit: audit, publicURL: strings.TrimSuffix(origin, "/"), dev: dev, fails: map[string]failedLogin{}}
+	g := &BrowserGateway{auth: a, enterprise: e, audit: audit, publicURL: strings.TrimSuffix(origin, "/"), dev: dev, fails: map[string]failedLogin{}, portal: auth.DefaultPortalConfig()}
 	g.quickstart = len(quickstart) > 0 && quickstart[0]
 	_, err := rand.Read(g.key[:])
 	return g, err
@@ -140,16 +144,33 @@ func (g *BrowserGateway) Handler(next http.Handler) http.Handler {
 			token = c.Value
 		}
 		mutation := r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS"
-		if mutation && (!g.originOK(r) || (r.URL.Path != "/api/v1/auth/login" && (token == "" || !hmac.Equal([]byte(g.csrf(token)), []byte(r.Header.Get("X-CSRF-Token")))))) {
+		anonymousLogin := r.Method == http.MethodPost && (r.URL.Path == "/api/v1/auth/login" || r.URL.Path == parentTokenLogin)
+		if mutation && (!g.originOK(r) || (!anonymousLogin && (token == "" || !hmac.Equal([]byte(g.csrf(token)), []byte(r.Header.Get("X-CSRF-Token")))))) {
 			writeError(w, r, 403, codeForbidden, "request origin or CSRF token is invalid")
 			return
 		}
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/v1/auth/providers":
+			g.loginPolicy.RLock()
 			c, _, _ := g.enterprise.Config()
-			writeOK(w, r, 200, map[string]any{"local": true, "oidc": c.Enabled, "displayName": c.DisplayName})
+			portal := g.portal
+			g.loginPolicy.RUnlock()
+			providers := map[string]any{"local": !portal.LocalDisabled, "oidc": c.Enabled, "displayName": c.DisplayName}
+			if portal.Enabled {
+				providers["portalHomeUrl"] = portal.HomeURL
+			}
+			writeOK(w, r, 200, providers)
+			return
+		case "POST " + parentTokenLogin:
+			g.finishPortal(w, r, token)
 			return
 		case "POST /api/v1/auth/login":
+			g.loginPolicy.RLock()
+			defer g.loginPolicy.RUnlock()
+			if g.portal.LocalDisabled {
+				writeError(w, r, 403, codeForbidden, "local password login is disabled")
+				return
+			}
 			var body struct{ Username, Password string }
 			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&body) != nil {
 				writeError(w, r, 400, codeInvalidArgument, "invalid credentials")
@@ -224,6 +245,10 @@ func (g *BrowserGateway) Handler(next http.Handler) http.Handler {
 			writeError(w, r, 501, "FEATURE_NOT_ENABLED", "machine credentials are disabled")
 			return
 		}
+		if r.URL.Path == "/api/v1/settings/auth/portal" {
+			g.handlePortalSettings(w, r, u, role, token)
+			return
+		}
 		if r.URL.Path == "/api/v1/settings/auth" || r.URL.Path == "/api/v1/settings/auth/test" {
 			if role.Name != auth.RoleAdmin {
 				writeError(w, r, 403, codeForbidden, "administrator required")
@@ -234,6 +259,15 @@ func (g *BrowserGateway) Handler(next http.Handler) http.Handler {
 				if json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536)).Decode(&c) != nil {
 					writeError(w, r, 400, codeInvalidArgument, "invalid provider configuration")
 					return
+				}
+				g.loginPolicy.Lock()
+				defer g.loginPolicy.Unlock()
+				if r.Method == "PATCH" && g.portal.LocalDisabled {
+					current, _, _ := g.enterprise.Config()
+					if current.Enabled && (!g.portal.Enabled || g.auth.SessionSource(token) != "portal") {
+						writeError(w, r, 409, codeConflict, "enable local login or sign in as a Portal administrator before changing OIDC")
+						return
+					}
 				}
 				if err := g.record(r, u.ID, "auth.provider.change.request"); err != nil {
 					writeError(w, r, 500, codeInternal, "audit unavailable")

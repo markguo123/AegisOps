@@ -45,7 +45,7 @@ const SSO_ACCOUNT_PREFIX = 'oidc-'
 function isSSOAccount(current: AuthUser): boolean {
   // source 由 /auth/me 与登录响应给出；老会话里没有它才退回建档前缀判断。
   if (current.source) {
-    return current.source === 'oidc'
+    return current.source === 'oidc' || current.source === 'portal'
   }
   return current.username.startsWith(SSO_ACCOUNT_PREFIX)
 }

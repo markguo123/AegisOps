@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -71,6 +72,9 @@ func (st *userStore) Get(ctx context.Context, id string) (*User, error) {
 func userSourceFrom(issuer sql.NullString, passwordHash string) string {
 	if !issuer.Valid || issuer.String == "" {
 		return ""
+	}
+	if strings.HasPrefix(issuer.String, PortalIdentityIssuerPrefix) {
+		return UserSourcePortal
 	}
 	if passwordHash == "" {
 		return UserSourceOIDC
