@@ -28,6 +28,10 @@ export interface ModelProfile extends Omit<ModelProfileInput, 'apiKey'> {
 
 const MODEL_PROFILES_PATH = '/settings/model/profiles'
 
+export async function checkMCPConnections() {
+  return (await apiPost<Array<{ index: number; tools: number; error?: string }>>('/settings/mcp/check', {})).data ?? []
+}
+
 export async function listModelProfiles() {
   return (await apiGet<ModelProfile[]>(MODEL_PROFILES_PATH)).data ?? []
 }

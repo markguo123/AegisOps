@@ -17,6 +17,7 @@ import (
 // AccessScope 是当前 Agent 运行可访问的 Kubernetes 资源范围。
 // 它是执行前门禁，不是提示词约束。
 type AccessScope struct {
+	ExternalMCP     bool                                                        `json:"-"`
 	RequestEnforced bool                                                        `json:"-"`
 	ResolveResource func(context.Context, string) (string, string, bool, error) `json:"-"`
 	RequestContext  context.Context                                             `json:"-"`

@@ -12,6 +12,7 @@ import (
 // ToolAdapter 把 MCP 工具包装为 AegisOps 的 tools.Tool。
 // 安全侧默认：非只读 + 风险 CRITICAL，必须经审批策略后才能执行。
 type ToolAdapter struct {
+	alias  string
 	server string
 	spec   Tool
 	client Client
@@ -24,8 +25,14 @@ func NewToolAdapter(client Client, spec Tool) *ToolAdapter {
 
 // Name 使用 <server>.<tool> 唯一名，避免与内置工具或其他 MCP 服务器冲突。
 func (a *ToolAdapter) Name() string {
+	if a.alias != "" {
+		return a.alias
+	}
 	return a.server + "." + a.spec.Name
 }
+
+func (a *ToolAdapter) Capability() tools.Capability               { return tools.Capability{Domain: "external_mcp"} }
+func (a *ToolAdapter) RequiresHumanApproval(json.RawMessage) bool { return true }
 
 func (a *ToolAdapter) Description() string { return a.spec.Description }
 func (a *ToolAdapter) InputSchema() any {

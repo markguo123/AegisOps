@@ -200,9 +200,10 @@ preserved and provenance recorded in docs/CREDITS.md. Other design logic may
 be borrowed and re-implemented in AegisOps's own architecture. Documentation
 consistently refers to this as "借鉴" (borrowed).
 
-Phase 3 (future) may add: MCP external tools, observability integration
-(Prometheus/Grafana etc.), additional session backends. Do NOT implement
-those in Phase 2 beyond the reserved interfaces.
+The approved MCP scope includes Web Agent connections to external MCP
+servers and a standalone CLI inspection MCP server. The default platform
+deployment does not expose an MCP server. Native observability integrations
+and additional session backends remain future work.
 
 ## LLM Safety
 

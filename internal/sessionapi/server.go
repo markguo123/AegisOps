@@ -1013,11 +1013,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return nil, e
 			}
-			return &tools.AccessScope{Policy: a, ClusterID: a.ClusterID}, nil
+			_, role, err := principal.recheck(ctx)
+			if err != nil || role == nil {
+				return nil, session.ErrForbidden
+			}
+			return &tools.AccessScope{Policy: a, ClusterID: a.ClusterID, ExternalMCP: permission.HasPermission(role.Permissions, "*")}, nil
 		}
 		accessScope = &tools.AccessScope{Policy: &authz.EffectiveAccess{ClusterID: sess.Cluster}, ClusterID: sess.Cluster, Refresh: refresh}
 		if fresh, e := refresh(r.Context()); e == nil {
 			accessScope.Policy = fresh.Policy
+			accessScope.ExternalMCP = fresh.ExternalMCP
 		}
 		kubePath = bound.Path
 		check = bound.CheckRequest

@@ -8,6 +8,7 @@ import TechEmptyState from '@/components/TechEmptyState.vue'
 import ModelProfiles from './ModelProfiles.vue'
 import ReportRetentionSettings from './ReportRetentionSettings.vue'
 import {
+  checkMCPConnections,
   describeSettingsError,
   getSettings,
   listModelProfiles,
@@ -54,6 +55,19 @@ const activeGroup = ref(route.query.tab === 'retention' && isAdmin.value ? 'rete
 const view = ref<SettingsGroupView | null>(null)
 const loading = ref(false)
 const saving = ref(false)
+const checkingMCP = ref(false)
+async function checkMCP() {
+  checkingMCP.value = true
+  try {
+    const results = await checkMCPConnections()
+    const lines = results.map(item => `服务器 ${item.index} · ${item.error ?? `可用工具 ${item.tools} 个`}`)
+    ElMessage({ type: results.some(item => item.error) ? 'warning' : 'success', message: lines.join('；') })
+  } catch (error) {
+    ElMessage.error(describeSettingsError('POST', error))
+  } finally {
+    checkingMCP.value = false
+  }
+}
 const savingError = ref('')
 const drafts = ref<Record<string, unknown>>({})
 const dirty = ref<Record<string, boolean>>({})
@@ -434,6 +448,9 @@ onMounted(loadGroup)
                     <span v-if="dirtyCount > 0" class="warn-tag"> · 待保存 {{ dirtyCount }}</span>
                   </div>
                 </div>
+                <el-button v-if="activeGroup === 'mcp' && isAdmin" :loading="checkingMCP" :disabled="dirtyCount > 0" @click="checkMCP">
+                  检查连接
+                </el-button>
                 <el-button
                   v-if="canWrite"
                   type="primary"

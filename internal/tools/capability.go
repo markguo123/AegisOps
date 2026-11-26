@@ -30,6 +30,12 @@ type OperationDescriber interface {
 }
 
 func (c Capability) Facts(input json.RawMessage, scope AccessScope) (OperationFacts, error) {
+	if c.Domain == "external_mcp" {
+		if !scope.ExternalMCP {
+			return OperationFacts{}, fmt.Errorf("external MCP requires administrator access")
+		}
+		return OperationFacts{Local: true}, nil
+	}
 	if c.Domain == "local" {
 		return OperationFacts{Local: true}, nil
 	}

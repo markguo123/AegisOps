@@ -13,11 +13,52 @@ import (
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/config"
+	"github.com/k8s-ai/k8s-ai/internal/mcp"
+	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
 type modelChecks struct {
-	active sync.Mutex
-	load   func(context.Context) (*config.Config, error)
+	active    sync.Mutex
+	mcpActive sync.Mutex
+	load      func(context.Context) (*config.Config, error)
+}
+
+func (s *Server) handleMCPCheck(w http.ResponseWriter, r *http.Request) {
+	if s.modelChecks.load == nil {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, "未启用 MCP 检测")
+		return
+	}
+	if !s.modelChecks.mcpActive.TryLock() {
+		writeError(w, r, http.StatusTooManyRequests, codeInvalidArgument, "MCP 检测正在进行")
+		return
+	}
+	defer s.modelChecks.mcpActive.Unlock()
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	cfg, err := s.modelChecks.load(ctx)
+	if err != nil || cfg == nil || !cfg.MCP.Enabled || len(cfg.MCP.Servers) == 0 {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "请先保存并启用 MCP 配置")
+		return
+	}
+	type status struct {
+		Index int    `json:"index"`
+		Tools int    `json:"tools"`
+		Error string `json:"error,omitempty"`
+	}
+	results := make([]status, 0, len(cfg.MCP.Servers))
+	for i, spec := range cfg.MCP.Servers {
+		item := status{Index: i + 1}
+		registry := tools.NewRegistry()
+		closeRemote, err := mcp.RegisterRemote(ctx, registry, spec)
+		if err != nil {
+			item.Error = err.Error()
+		} else {
+			item.Tools = len(registry.All())
+			closeRemote()
+		}
+		results = append(results, item)
+	}
+	writeOK(w, r, http.StatusOK, results)
 }
 
 func (s *Server) WithModelChecks(load func(context.Context) (*config.Config, error)) *Server {

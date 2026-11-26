@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -1239,6 +1240,13 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 		execCtx, err = preparer.AuthorizeExecutionContext(execCtx, call.Arguments)
 		if err != nil {
 			return tools.ExecutionError(err)
+		}
+	}
+	if provider, ok := t.(tools.CapabilityProvider); ok && provider.Capability().Domain == "external_mcp" {
+		var arguments any
+		if err := json.Unmarshal(call.Arguments, &arguments); err == nil &&
+			!reflect.DeepEqual(arguments, a.redactValue(arguments)) {
+			return tools.ResultError("sensitive arguments cannot be sent to an external MCP server")
 		}
 	}
 	a.flowTurnStatus(ctx, sse.TurnRunning, "", sse.ActivityExecuting, "")

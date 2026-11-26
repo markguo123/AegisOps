@@ -221,6 +221,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/settings/{group}", s.handleGetSettings)
 	mux.HandleFunc("PATCH /api/v1/settings/{group}", s.handlePatchSettings)
 	mux.HandleFunc("POST /api/v1/settings/model/{action}", s.handleModelCheck)
+	mux.HandleFunc("POST /api/v1/settings/mcp/check", s.handleMCPCheck)
 	mux.HandleFunc("GET /api/v1/settings/model/profiles", s.handleModelProfiles)
 	mux.HandleFunc("POST /api/v1/settings/model/profiles", s.handleModelProfiles)
 	mux.HandleFunc("PATCH /api/v1/settings/model/profiles/{id}", s.handleModelProfiles)

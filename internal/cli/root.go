@@ -31,6 +31,7 @@ func NewRootCmd(deps Dependencies) *cobra.Command {
 	root.AddCommand(newDBCmd(deps))
 	root.AddCommand(newConfigCmd(deps))
 	root.AddCommand(newScanCmd(deps))
+	root.AddCommand(newMCPCmd(deps))
 	root.AddCommand(newChatCmd(deps))
 	root.AddCommand(newServerCmd(deps))
 	root.AddCommand(newBlobsCmd(deps))

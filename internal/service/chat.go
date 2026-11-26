@@ -20,6 +20,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/kubernetes"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/manifestx"
+	"github.com/k8s-ai/k8s-ai/internal/mcp"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/scanner"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -766,6 +767,22 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 			return s.diagnosticMemories.Recall(ctx, req.UserID, clusterID, namespace, req.Query, access.Policy.Check)
 		}
 	}
+	var remoteClosers []func()
+	if cfg.MCP.Enabled && req.AccessScope != nil && req.AccessScope.ExternalMCP {
+		discovery, cancel := context.WithTimeout(runCtx, 5*time.Second)
+		for _, spec := range cfg.MCP.Servers {
+			if discovery.Err() != nil {
+				break
+			}
+			closeRemote, err := mcp.RegisterRemote(discovery, reg, spec)
+			if err != nil {
+				slog.Warn("external MCP discovery failed", "error", err)
+				continue
+			}
+			remoteClosers = append(remoteClosers, closeRemote)
+		}
+		cancel()
+	}
 	ag := agent.New(agent.Options{
 		RecallMemory:   recallMemory,
 		SuggestMemory:  suggestMemory,
@@ -796,7 +813,14 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 		AccessScope:    req.AccessScope,
 	})
 	handedOff = true
-	go s.runChat(runCtx, ag, sess, req, events, recorder, writer, cancelRun, scope)
+	go func() {
+		defer func() {
+			for _, closeRemote := range remoteClosers {
+				closeRemote()
+			}
+		}()
+		s.runChat(runCtx, ag, sess, req, events, recorder, writer, cancelRun, scope)
+	}()
 	return events, nil
 }
 

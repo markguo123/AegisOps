@@ -266,11 +266,15 @@ type MCPConfig struct {
 
 // MCPServerConfig 描述一个 MCP 服务器（stdio 或 http）。
 type MCPServerConfig struct {
-	Name    string            `mapstructure:"name"`
-	Command string            `mapstructure:"command"`
-	Args    []string          `mapstructure:"args"`
-	Env     map[string]string `mapstructure:"env"`
-	URL     string            `mapstructure:"url"`
+	Name         string            `mapstructure:"name"`
+	Command      string            `mapstructure:"command"`
+	Args         []string          `mapstructure:"args"`
+	Env          map[string]string `mapstructure:"env"`
+	URL          string            `mapstructure:"url"`
+	Transport    string            `mapstructure:"transport"`
+	Headers      map[string]string `mapstructure:"headers"`
+	AllowedTools []string          `mapstructure:"allowed_tools"`
+	AllowHTTP    bool              `mapstructure:"allow_http"`
 }
 
 // PlatformConfig 是四期平台运行时的静态启动基线（P6.12）。

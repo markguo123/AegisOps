@@ -118,7 +118,7 @@ var catalog = map[string][]Definition{
 	GroupMCP: {
 		{Key: "enabled", Kind: KindBool, Default: false, Source: "mcp.enabled", Desc: "启用 MCP 外部工具"},
 		// servers 内含各服务的 env（可能带令牌），整体按敏感字段处理：只写不读。
-		{Key: "servers", Kind: KindJSON, Default: []any{}, Example: `[{"name":"demo","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"],"env":{}}]`, Sensitive: true, Source: "mcp.servers", Desc: "MCP 服务器列表（不回显）"},
+		{Key: "servers", Kind: KindJSON, Default: []any{}, Example: `[{"name":"grafana","transport":"streamable-http","url":"https://grafana-mcp.example.internal/mcp","allowed_tools":["search_dashboards","query_prometheus"]}]`, Sensitive: true, Source: "mcp.servers", Desc: "MCP 服务器列表（不回显）"},
 	},
 	GroupOps: {
 		{Key: "kubeconfig", Kind: KindString, Default: "", Example: "~/.kube/config", Sensitive: true, Source: "kubernetes.kubeconfig", Desc: "kubeconfig 路径（凭据定位信息，不回显）"},

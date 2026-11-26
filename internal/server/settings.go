@@ -43,6 +43,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // handlePatchSettings PATCH /api/v1/settings/{group}：请求体是扁平的键→取值对象，
 // 只更新出现的键；未登记键或越界取值整批拒绝（400），成功后返回整组最新视图。
 func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("group") == settings.GroupMCP && !serverRoleIsAdmin(RoleFrom(r.Context())) {
+		writeError(w, r, http.StatusForbidden, codeForbidden, "MCP 配置需要管理员权限")
+		return
+	}
 	if s.settings == nil {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "settings is not configured")
 		return
