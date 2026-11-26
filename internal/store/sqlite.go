@@ -547,6 +547,12 @@ func (st *settingsStore) Get(ctx context.Context, group, key string) (*Settings,
 }
 
 func (st *settingsStore) CompareAndSet(ctx context.Context, set *Settings, previous string) (bool, error) {
+	if previous == "" {
+		now := time.Now()
+		_, err := st.s.db.ExecContext(ctx, "INSERT INTO settings ("+settingsColumns+") VALUES (?,?,?,?,?,?)",
+			set.Group, set.Key, set.Value, boolInt(set.Sensitive), now, now)
+		return err == nil, mapErr(err, "create setting")
+	}
 	result, err := st.s.db.ExecContext(ctx, "UPDATE settings SET value=?, "+settingsSensitiveCol+"=?, updated_at=? WHERE group_name=? AND key_name=? AND value=?",
 		set.Value, boolInt(set.Sensitive), time.Now(), set.Group, set.Key, previous)
 	if err != nil {

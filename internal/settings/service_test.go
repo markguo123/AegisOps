@@ -309,6 +309,50 @@ func TestImportConfigSkipsDefaults(t *testing.T) {
 
 // TestPatchGroupSensitiveEncryptsAtRest 验证 P3.9：敏感键以密文落库，
 // Store 原始值不含明文，且密文可由注入的 cipher 还原。
+func TestMCPServerEditPreservesOtherEntriesAndBindsCredentialsToAddress(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	svc := New(st, WithCipher(testCipher{}))
+	grafana := MCPServerEdit{Name: "grafana", URL: "https://grafana.test/mcp", Transport: "streamable-http", AllowedTools: []string{"search_dashboards"}}
+	headers := map[string]string{"Authorization": "Bearer test-token"}
+	grafana.Headers = &headers
+	if err := svc.EditMCPServer(ctx, -1, "", "", &grafana, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	other := MCPServerEdit{Name: "other", URL: "https://other.test/mcp", Transport: "sse", AllowedTools: []string{"lookup"}}
+	if err := svc.EditMCPServer(ctx, -1, "", "", &other, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	grafana.Headers = nil
+	grafana.ReadOnlyTools = []string{"search_dashboards"}
+	if err := svc.EditMCPServer(ctx, 0, grafana.Name, grafana.URL, &grafana, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := st.Settings().Get(ctx, GroupMCP, "servers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := (testCipher{}).Decrypt(saved.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []MCPServerEdit
+	if err := json.Unmarshal(plain, &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Headers == nil || (*entries[0].Headers)["Authorization"] != "Bearer test-token" || entries[1].Name != "other" || len(entries[0].ReadOnlyTools) != 1 {
+		t.Fatal("editing the server discarded credentials, tools or a neighboring server")
+	}
+	oldAddress := grafana.URL
+	grafana.URL = "https://new.test/mcp"
+	if err := svc.EditMCPServer(ctx, 0, grafana.Name, oldAddress, &grafana, Actor{}); err == nil {
+		t.Fatal("carried credentials to a different URL")
+	}
+	if err := svc.EditMCPServer(ctx, 1, other.Name, other.URL, nil, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMCPServerTogglePreservesCredentialsAndOtherServers(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

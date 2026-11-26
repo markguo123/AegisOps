@@ -34,6 +34,24 @@ export interface MCPServerRow {
   url: string
   transport: string
   enabled: boolean
+  allow_http: boolean
+  allowed_tools: string[] | null
+  read_only_tools: string[] | null
+  has_headers: boolean
+}
+
+export type MCPServerEdit = Pick<MCPServerRow, 'name' | 'url' | 'transport' | 'allow_http'> & {
+  allowed_tools: string[]
+  read_only_tools: string[]
+  headers?: Record<string, string>
+}
+
+export function saveMCPServer(server: MCPServerRow | null, edit: MCPServerEdit) {
+  return apiPatch<boolean>('/settings/mcp/servers', { index: server?.index ?? -1, name: server?.name, url: server?.url, edit })
+}
+
+export function removeMCPServer({ index, name, url }: MCPServerRow) {
+  return apiPatch<boolean>('/settings/mcp/servers', { index, name, url, remove: true })
 }
 
 export async function listMCPServers() {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, InfoFilled, Key, Lock, Promotion, Refresh, Setting } from '@element-plus/icons-vue'
 
 import TechEmptyState from '@/components/TechEmptyState.vue'
@@ -11,6 +11,9 @@ import {
   checkMCPConnections,
   listMCPServers,
   setMCPServerEnabled,
+  saveMCPServer,
+  removeMCPServer,
+  type MCPServerEdit,
   type MCPServerRow,
   describeSettingsError,
   getSettings,
@@ -46,6 +49,7 @@ const modelLimits = ref(false)
 const modelRoutingKeys = ['enabled', 'default_chat_model', 'scan_model']
 const legacyModelKeys = ['provider', 'api_format', 'base_url', 'api_key', 'model', 'chat_models', 'max_tokens']
 function visibleField(item: SettingsItem) {
+  if (activeGroup.value === 'mcp') return item.key !== 'servers'
   if (activeGroup.value !== 'model') return true
   if (modelRoutingKeys.includes(item.key)) return true
   if (['model_profiles', 'models_migrated'].includes(item.key)) return false
@@ -62,6 +66,75 @@ const checkingMCP = ref(false)
 const mcpServers = ref<MCPServerRow[]>([])
 const mcpListError = ref('')
 const togglingMCP = ref(false)
+const mcpEditorOpen = ref(false)
+const mcpEditing = ref<MCPServerRow | null>(null)
+const mcpForm = ref({ name: '', url: '', transport: 'streamable-http', allowHTTP: false, tools: '', readOnly: '', headers: '' })
+const mcpEditorError = ref('')
+
+function openMCPServer(server: MCPServerRow | null) {
+  mcpEditing.value = server
+  mcpForm.value = {
+    name: server?.name ?? '', url: server?.url ?? '',
+    transport: server?.transport === 'sse' ? 'sse' : 'streamable-http',
+    allowHTTP: server?.allow_http ?? false,
+    tools: server?.allowed_tools?.join(', ') ?? '',
+    readOnly: server?.read_only_tools?.join(', ') ?? '', headers: '',
+  }
+  mcpEditorError.value = ''
+  mcpEditorOpen.value = true
+}
+
+async function submitMCPServer() {
+  if (togglingMCP.value) return
+  const form = mcpForm.value
+  const edit: MCPServerEdit = {
+    name: form.name.trim(), url: form.url.trim(), transport: form.transport, allow_http: form.allowHTTP,
+    allowed_tools: splitList(form.tools), read_only_tools: splitList(form.readOnly),
+  }
+  mcpEditorError.value = ''
+  if (form.headers.trim()) {
+    try {
+      const headers = JSON.parse(form.headers)
+      if (!headers || Array.isArray(headers) || typeof headers !== 'object' ||
+          Object.values(headers).some(value => typeof value !== 'string')) throw new Error()
+      edit.headers = headers
+    } catch {
+      mcpEditorError.value = '认证头必须是 JSON 对象，且值必须是字符串'
+      return
+    }
+  }
+  togglingMCP.value = true
+  try {
+    await saveMCPServer(mcpEditing.value, edit)
+    mcpEditorOpen.value = false
+    mcpForm.value.headers = ''
+    await loadMCPServers()
+    ElMessage.success('MCP 服务器已保存')
+  } catch (error) {
+    mcpEditorError.value = describeSettingsError('保存 MCP 服务器', error)
+  } finally {
+    togglingMCP.value = false
+  }
+}
+
+async function confirmRemoveMCP(server: MCPServerRow) {
+  try {
+    await ElMessageBox.confirm(`移除「${server.name}」及其保存的认证信息？`, '移除 MCP 服务器', { type: 'warning' })
+  } catch {
+    return
+  }
+  if (togglingMCP.value) return
+  togglingMCP.value = true
+  try {
+    await removeMCPServer(server)
+    await loadMCPServers()
+    ElMessage.success('MCP 服务器已移除')
+  } catch (error) {
+    ElMessage.error(describeSettingsError('移除 MCP 服务器', error))
+  } finally {
+    togglingMCP.value = false
+  }
+}
 const mcpEnabled = computed(() => view.value?.group === 'mcp' &&
   view.value.items.some(item => item.key === 'enabled' && item.value === true))
 
@@ -503,7 +576,10 @@ onMounted(loadGroup)
             <div v-if="loading" class="muted center-hint">加载中…</div>
             <div v-else class="field-grid">
               <section v-if="activeGroup === 'mcp' && isAdmin" aria-label="MCP 服务器">
-                <p class="muted small">{{ mcpEnabled ? '已保存的 MCP 服务器' : '总开关已关闭，所有 MCP 服务器暂停使用' }}</p>
+                <div class="row">
+                  <p class="muted small grow">{{ mcpEnabled ? '已保存的 MCP 服务器' : '总开关已关闭，所有 MCP 服务器暂停使用' }}</p>
+                  <el-button v-if="canWrite" :disabled="togglingMCP || dirtyCount > 0" @click="openMCPServer(null)">新增服务器</el-button>
+                </div>
                 <p v-if="mcpListError" class="warn-tag">{{ mcpListError }}</p>
                 <el-table v-else :data="mcpServers" empty-text="暂无 MCP 服务器">
                   <el-table-column prop="name" label="名称" min-width="110" />
@@ -516,7 +592,33 @@ onMounted(loadGroup)
                       <el-switch :model-value="row.enabled" :disabled="!canWrite || saving || togglingMCP || dirtyCount > 0" :aria-label="`启用 ${row.name}`" @change="toggleMCP(row, $event)" />
                     </template>
                   </el-table-column>
+                  <el-table-column v-if="canWrite" label="操作" width="140">
+                    <template #default="{ row }">
+                      <el-button link type="primary" :disabled="togglingMCP || dirtyCount > 0" @click="openMCPServer(row)">编辑</el-button>
+                      <el-button link type="danger" :disabled="togglingMCP || dirtyCount > 0" @click="confirmRemoveMCP(row)">移除</el-button>
+                    </template>
+                  </el-table-column>
                 </el-table>
+                <el-dialog v-model="mcpEditorOpen" :title="mcpEditing ? '编辑 MCP 服务器' : '新增 MCP 服务器'" width="min(640px, 92vw)" destroy-on-close @closed="mcpForm.headers = ''">
+                  <el-form label-position="top" @submit.prevent="submitMCPServer">
+                    <el-form-item label="名称"><el-input v-model="mcpForm.name" /></el-form-item>
+                    <el-form-item label="地址"><el-input v-model="mcpForm.url" placeholder="https://example.internal/mcp" /></el-form-item>
+                    <el-form-item label="传输方式">
+                      <el-select v-model="mcpForm.transport"><el-option label="Streamable HTTP" value="streamable-http" /><el-option label="SSE" value="sse" /></el-select>
+                      <el-checkbox v-model="mcpForm.allowHTTP">允许 HTTP</el-checkbox>
+                    </el-form-item>
+                    <el-form-item label="工具白名单"><el-input v-model="mcpForm.tools" placeholder="工具名称以逗号分隔" /></el-form-item>
+                    <el-form-item label="只读工具"><el-input v-model="mcpForm.readOnly" placeholder="填写白名单中的只读工具名称" /></el-form-item>
+                    <el-form-item label="认证头">
+                      <el-input v-model="mcpForm.headers" type="textarea" :placeholder="mcpEditing?.has_headers ? '留空保留原认证头，填写 {} 清除' : '可选 JSON 对象，留空表示无认证头'" />
+                    </el-form-item>
+                    <el-alert v-if="mcpEditorError" type="error" :title="mcpEditorError" :closable="false" />
+                  </el-form>
+                  <template #footer>
+                    <el-button @click="mcpEditorOpen = false">取消</el-button>
+                    <el-button type="primary" :loading="togglingMCP" @click="submitMCPServer">保存服务器</el-button>
+                  </template>
+                </el-dialog>
               </section>
               <el-alert
                 v-if="encryptionUnavailable"

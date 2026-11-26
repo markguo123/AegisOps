@@ -1,12 +1,16 @@
 package settings
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,58 +164,139 @@ func (s *Service) PatchGroup(ctx context.Context, group string, patch map[string
 	return s.patchGroup(ctx, group, patch, actor)
 }
 
+type MCPServerEdit struct {
+	Name          string             `json:"name"`
+	URL           string             `json:"url"`
+	Transport     string             `json:"transport"`
+	AllowHTTP     bool               `json:"allow_http"`
+	AllowedTools  []string           `json:"allowed_tools"`
+	ReadOnlyTools []string           `json:"read_only_tools"`
+	Headers       *map[string]string `json:"headers,omitempty"`
+}
+
 func (s *Service) SetMCPServerEnabled(ctx context.Context, index int, name, address string, enabled bool, actor Actor) error {
+	if index < 0 {
+		return ErrInvalid
+	}
+	return s.mutateMCPServers(ctx, index, name, address, actor, func(entries []map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+		if enabled {
+			delete(entries[index], "disabled")
+		} else {
+			entries[index]["disabled"] = json.RawMessage("true")
+		}
+		return entries, nil
+	})
+}
+
+func (s *Service) EditMCPServer(ctx context.Context, index int, name, address string, input *MCPServerEdit, actor Actor) error {
+	if input == nil && index < 0 {
+		return ErrInvalid
+	}
+	return s.mutateMCPServers(ctx, index, name, address, actor, func(entries []map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+		if input == nil {
+			return append(entries[:index], entries[index+1:]...), nil
+		}
+		endpoint, err := url.Parse(input.URL)
+		if err != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Fragment != "" || (endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && input.AllowHTTP)) {
+			return nil, fmt.Errorf("%w: 请填写有效的 MCP 地址，使用 HTTP 时需显式允许", ErrInvalid)
+		}
+		if !mcpNamePattern.MatchString(input.Name) || len(input.AllowedTools) == 0 || (input.Transport != "streamable-http" && input.Transport != "sse") {
+			return nil, fmt.Errorf("%w: 请填写有效的名称、传输方式和工具白名单", ErrInvalid)
+		}
+		for _, tool := range input.ReadOnlyTools {
+			if !slices.Contains(input.AllowedTools, tool) {
+				return nil, fmt.Errorf("%w: 只读工具必须在白名单内", ErrInvalid)
+			}
+		}
+		for i, entry := range entries {
+			var existing string
+			_ = json.Unmarshal(entry["name"], &existing)
+			if i != index && existing == input.Name {
+				return nil, fmt.Errorf("%w: MCP 服务器名称已存在", ErrInvalid)
+			}
+		}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		fields := map[string]json.RawMessage{}
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			return nil, err
+		}
+		if index < 0 {
+			return append(entries, fields), nil
+		}
+		entry := entries[index]
+		var savedHeaders map[string]string
+		_ = json.Unmarshal(entry["headers"], &savedHeaders)
+		if len(savedHeaders) > 0 && input.Headers == nil && input.URL != address {
+			return nil, fmt.Errorf("%w: 修改地址时请重新填写或明确清除认证头", ErrInvalid)
+		}
+		delete(entry, "command")
+		delete(entry, "args")
+		delete(entry, "env")
+		for key, value := range fields {
+			entry[key] = value
+		}
+		if input.Headers != nil && len(*input.Headers) == 0 {
+			delete(entry, "headers")
+		}
+		return entries, nil
+	})
+}
+
+var mcpNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func (s *Service) mutateMCPServers(ctx context.Context, index int, name, address string, actor Actor, edit func([]map[string]json.RawMessage) ([]map[string]json.RawMessage, error)) error {
 	s.mcpMu.Lock()
 	defer s.mcpMu.Unlock()
 	current, err := s.store.Settings().Get(ctx, GroupMCP, "servers")
-	if errors.Is(err, store.ErrNotFound) || current == nil && err == nil {
-		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	if s.cipher == nil {
 		return ErrCipherRequired
 	}
-	plain, err := s.cipher.Decrypt(current.Value)
-	if err != nil {
-		return ErrDecryptMismatch
+	plain := []byte("[]")
+	var previous string
+	if current != nil {
+		previous = current.Value
+		plain, err = s.cipher.Decrypt(previous)
+		if err != nil {
+			return ErrDecryptMismatch
+		}
 	}
-	var entries []map[string]json.RawMessage
+	entries := make([]map[string]json.RawMessage, 0)
 	if err := json.Unmarshal(plain, &entries); err != nil {
 		return ErrInvalid
 	}
-	if index < 0 || index >= len(entries) || entries[index] == nil {
+	if index < -1 || index >= len(entries) || index >= 0 && entries[index] == nil {
 		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
 	}
-	entry := entries[index]
-	var savedName, savedAddress string
-	_ = json.Unmarshal(entry["name"], &savedName)
-	_ = json.Unmarshal(entry["url"], &savedAddress)
-	if savedName != name || savedAddress != address {
-		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+	if index >= 0 {
+		var savedName, savedAddress string
+		_ = json.Unmarshal(entries[index]["name"], &savedName)
+		_ = json.Unmarshal(entries[index]["url"], &savedAddress)
+		if savedName != name || savedAddress != address {
+			return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+		}
 	}
-	var disabled bool
-	_ = json.Unmarshal(entry["disabled"], &disabled)
-	if disabled == !enabled {
-		return nil
-	}
-	if enabled {
-		delete(entry, "disabled")
-	} else {
-		entry["disabled"] = json.RawMessage("true")
+	entries, err = edit(entries)
+	if err != nil {
+		return err
 	}
 	payload, err := json.Marshal(entries)
 	if err != nil {
 		return err
 	}
+	if bytes.Equal(payload, plain) {
+		return nil
+	}
 	encrypted, err := s.cipher.Encrypt(payload)
 	if err != nil {
 		return fmt.Errorf("encrypt MCP server configuration: %w", err)
 	}
-	ok, err := s.store.Settings().CompareAndSet(ctx, &store.Settings{
-		Group: GroupMCP, Key: "servers", Value: encrypted, Sensitive: true,
-	}, current.Value)
+	ok, err := s.store.Settings().CompareAndSet(ctx, &store.Settings{Group: GroupMCP, Key: "servers", Value: encrypted, Sensitive: true}, previous)
 	if err != nil {
 		return err
 	}

@@ -35,11 +35,15 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type row struct {
-		Index     int    `json:"index"`
-		Name      string `json:"name"`
-		URL       string `json:"url"`
-		Transport string `json:"transport"`
-		Enabled   bool   `json:"enabled"`
+		Index         int      `json:"index"`
+		Name          string   `json:"name"`
+		URL           string   `json:"url"`
+		Transport     string   `json:"transport"`
+		Enabled       bool     `json:"enabled"`
+		AllowHTTP     bool     `json:"allow_http"`
+		AllowedTools  []string `json:"allowed_tools"`
+		ReadOnlyTools []string `json:"read_only_tools"`
+		HasHeaders    bool     `json:"has_headers"`
 	}
 	rows := make([]row, 0, len(cfg.MCP.Servers))
 	for index, spec := range cfg.MCP.Servers {
@@ -50,35 +54,50 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 				transport = "stdio"
 			}
 		}
-		rows = append(rows, row{Index: index, Name: spec.Name, URL: spec.URL, Transport: transport, Enabled: !spec.Disabled})
+		rows = append(rows, row{Index: index, Name: spec.Name, URL: spec.URL, Transport: transport, Enabled: !spec.Disabled,
+			AllowHTTP: spec.AllowHTTP, AllowedTools: spec.AllowedTools, ReadOnlyTools: spec.ReadOnlyTools, HasHeaders: len(spec.Headers) > 0})
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeOK(w, r, http.StatusOK, rows)
 }
 
-func (s *Server) handleToggleMCPServer(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	writer, ok := s.settings.(interface {
 		SetMCPServerEnabled(context.Context, int, string, string, bool, settings.Actor) error
+		EditMCPServer(context.Context, int, string, string, *settings.MCPServerEdit, settings.Actor) error
 	})
 	if !ok {
 		writeError(w, r, http.StatusNotImplemented, codeInternal, "MCP 配置服务不可用")
 		return
 	}
 	var in struct {
-		Index   *int   `json:"index"`
-		Name    string `json:"name"`
-		URL     string `json:"url"`
-		Enabled *bool  `json:"enabled"`
+		Index   *int                    `json:"index"`
+		Name    string                  `json:"name"`
+		URL     string                  `json:"url"`
+		Enabled *bool                   `json:"enabled"`
+		Edit    *settings.MCPServerEdit `json:"edit"`
+		Remove  bool                    `json:"remove"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&in); err != nil || in.Index == nil || in.Enabled == nil {
-		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "无效的 MCP 开关参数")
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSettingsBody)).Decode(&in); err != nil || in.Index == nil {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "无效的 MCP 服务器参数")
 		return
 	}
 	actor := settings.Actor{RequestID: RequestIDFrom(r.Context())}
 	if user := UserFrom(r.Context()); user != nil {
 		actor.UserID = user.ID
 	}
-	if err := writer.SetMCPServerEnabled(r.Context(), *in.Index, in.Name, in.URL, *in.Enabled, actor); err != nil {
+	var err error
+	switch {
+	case in.Edit != nil && !in.Remove && in.Enabled == nil:
+		err = writer.EditMCPServer(r.Context(), *in.Index, in.Name, in.URL, in.Edit, actor)
+	case in.Remove && in.Edit == nil && in.Enabled == nil:
+		err = writer.EditMCPServer(r.Context(), *in.Index, in.Name, in.URL, nil, actor)
+	case in.Enabled != nil && in.Edit == nil && !in.Remove:
+		err = writer.SetMCPServerEnabled(r.Context(), *in.Index, in.Name, in.URL, *in.Enabled, actor)
+	default:
+		err = settings.ErrInvalid
+	}
+	if err != nil {
 		writeSettingsError(w, r, err)
 		return
 	}
