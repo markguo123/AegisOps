@@ -546,6 +546,16 @@ func (st *settingsStore) Get(ctx context.Context, group, key string) (*Settings,
 	return set, nil
 }
 
+func (st *settingsStore) CompareAndSet(ctx context.Context, set *Settings, previous string) (bool, error) {
+	result, err := st.s.db.ExecContext(ctx, "UPDATE settings SET value=?, "+settingsSensitiveCol+"=?, updated_at=? WHERE group_name=? AND key_name=? AND value=?",
+		set.Value, boolInt(set.Sensitive), time.Now(), set.Group, set.Key, previous)
+	if err != nil {
+		return false, mapErr(err, "compare and set setting")
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
 func (st *settingsStore) ListByGroup(ctx context.Context, group string) ([]*Settings, error) {
 	rows, err := st.s.db.QueryContext(ctx, "SELECT "+settingsColumns+
 		" FROM settings WHERE group_name=? ORDER BY key_name", group)

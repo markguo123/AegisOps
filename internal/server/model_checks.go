@@ -14,6 +14,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/config"
 	"github.com/k8s-ai/k8s-ai/internal/mcp"
+	"github.com/k8s-ai/k8s-ai/internal/settings"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
@@ -21,6 +22,67 @@ type modelChecks struct {
 	active    sync.Mutex
 	mcpActive sync.Mutex
 	load      func(context.Context) (*config.Config, error)
+}
+
+func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
+	if s.modelChecks.load == nil {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, "MCP 配置服务不可用")
+		return
+	}
+	cfg, err := s.modelChecks.load(r.Context())
+	if err != nil || cfg == nil {
+		writeError(w, r, http.StatusServiceUnavailable, codeInternal, "无法读取 MCP 配置")
+		return
+	}
+	type row struct {
+		Index     int    `json:"index"`
+		Name      string `json:"name"`
+		URL       string `json:"url"`
+		Transport string `json:"transport"`
+		Enabled   bool   `json:"enabled"`
+	}
+	rows := make([]row, 0, len(cfg.MCP.Servers))
+	for index, spec := range cfg.MCP.Servers {
+		transport := spec.Transport
+		if transport == "" {
+			transport = "streamable-http"
+			if spec.URL == "" && spec.Command != "" {
+				transport = "stdio"
+			}
+		}
+		rows = append(rows, row{Index: index, Name: spec.Name, URL: spec.URL, Transport: transport, Enabled: !spec.Disabled})
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeOK(w, r, http.StatusOK, rows)
+}
+
+func (s *Server) handleToggleMCPServer(w http.ResponseWriter, r *http.Request) {
+	writer, ok := s.settings.(interface {
+		SetMCPServerEnabled(context.Context, int, string, string, bool, settings.Actor) error
+	})
+	if !ok {
+		writeError(w, r, http.StatusNotImplemented, codeInternal, "MCP 配置服务不可用")
+		return
+	}
+	var in struct {
+		Index   *int   `json:"index"`
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&in); err != nil || in.Index == nil || in.Enabled == nil {
+		writeError(w, r, http.StatusBadRequest, codeInvalidArgument, "无效的 MCP 开关参数")
+		return
+	}
+	actor := settings.Actor{RequestID: RequestIDFrom(r.Context())}
+	if user := UserFrom(r.Context()); user != nil {
+		actor.UserID = user.ID
+	}
+	if err := writer.SetMCPServerEnabled(r.Context(), *in.Index, in.Name, in.URL, *in.Enabled, actor); err != nil {
+		writeSettingsError(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, true)
 }
 
 func (s *Server) handleMCPCheck(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +109,9 @@ func (s *Server) handleMCPCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]status, 0, len(cfg.MCP.Servers))
 	for i, spec := range cfg.MCP.Servers {
+		if spec.Disabled {
+			continue
+		}
 		item := status{Index: i + 1}
 		registry := tools.NewRegistry()
 		closeRemote, err := mcp.RegisterRemote(ctx, registry, spec)

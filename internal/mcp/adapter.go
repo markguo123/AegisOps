@@ -12,10 +12,12 @@ import (
 // ToolAdapter 把 MCP 工具包装为 AegisOps 的 tools.Tool。
 // 安全侧默认：非只读 + 风险 CRITICAL，必须经审批策略后才能执行。
 type ToolAdapter struct {
-	alias  string
-	server string
-	spec   Tool
-	client Client
+	readOnly  bool
+	authorize func(context.Context) error
+	alias     string
+	server    string
+	spec      Tool
+	client    Client
 }
 
 // NewToolAdapter 创建 MCP 工具适配器。
@@ -43,10 +45,15 @@ func (a *ToolAdapter) InputSchema() any {
 }
 
 func (a *ToolAdapter) Execute(ctx context.Context, input json.RawMessage) (tools.ToolResult, error) {
+	if a.authorize != nil {
+		if err := a.authorize(ctx); err != nil {
+			return tools.ResultErrorWithCode(tools.ErrorConflict, err.Error()), nil
+		}
+	}
 	var args map[string]any
 	if len(input) > 0 {
 		if err := json.Unmarshal(input, &args); err != nil {
-			return tools.ResultError("mcp arguments: " + err.Error()), nil
+			return tools.ResultErrorWithCode(tools.ErrorInvalidArgument, "mcp arguments: "+err.Error()), nil
 		}
 	}
 	out, err := a.client.CallTool(ctx, a.spec.Name, args)
@@ -57,10 +64,13 @@ func (a *ToolAdapter) Execute(ctx context.Context, input json.RawMessage) (tools
 }
 
 // IsReadOnly MCP 工具默认为非只读（安全侧，必须审批）。
-func (a *ToolAdapter) IsReadOnly(json.RawMessage) bool { return false }
+func (a *ToolAdapter) IsReadOnly(json.RawMessage) bool { return a.readOnly }
 
 // Risk MCP 工具默认 CRITICAL（安全侧）。
 func (a *ToolAdapter) Risk(json.RawMessage) model.RiskLevel {
+	if a.readOnly {
+		return model.RiskLow
+	}
 	return model.RiskCritical
 }
 

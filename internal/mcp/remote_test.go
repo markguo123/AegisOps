@@ -29,7 +29,7 @@ func TestRemoteTransports(t *testing.T) {
 			registry := tools.NewRegistry()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			closeRemote, err := RegisterRemote(ctx, registry, config.MCPServerConfig{Name: "demo", URL: local.URL, Transport: transport, AllowHTTP: true, AllowedTools: []string{"lookup"}})
+			closeRemote, err := RegisterRemote(ctx, registry, config.MCPServerConfig{Name: "demo", URL: local.URL, Transport: transport, AllowHTTP: true, AllowedTools: []string{"lookup"}, ReadOnlyTools: []string{"lookup"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,6 +38,9 @@ func TestRemoteTransports(t *testing.T) {
 			tool, ok := registry.Lookup("mcp_demo_lookup")
 			if !ok {
 				t.Fatal("tool missing")
+			}
+			if !tool.IsReadOnly(nil) || !tool.(tools.MandatoryHumanApproval).RequiresHumanApproval(nil) {
+				t.Fatal("configured read-only MCP tool must retain human approval")
 			}
 			call, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelCall()

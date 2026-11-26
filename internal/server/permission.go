@@ -71,6 +71,8 @@ func DefaultAPIPolicy() *permission.Policy {
 		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/{group}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
 		permission.Rule{Method: "POST", Path: "/api/v1/settings/model/{action}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
 		permission.Rule{Method: "POST", Path: "/api/v1/settings/mcp/check", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "GET", Path: "/api/v1/settings/mcp/servers", Access: permission.AccessPermission, Permission: "*"},
+		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/mcp/servers", Access: permission.AccessPermission, Permission: "*"},
 		permission.Rule{Method: "GET", Path: "/api/v1/settings/model/profiles", Access: permission.AccessPermission, Permission: permission.SettingsRead},
 		permission.Rule{Method: "POST", Path: "/api/v1/settings/model/profiles", Access: permission.AccessPermission, Permission: permission.SettingsWrite},
 		permission.Rule{Method: "PATCH", Path: "/api/v1/settings/model/profiles/{id}", Access: permission.AccessPermission, Permission: permission.SettingsWrite},

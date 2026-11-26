@@ -9,6 +9,9 @@ import ModelProfiles from './ModelProfiles.vue'
 import ReportRetentionSettings from './ReportRetentionSettings.vue'
 import {
   checkMCPConnections,
+  listMCPServers,
+  setMCPServerEnabled,
+  type MCPServerRow,
   describeSettingsError,
   getSettings,
   listModelProfiles,
@@ -56,10 +59,42 @@ const view = ref<SettingsGroupView | null>(null)
 const loading = ref(false)
 const saving = ref(false)
 const checkingMCP = ref(false)
+const mcpServers = ref<MCPServerRow[]>([])
+const mcpListError = ref('')
+const togglingMCP = ref(false)
+const mcpEnabled = computed(() => view.value?.group === 'mcp' &&
+  view.value.items.some(item => item.key === 'enabled' && item.value === true))
+
+async function loadMCPServers() {
+  mcpListError.value = ''
+  try {
+    mcpServers.value = await listMCPServers()
+  } catch (error) {
+    mcpServers.value = []
+    mcpListError.value = describeSettingsError('读取 MCP 服务器', error)
+  }
+}
+
+async function toggleMCP(server: MCPServerRow, value: unknown) {
+  if (typeof value !== 'boolean' || togglingMCP.value) return
+  togglingMCP.value = true
+  try {
+    await setMCPServerEnabled(server, value)
+  } catch (error) {
+    ElMessage.error(describeSettingsError('更新 MCP 服务器', error))
+  } finally {
+    await loadMCPServers()
+    togglingMCP.value = false
+  }
+}
 async function checkMCP() {
   checkingMCP.value = true
   try {
     const results = await checkMCPConnections()
+    if (results.length === 0) {
+      ElMessage.info('没有已开启的 MCP 服务器')
+      return
+    }
     const lines = results.map(item => `服务器 ${item.index} · ${item.error ?? `可用工具 ${item.tools} 个`}`)
     ElMessage({ type: results.some(item => item.error) ? 'warning' : 'success', message: lines.join('；') })
   } catch (error) {
@@ -341,6 +376,7 @@ async function loadGroup(): Promise<void> {
     const next = await getSettings(activeGroup.value)
     view.value = next
     initDrafts(next)
+    if (next.group === 'mcp' && isAdmin.value) await loadMCPServers()
     if (activeGroup.value === 'model' && next.items.some(item => item.key === 'default_chat_model')) void refreshModels(true)
   } catch (error) {
     ElMessage.error(describeSettingsError('加载配置', error))
@@ -371,6 +407,7 @@ async function handleSave(): Promise<void> {
     const next = await patchSettings(activeGroup.value, patch)
     view.value = next
     initDrafts(next)
+    if (next.group === 'mcp' && isAdmin.value) await loadMCPServers()
     const warnings = next.warnings ?? []
     if (warnings.length > 0) {
       // 覆盖态下的保存不得静默成功：必须说明实际生效来源（P6.12 ⑩）。
@@ -448,7 +485,7 @@ onMounted(loadGroup)
                     <span v-if="dirtyCount > 0" class="warn-tag"> · 待保存 {{ dirtyCount }}</span>
                   </div>
                 </div>
-                <el-button v-if="activeGroup === 'mcp' && isAdmin" :loading="checkingMCP" :disabled="dirtyCount > 0" @click="checkMCP">
+                <el-button v-if="activeGroup === 'mcp' && isAdmin" :loading="checkingMCP" :disabled="dirtyCount > 0 || !mcpEnabled || togglingMCP" @click="checkMCP">
                   检查连接
                 </el-button>
                 <el-button
@@ -465,6 +502,22 @@ onMounted(loadGroup)
 
             <div v-if="loading" class="muted center-hint">加载中…</div>
             <div v-else class="field-grid">
+              <section v-if="activeGroup === 'mcp' && isAdmin" aria-label="MCP 服务器">
+                <p class="muted small">{{ mcpEnabled ? '已保存的 MCP 服务器' : '总开关已关闭，所有 MCP 服务器暂停使用' }}</p>
+                <p v-if="mcpListError" class="warn-tag">{{ mcpListError }}</p>
+                <el-table v-else :data="mcpServers" empty-text="暂无 MCP 服务器">
+                  <el-table-column prop="name" label="名称" min-width="110" />
+                  <el-table-column prop="transport" label="传输" min-width="135" />
+                  <el-table-column label="地址" min-width="260">
+                    <template #default="{ row }"><span style="overflow-wrap: anywhere">{{ row.url }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="单台开关" width="105">
+                    <template #default="{ row }">
+                      <el-switch :model-value="row.enabled" :disabled="!canWrite || saving || togglingMCP || dirtyCount > 0" :aria-label="`启用 ${row.name}`" @change="toggleMCP(row, $event)" />
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </section>
               <el-alert
                 v-if="encryptionUnavailable"
                 class="encryption-alert"
@@ -481,7 +534,7 @@ onMounted(loadGroup)
               <div v-for="item in view?.items.filter(entry => visibleField(entry)) ?? []" :key="item.key" class="field">
                 <div class="field-meta">
                   <div class="row field-label">
-                    <span class="mono strong">{{ activeGroup === 'memory' && item.key === 'enabled' ? '启用诊断记忆' : activeGroup === 'memory' && item.key === 'max_items' ? '每人记忆上限' : activeGroup === 'model' && item.key === 'enabled' ? '启用模型调用' : activeGroup === 'model' && modelRoutingKeys.includes(item.key) ? item.desc : item.key }}</span>
+                    <span class="mono strong">{{ activeGroup === 'mcp' && item.key === 'enabled' ? '启用 MCP 外部工具（总开关）' : activeGroup === 'memory' && item.key === 'enabled' ? '启用诊断记忆' : activeGroup === 'memory' && item.key === 'max_items' ? '每人记忆上限' : activeGroup === 'model' && item.key === 'enabled' ? '启用模型调用' : activeGroup === 'model' && modelRoutingKeys.includes(item.key) ? item.desc : item.key }}</span>
                     <span v-if="item.sensitive" class="pill" :class="item.hasValue ? 'ok' : 'mute'">
                       <el-icon class="tiny"><Key /></el-icon>
                       {{ item.hasValue ? '已配置' : '未配置' }}

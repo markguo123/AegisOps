@@ -110,7 +110,7 @@ func (c *remoteClient) CallTool(ctx context.Context, name string, args map[strin
 	return string(data), err
 }
 
-func RegisterRemote(ctx context.Context, reg *tools.Registry, spec config.MCPServerConfig) (func(), error) {
+func RegisterRemote(ctx context.Context, reg *tools.Registry, spec config.MCPServerConfig, authorize ...func(context.Context) error) (func(), error) {
 	if !modelToolName.MatchString(spec.Name) || len(spec.AllowedTools) == 0 {
 		return nil, errors.New("MCP server name and allowlist required")
 	}
@@ -131,6 +131,10 @@ func RegisterRemote(ctx context.Context, reg *tools.Registry, spec config.MCPSer
 	var registered []string
 	for _, entry := range entries {
 		adapter := NewToolAdapter(client, entry)
+		adapter.readOnly = slices.Contains(spec.ReadOnlyTools, entry.Name)
+		if len(authorize) > 0 {
+			adapter.authorize = authorize[0]
+		}
 		adapter.alias = "mcp_" + spec.Name + "_" + entry.Name
 		if err := reg.Register(adapter); err != nil {
 			for _, name := range registered {

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mitchellh/mapstructure"
@@ -94,6 +95,7 @@ type GroupView struct {
 
 // Service 是配置中心应用服务：读写都经统一 Store，变更写 CONFIG_CHANGE 审计。
 type Service struct {
+	mcpMu  sync.Mutex
 	store  store.Store
 	cipher SecretCipher
 	// envLookup 是部署期环境变量覆盖的查找函数（D-29）；nil 时用 os.LookupEnv。
@@ -151,6 +153,76 @@ func (s *Service) GetGroup(ctx context.Context, group string) (*GroupView, error
 // PatchGroup 局部更新分组：未登记键与越界取值直接拒绝，成功后写 CONFIG_CHANGE 审计。
 // 审计载荷只含分组与键名（含"哪些是敏感键"），不含任何值。
 func (s *Service) PatchGroup(ctx context.Context, group string, patch map[string]json.RawMessage, actor Actor) (*GroupView, error) {
+	if group == GroupMCP {
+		s.mcpMu.Lock()
+		defer s.mcpMu.Unlock()
+	}
+	return s.patchGroup(ctx, group, patch, actor)
+}
+
+func (s *Service) SetMCPServerEnabled(ctx context.Context, index int, name, address string, enabled bool, actor Actor) error {
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+	current, err := s.store.Settings().Get(ctx, GroupMCP, "servers")
+	if errors.Is(err, store.ErrNotFound) || current == nil && err == nil {
+		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+	}
+	if err != nil {
+		return err
+	}
+	if s.cipher == nil {
+		return ErrCipherRequired
+	}
+	plain, err := s.cipher.Decrypt(current.Value)
+	if err != nil {
+		return ErrDecryptMismatch
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &entries); err != nil {
+		return ErrInvalid
+	}
+	if index < 0 || index >= len(entries) || entries[index] == nil {
+		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+	}
+	entry := entries[index]
+	var savedName, savedAddress string
+	_ = json.Unmarshal(entry["name"], &savedName)
+	_ = json.Unmarshal(entry["url"], &savedAddress)
+	if savedName != name || savedAddress != address {
+		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+	}
+	var disabled bool
+	_ = json.Unmarshal(entry["disabled"], &disabled)
+	if disabled == !enabled {
+		return nil
+	}
+	if enabled {
+		delete(entry, "disabled")
+	} else {
+		entry["disabled"] = json.RawMessage("true")
+	}
+	payload, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	encrypted, err := s.cipher.Encrypt(payload)
+	if err != nil {
+		return fmt.Errorf("encrypt MCP server configuration: %w", err)
+	}
+	ok, err := s.store.Settings().CompareAndSet(ctx, &store.Settings{
+		Group: GroupMCP, Key: "servers", Value: encrypted, Sensitive: true,
+	}, current.Value)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: MCP 服务器列表已变更，请刷新", ErrInvalid)
+	}
+	s.recordChange(ctx, GroupMCP, []string{"servers"}, 1, 1, actor)
+	return nil
+}
+
+func (s *Service) patchGroup(ctx context.Context, group string, patch map[string]json.RawMessage, actor Actor) (*GroupView, error) {
 	if !groupExists(group) {
 		return nil, fmt.Errorf("%w: %s", ErrGroupNotFound, group)
 	}

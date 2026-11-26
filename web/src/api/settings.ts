@@ -28,6 +28,23 @@ export interface ModelProfile extends Omit<ModelProfileInput, 'apiKey'> {
 
 const MODEL_PROFILES_PATH = '/settings/model/profiles'
 
+export interface MCPServerRow {
+  index: number
+  name: string
+  url: string
+  transport: string
+  enabled: boolean
+}
+
+export async function listMCPServers() {
+  return (await apiGet<MCPServerRow[]>('/settings/mcp/servers')).data ?? []
+}
+
+export function setMCPServerEnabled(server: MCPServerRow, enabled: boolean) {
+  const { index, name, url } = server
+  return apiPatch<boolean>('/settings/mcp/servers', { index, name, url, enabled })
+}
+
 export async function checkMCPConnections() {
   return (await apiPost<Array<{ index: number; tools: number; error?: string }>>('/settings/mcp/check', {})).data ?? []
 }

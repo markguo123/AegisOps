@@ -152,6 +152,7 @@ type AuditStore interface {
 // SettingsStore 是配置中心通用键值存取（P1.10）。
 type SettingsStore interface {
 	Set(ctx context.Context, s *Settings) error
+	CompareAndSet(ctx context.Context, s *Settings, previous string) (bool, error)
 	Get(ctx context.Context, group, key string) (*Settings, error)
 	ListByGroup(ctx context.Context, group string) ([]*Settings, error)
 	Delete(ctx context.Context, group, key string) error

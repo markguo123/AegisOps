@@ -309,6 +309,40 @@ func TestImportConfigSkipsDefaults(t *testing.T) {
 
 // TestPatchGroupSensitiveEncryptsAtRest 验证 P3.9：敏感键以密文落库，
 // Store 原始值不含明文，且密文可由注入的 cipher 还原。
+func TestMCPServerTogglePreservesCredentialsAndOtherServers(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	svc := New(st, WithCipher(testCipher{}))
+	input := `{"enabled":false,"servers":[{"name":"grafana","url":"https://metrics.test/mcp","headers":{"Authorization":"Bearer test-token"}},{"name":"other","url":"https://other.test/mcp"}]}`
+	if _, err := svc.PatchGroup(ctx, GroupMCP, patch(t, input), Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMCPServerEnabled(ctx, 0, "grafana", "https://metrics.test/mcp", false, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMCPServerEnabled(ctx, 0, "other", "https://other.test/mcp", false, Actor{}); err == nil {
+		t.Fatal("accepted stale row")
+	}
+	saved, err := st.Settings().Get(ctx, GroupMCP, "servers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := (testCipher{}).Decrypt(saved.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var servers []struct {
+		Disabled bool
+		Headers  map[string]string
+	}
+	if err := json.Unmarshal(plain, &servers); err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 2 || !servers[0].Disabled || servers[1].Disabled || servers[0].Headers["Authorization"] != "Bearer test-token" {
+		t.Fatal("toggle changed the global switch, credentials or another server")
+	}
+}
+
 func TestPatchGroupSensitiveEncryptsAtRest(t *testing.T) {
 	st := newTestStore(t)
 	svc := New(st, WithCipher(testCipher{}))

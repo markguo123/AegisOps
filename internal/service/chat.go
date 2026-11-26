@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -771,10 +772,23 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	if cfg.MCP.Enabled && req.AccessScope != nil && req.AccessScope.ExternalMCP {
 		discovery, cancel := context.WithTimeout(runCtx, 5*time.Second)
 		for _, spec := range cfg.MCP.Servers {
+			if spec.Disabled {
+				continue
+			}
 			if discovery.Err() != nil {
 				break
 			}
-			closeRemote, err := mcp.RegisterRemote(discovery, reg, spec)
+			closeRemote, err := mcp.RegisterRemote(discovery, reg, spec, func(callCtx context.Context) error {
+				current, err := s.effectiveConfig(callCtx)
+				if err == nil && current != nil && current.MCP.Enabled {
+					for _, server := range current.MCP.Servers {
+						if reflect.DeepEqual(server, spec) {
+							return nil
+						}
+					}
+				}
+				return fmt.Errorf("MCP 已关闭或服务器配置已变更，请重新发起问诊")
+			})
 			if err != nil {
 				slog.Warn("external MCP discovery failed", "error", err)
 				continue
