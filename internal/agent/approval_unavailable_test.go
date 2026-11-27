@@ -61,7 +61,7 @@ func TestExecPodAgentApprovalIntegration(t *testing.T) {
 			if e := reg.Register(tools.NewPodExecTool(runner)); e != nil {
 				t.Fatal(e)
 			}
-			fl := &fakeLLM{responses: []*llm.ChatResponse{toolCallResp(call("exec-1", "exec_pod", `{"namespace":"team","pod":"api","argv":["id"]}`)), {Content: "done"}}}
+			fl := &fakeLLM{responses: []*llm.ChatResponse{toolCallResp(call("exec-1", "exec_pod", `{"namespace":"team","pod":"api","argv":["ls","-R","/app"]}`)), {Content: "done"}}}
 			sess := &session.Session{ID: "exec-integration", UserID: "session-owner"}
 			opts := Options{LLM: fl, Tools: reg, Session: sess, TurnUserID: "user", ApprovalPolicy: &approval.Policy{SkipPermissions: true}}
 			if choice != "unavailable" {
@@ -106,5 +106,21 @@ func TestMandatoryApprovalIgnoresSessionAndBatch(t *testing.T) {
 	}
 	if approver.calls != 2 || count != 2 {
 		t.Fatalf("approval calls=%d executions=%d", approver.calls, count)
+	}
+}
+
+func TestExecPodLowRiskDoesNotRequireApprover(t *testing.T) {
+	runner := &execApprovalRunner{}
+	registry := tools.NewRegistry()
+	if err := registry.Register(tools.NewPodExecTool(runner)); err != nil {
+		t.Fatal(err)
+	}
+	model := &fakeLLM{responses: []*llm.ChatResponse{toolCallResp(call("read", "exec_pod", `{"namespace":"team","pod":"api","argv":["id"]}`)), {Content: "done"}}}
+	agent := New(Options{LLM: model, Tools: registry, Session: &session.Session{ID: "exec-integration"}, TurnUserID: "user"})
+	if _, _, err := agent.Chat(context.Background(), "inspect identity"); err != nil {
+		t.Fatal(err)
+	}
+	if runner.prepared != 1 || runner.executed != 1 {
+		t.Fatalf("prepared=%d executed=%d", runner.prepared, runner.executed)
 	}
 }

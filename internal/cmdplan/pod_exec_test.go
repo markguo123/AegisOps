@@ -9,7 +9,7 @@ func TestPodExecDiagnosticRules(t *testing.T) {
 			t.Errorf("%q: %v", a, err)
 		}
 	}
-	bad := [][]string{{"cat", "/app/config"}, {"env"}, {"/bin/ls", "/app"}, {"busybox", "ls", "/app"}, {"ps", "aux"}, {"ps", "e"}, {"ps", "-e", "-o", "args"}, {"ls", "-R", "/app"}, {"ls", "/app", "/etc"}, {"ls", "/app/../etc"}, {"ls", "/proc"}, {"ls", "/var/run/secrets/kubernetes.io"}, {"stat", "/app/.aws"}, {"ss", "-K"}, {"sh", "-c", "id"}, {"ls", "/app\n"}, {"ls", "$(id)"}, {"df", "-h", "-k"}, {"du", "/app"}}
+	bad := [][]string{{"cat", "/app/config"}, {"env"}, {"/bin/ls", "/app"}, {"busybox", "ls", "/app"}, {"ps", "aux"}, {"ps", "e"}, {"ps", "-e", "-o", "args"}, {"ls", "/app/../etc"}, {"ls", "/proc"}, {"ls", "/var/run/secrets/kubernetes.io"}, {"stat", "/app/.aws"}, {"ss", "-K"}, {"sh", "-c", "id"}, {"ls", "/app\n"}, {"ls", "$(id)"}, {"rm", "/app"}}
 	for _, a := range bad {
 		if _, err := NormalizePodExec(PodExecRequest{Namespace: "team", Pod: "api-0", Argv: a}); err == nil {
 			t.Errorf("accepted %q", a)
@@ -49,6 +49,31 @@ func TestScopedAuthCanI(t *testing.T) {
 	for _, s := range []string{"kubectl auth can-i --list", "kubectl auth can-i get pods --as=admin -n team", "kubectl auth can-i get pods -n team -n other", "kubectl auth can-i get pods"} {
 		if Analyze(s).ProvablyReadOnly {
 			t.Errorf("accepted: %s", s)
+		}
+	}
+}
+
+func TestPodExecRiskClassification(t *testing.T) {
+	for _, tc := range []struct {
+		argv          []string
+		auto, allowed bool
+	}{
+		{[]string{"ls", "-lah", "/app"}, true, true},
+		{[]string{"ls", "-R", "/app"}, false, true},
+		{[]string{"ls", "/app", "/etc"}, false, true},
+		{[]string{"grep", "-Fi", "error", "/app/log"}, false, true},
+		{[]string{"du", "/app"}, false, true},
+		{[]string{"rm", "/app"}, false, false},
+		{[]string{"ss", "-k"}, false, false},
+		{[]string{"sh", "-c", "id"}, false, false},
+		{[]string{"grep", "token", "/var/run/secrets/token"}, false, false},
+	} {
+		req, err := NormalizePodExec(PodExecRequest{Namespace: "team", Pod: "api", Argv: tc.argv})
+		if (err == nil) != tc.allowed {
+			t.Fatalf("%q allowed=%v err=%v", tc.argv, tc.allowed, err)
+		}
+		if err == nil && PodExecAutoReadOnly(req) != tc.auto {
+			t.Fatalf("%q auto mismatch", tc.argv)
 		}
 	}
 }

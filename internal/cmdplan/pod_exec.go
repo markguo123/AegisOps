@@ -15,7 +15,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const PodExecPolicyVersion = "pod-diagnostics-v1"
+const PodExecPolicyVersion = "pod-diagnostics-v2"
 
 type PodExecRequest struct {
 	Namespace      string   `json:"namespace"`
@@ -97,7 +97,7 @@ func NormalizePodExec(r PodExecRequest) (PodExecRequest, error) {
 				allowed := a == "-h" || a == "-k"
 				switch r.Argv[0] {
 				case "ls":
-					allowed = a == "-a" || a == "-l" || a == "-h"
+					allowed = len(a) > 1 && strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Trim(a[1:], "alhdFn") == ""
 				case "stat":
 					allowed = a == "-L"
 				case "du":
@@ -121,11 +121,13 @@ func NormalizePodExec(r PodExecRequest) (PodExecRequest, error) {
 		if r.Argv[0] == "du" {
 			ok = ok && flags["-s"]
 		}
+	case "grep":
+		ok = reviewableGrep(r.Argv)
 	default:
 		return r, fmt.Errorf("UNSUPPORTED: EXEC_COMMAND_UNSUPPORTED: use a supported Pod diagnostic; file reads and interpreters are unavailable")
 	}
-	if !ok {
-		return r, fmt.Errorf("UNSUPPORTED: EXEC_ARGUMENT_UNSUPPORTED: arguments do not match %s diagnostic rule", r.Argv[0])
+	if !ok && !reviewableDiagnostic(r.Argv) {
+		return r, fmt.Errorf("POLICY_DENIED: EXEC_ARGUMENT_UNSUPPORTED: unsupported or mutating diagnostic arguments")
 	}
 	return r, nil
 }
@@ -258,4 +260,95 @@ func ParsePodExec(command string) (r PodExecRequest, matched bool, err error) {
 		}
 	}
 	return bad()
+}
+
+// PodExecAutoReadOnly is computed from normalized argv, never from model input metadata.
+func PodExecAutoReadOnly(r PodExecRequest) bool {
+	if _, err := NormalizePodExec(r); err != nil {
+		return false
+	}
+	switch r.Argv[0] {
+	case "hostname", "uptime", "id", "pwd":
+		return len(r.Argv) == 1
+	case "ls":
+		paths := 0
+		for _, arg := range r.Argv[1:] {
+			if !strings.HasPrefix(arg, "-") {
+				paths++
+			}
+			if strings.HasPrefix(arg, "-") && arg != "--" && (strings.HasPrefix(arg, "--") || strings.Trim(arg[1:], "alhdFn") != "") {
+				return false
+			}
+		}
+		return paths == 1
+	case "stat":
+		return len(r.Argv) == 2 || len(r.Argv) == 3 && r.Argv[1] == "-L"
+	case "df":
+		h, k := false, false
+		for _, arg := range r.Argv[1:] {
+			if arg == "-h" {
+				h = true
+			}
+			if arg == "-k" {
+				k = true
+			}
+			if strings.HasPrefix(arg, "-") && arg != "-h" && arg != "-k" && arg != "--" {
+				return false
+			}
+		}
+		return !(h && k)
+	case "ps":
+		return strings.Join(r.Argv[1:], " ") == "-e -o pid,ppid,comm"
+	case "ss", "netstat":
+		return len(r.Argv) == 2 && (r.Argv[1] == "-s" || r.Argv[1] == "-lnt" || r.Argv[1] == "-lnu")
+	}
+	return false
+}
+
+// Review covers bounded diagnostic programs. Interpreters, arbitrary programs,
+// file content reads and network clients retain dedicated policy boundaries.
+func reviewableDiagnostic(argv []string) bool {
+	if argv[0] == "grep" {
+		return reviewableGrep(argv)
+	}
+	switch argv[0] {
+	case "ls", "stat", "df", "du":
+	default:
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if strings.HasPrefix(arg, "--") {
+			switch arg {
+			case "--", "--all", "--human-readable", "--summarize", "--numeric", "--listening":
+			default:
+				return false
+			}
+		} else if strings.HasPrefix(arg, "-") {
+			if strings.Trim(arg[1:], "alhdFnksLReopitunx") != "" {
+				return false
+			}
+		} else if err := ValidateDiagnosticPath(arg); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewableGrep(argv []string) bool {
+	positional := 0
+	for _, arg := range argv[1:] {
+		if strings.HasPrefix(arg, "-") {
+			if strings.HasPrefix(arg, "--") || strings.Trim(arg[1:], "FinvHhcq") != "" {
+				return false
+			}
+			continue
+		}
+		positional++
+		if positional > 1 {
+			if err := ValidateDiagnosticPath(arg); err != nil {
+				return false
+			}
+		}
+	}
+	return positional >= 2 && positional <= 5
 }

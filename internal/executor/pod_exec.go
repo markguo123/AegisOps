@@ -102,7 +102,7 @@ func (r *Runner) PreparePodExec(ctx context.Context, req cmdplan.PodExecRequest,
 	}
 	for _, arg := range req.Argv[1:] {
 		if strings.HasPrefix(arg, "/") {
-			if err := validatePodPath(p, req.Container, arg, req.Argv[0] == "du"); err != nil {
+			if err := validatePodPath(p, req.Container, arg, (req.Argv[0] == "du" || req.Argv[0] == "ls" && strings.Contains(strings.Join(req.Argv[1:], " "), "R"))); err != nil {
 				return ctx, err
 			}
 		}
@@ -255,7 +255,7 @@ func (r *Runner) acquirePodExec(p *podExecPermit) (func(), error) {
 	}, nil
 }
 
-// ExecPod accepts only a matching, single-use, human-approved prepared plan.
+// ExecPod requires a bound single-use plan and human consent for reviewed diagnostics.
 func (r *Runner) ExecPod(ctx context.Context, req cmdplan.PodExecRequest) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -264,8 +264,8 @@ func (r *Runner) ExecPod(ctx context.Context, req cmdplan.PodExecRequest) (Resul
 		return Result{}, fmt.Errorf("TOOL_UNAVAILABLE: EXEC_DISABLED")
 	}
 	p, ok := ctx.Value(podExecKey{}).(*podExecPermit)
-	if !ok || p.runner != r || !p.approved.Load() {
-		return Result{}, fmt.Errorf("POLICY_DENIED: Pod exec requires a prepared human approval")
+	if !ok || p.runner != r || !p.approved.Load() && !cmdplan.PodExecAutoReadOnly(p.request) {
+		return Result{}, fmt.Errorf("POLICY_DENIED: Pod exec requires a prepared permit and consent for reviewed diagnostics")
 	}
 	if req.Container == "" {
 		req.Container = p.request.Container
@@ -310,7 +310,7 @@ func (r *Runner) ExecPod(ctx context.Context, req cmdplan.PodExecRequest) (Resul
 		if !strings.HasPrefix(argv[i], "/") {
 			continue
 		}
-		if err := validatePodPath(pod, req.Container, argv[i], req.Argv[0] == "du"); err != nil {
+		if err := validatePodPath(pod, req.Container, argv[i], (req.Argv[0] == "du" || req.Argv[0] == "ls" && strings.Contains(strings.Join(req.Argv[1:], " "), "R"))); err != nil {
 			return Result{}, err
 		}
 		out, _, code, e := r.streamPodExec(runCtx, req, []string{"readlink", "-f", argv[i]}, 4096)
@@ -318,7 +318,7 @@ func (r *Runner) ExecPod(ctx context.Context, req cmdplan.PodExecRequest) (Resul
 			return Result{}, fmt.Errorf("UNSUPPORTED: PATH_CANONICALIZATION_UNAVAILABLE")
 		}
 		resolved := strings.TrimSpace(out)
-		if err := validatePodPath(pod, req.Container, resolved, req.Argv[0] == "du"); err != nil {
+		if err := validatePodPath(pod, req.Container, resolved, (req.Argv[0] == "du" || req.Argv[0] == "ls" && strings.Contains(strings.Join(req.Argv[1:], " "), "R"))); err != nil {
 			return Result{}, err
 		}
 		argv[i] = resolved

@@ -89,8 +89,8 @@ func TestPodExecRequiresCurrentSingleUsePermit(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = r.ExecPod(prepared, req); e == nil {
-		t.Fatal("unapproved plan executed")
+	if _, e = r.ExecPod(prepared, req); e != nil {
+		t.Fatalf("prepared low-risk read failed: %v", e)
 	}
 	ctx := approvedFixture(t, r, req)
 	res, e := r.ExecPod(ctx, req)
@@ -100,7 +100,7 @@ func TestPodExecRequiresCurrentSingleUsePermit(t *testing.T) {
 	if _, e = r.ExecPod(ctx, req); e == nil {
 		t.Fatal("permit replay succeeded")
 	}
-	if *count != 1 {
+	if *count != 2 {
 		t.Fatalf("remote calls=%d", *count)
 	}
 }
@@ -276,5 +276,27 @@ func TestBoundEnvDoesNotInheritCloudCredentials(t *testing.T) {
 		if strings.HasPrefix(entry, "AWS_SECRET_ACCESS_KEY=") {
 			t.Fatal("cross-target cloud credential inherited")
 		}
+	}
+}
+
+func TestReviewedPodExecStillRequiresHumanPermit(t *testing.T) {
+	runner, _, req, count := execFixture(t)
+	req.Argv = []string{"ls", "-R", "/app"}
+	ctx, err := runner.PreparePodExec(context.Background(), req, "user", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ExecPod(ctx, req); err == nil {
+		t.Fatal("reviewed diagnostic executed without consent")
+	}
+	if *count != 0 {
+		t.Fatal("remote execution started before consent")
+	}
+	ctx, err = runner.ApprovePodExec(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ExecPod(ctx, req); err != nil {
+		t.Fatal(err)
 	}
 }

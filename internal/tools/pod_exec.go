@@ -63,17 +63,25 @@ type podExecTool struct{ runner PodExecRunner }
 func NewPodExecTool(r PodExecRunner) Tool { return &podExecTool{r} }
 func (t *podExecTool) Name() string       { return "exec_pod" }
 func (t *podExecTool) Description() string {
-	return "在当前绑定集群的明确 Pod/普通容器内执行有限非交互诊断，每次需要用户批准。支持 hostname/uptime/id/pwd、目录属性 ls/stat、df/du、有限字段 ps 和 ss/netstat；不支持文件内容、环境变量、解释器、脚本或任意网络请求。多容器必须指定 container。"
+	return "在绑定集群的明确 Pod/普通容器中执行非交互诊断。服务端确认的低风险只读命令自动执行；递归目录、文件 grep 等受限诊断逐次真人审批。支持 ls -lah 等组合参数。明确变更、解释器、脚本、敏感路径及任意网络请求禁止。多容器须指定 container。"
 }
 func (t *podExecTool) SchemaMetadata() string {
-	return "[POD DIAGNOSTIC][RISK: HIGH][APPROVAL REQUIRED: YES]"
+	return "[POD DIAGNOSTIC][RISK: DEPENDS ON ARGV][APPROVAL REQUIRED FOR UNPROVEN DIAGNOSTICS]"
 }
 func (t *podExecTool) InputSchema() any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"namespace": strProp("明确 namespace"), "pod": strProp("单个 Pod 名称"), "container": strProp("普通容器名称"), "argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 64}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 30}}, "required": []string{"namespace", "pod", "argv"}}
 }
-func (t *podExecTool) IsReadOnly(json.RawMessage) bool            { return false }
-func (t *podExecTool) Risk(json.RawMessage) model.RiskLevel       { return model.RiskHigh }
-func (t *podExecTool) RequiresHumanApproval(json.RawMessage) bool { return true }
+func (t *podExecTool) IsReadOnly(input json.RawMessage) bool {
+	r, err := cmdplan.DecodePodExec(input)
+	return err == nil && cmdplan.PodExecAutoReadOnly(r)
+}
+func (t *podExecTool) Risk(input json.RawMessage) model.RiskLevel {
+	if t.IsReadOnly(input) {
+		return model.RiskLow
+	}
+	return model.RiskHigh
+}
+func (t *podExecTool) RequiresHumanApproval(input json.RawMessage) bool { return !t.IsReadOnly(input) }
 func (t *podExecTool) PrepareExecutionContext(ctx context.Context, input json.RawMessage, user, session string) (context.Context, error) {
 	r, e := cmdplan.DecodePodExec(input)
 	if e != nil {
@@ -100,7 +108,7 @@ func (t *podExecTool) PreviewApproval(input json.RawMessage) ApprovalPlan {
 	return podExecApproval(r)
 }
 func podExecApproval(r cmdplan.PodExecRequest) ApprovalPlan {
-	return ApprovalPlan{Title: "容器诊断执行", Operation: "exec", Risk: string(model.RiskHigh), Target: ApprovalTarget{Namespace: r.Namespace, Kind: "Pod", Name: r.Pod}, Command: fmt.Sprintf("container=%s argv=%q", r.Container, r.Argv), Summary: fmt.Sprintf("非交互诊断；每次真人批准；超时 %d 秒；输出最多 64KiB。目标容器程序不由平台控制。", r.TimeoutSeconds)}
+	return ApprovalPlan{Title: "容器诊断执行", Operation: "exec", Risk: string(model.RiskHigh), Target: ApprovalTarget{Namespace: r.Namespace, Kind: "Pod", Name: r.Pod}, Command: fmt.Sprintf("container=%s argv=%q", r.Container, r.Argv), Summary: fmt.Sprintf("服务端无法将本次参数判为低风险，需逐次真人批准；超时 %d 秒；输出最多 64KiB。目标容器程序不由平台控制。", r.TimeoutSeconds)}
 }
 func podExecResult(res executor.Result, err error) ToolResult {
 	if err != nil {

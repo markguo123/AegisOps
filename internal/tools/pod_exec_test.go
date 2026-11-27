@@ -41,7 +41,7 @@ func TestExecPodScopeMatchesKubectl(t *testing.T) {
 func TestExecPodMetadataAndDirectExecute(t *testing.T) {
 	tool := NewPodExecTool(noPermitRunner{})
 	raw := json.RawMessage(`{"namespace":"team","pod":"api","argv":["id"]}`)
-	if tool.IsReadOnly(raw) || !tool.(MandatoryHumanApproval).RequiresHumanApproval(raw) {
+	if !tool.IsReadOnly(raw) || tool.(MandatoryHumanApproval).RequiresHumanApproval(raw) {
 		t.Fatal("exec approval metadata is unsafe")
 	}
 	res, e := tool.Execute(context.Background(), raw)
@@ -50,11 +50,11 @@ func TestExecPodMetadataAndDirectExecute(t *testing.T) {
 	}
 }
 
-func TestKubectlGlobalNamespaceExecAlwaysRequiresHuman(t *testing.T) {
+func TestKubectlGlobalNamespaceExecLowRiskAutomatic(t *testing.T) {
 	tool := &kubectlTool{runner: &fakeWriteRunner{}}
 	for _, command := range []string{"kubectl -n team exec api -- id", "kubectl --namespace=team exec api -- ls /app"} {
 		raw, _ := json.Marshal(map[string]string{"command": command})
-		if !tool.RequiresHumanApproval(raw) {
+		if tool.RequiresHumanApproval(raw) {
 			t.Fatalf("missing mandatory approval: %s", command)
 		}
 	}
