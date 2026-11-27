@@ -29,13 +29,21 @@ type SecretValuesReader interface {
 
 type secretValueTool struct {
 	reader SecretValuesReader
+	config Reader
 }
 
 type secretValueArgs struct {
-	Namespace string   `json:"namespace"`
-	Name      string   `json:"name"`
-	Keys      []string `json:"keys"`
-	Reason    string   `json:"reason"`
+	Pod           string   `json:"pod,omitempty"`
+	Container     string   `json:"container,omitempty"`
+	ConfigMap     string   `json:"configmap,omitempty"`
+	ConfigKey     string   `json:"config_key,omitempty"`
+	PodVersion    string   `json:"pod_version,omitempty"`
+	ConfigVersion string   `json:"config_version,omitempty"`
+	Operation     string   `json:"operation,omitempty"`
+	Namespace     string   `json:"namespace"`
+	Name          string   `json:"name"`
+	Keys          []string `json:"keys"`
+	Reason        string   `json:"reason"`
 }
 
 type modelSecretValue struct {
@@ -48,7 +56,7 @@ func (t *secretValueTool) Name() string { return "get_secret_value" }
 
 func (t *secretValueTool) Description() string {
 	approval := "每次调用都会请求用户审批"
-	return "按 key 读取一个 Kubernetes Secret 的内容，仅用于已经确认与 Secret 配置有关的故障诊断。" +
+	return "按 key 诊断 Kubernetes Secret。判断非空用 check_nonempty；比较同一 Pod 容器引用的 ConfigMap data 字段用 compare_config，后者绑定已观测的 Pod、ConfigMap 版本和单个 Secret key。需要明文时才选择 read。" +
 		"必须填写具体原因；" + approval + "。返回值只进入当前一轮模型上下文，" +
 		"不会写入会话、审计、SSE 或最终回答。禁止一次读取整个 Secret，单次最多 5 个 key。"
 }
@@ -59,8 +67,15 @@ func (t *secretValueTool) SchemaMetadata() string {
 
 func (t *secretValueTool) InputSchema() any {
 	return objSchema(map[string]any{
-		"namespace": strProp("Secret 所在命名空间"),
-		"name":      strProp("Secret 名称"),
+		"namespace":      strProp("Secret 所在命名空间"),
+		"operation":      map[string]any{"type": "string", "enum": []string{"read", "check_nonempty", "compare_config"}},
+		"pod":            strProp("引用双方的 Pod"),
+		"container":      strProp("引用双方的容器"),
+		"configmap":      strProp("比较目标 ConfigMap"),
+		"config_key":     strProp("比较目标 ConfigMap data key"),
+		"pod_version":    strProp("已观察到的 Pod resourceVersion"),
+		"config_version": strProp("已观察到的 ConfigMap resourceVersion"),
+		"name":           strProp("Secret 名称"),
 		"keys": map[string]any{
 			"type":        "array",
 			"description": "需要读取的 Secret key，单次最多 5 个",
@@ -84,7 +99,7 @@ func (t *secretValueTool) PreviewApproval(input json.RawMessage) tools.ApprovalP
 	if err != nil {
 		return tools.ApprovalPlan{Tool: t.Name(), Title: "读取 Secret 值", Summary: "参数无法解析：" + err.Error()}
 	}
-	return tools.ApprovalPlan{
+	plan := tools.ApprovalPlan{
 		Title:     "读取 Secret 值",
 		Tool:      t.Name(),
 		Operation: "secret.read",
@@ -101,6 +116,17 @@ func (t *secretValueTool) PreviewApproval(input json.RawMessage) tools.ApprovalP
 			Message: "明文仅进入当前轮模型上下文；UI、SSE、会话、数据库与审计只保留脱敏指纹",
 		}},
 	}
+	if args.Operation == "check_nonempty" {
+		plan.Title = "检查 Secret key 是否为空"
+		plan.Checks[0].Message = "服务端检查，仅返回空或非空结论。"
+	}
+	if args.Operation == "compare_config" {
+		plan.Title = "比较 Secret 和 ConfigMap 字段"
+		plan.Summary = fmt.Sprintf("%s，比较 %s/%s 的 data[%s]。来源 Pod %s，容器 %s；版本 %s / %s。", plan.Summary,
+			args.Namespace, args.ConfigMap, args.ConfigKey, args.Pod, args.Container, args.PodVersion, args.ConfigVersion)
+		plan.Checks[0].Message = "服务端比较，仅返回判断结果。"
+	}
+	return plan
 }
 
 func (t *secretValueTool) Execute(ctx context.Context, input json.RawMessage) (tools.ToolResult, error) {
@@ -111,9 +137,30 @@ func (t *secretValueTool) Execute(ctx context.Context, input json.RawMessage) (t
 	if t.reader == nil {
 		return tools.ResultErrorWithCode(tools.ErrorToolUnavailable, "Secret 按需读取通道未装配"), nil
 	}
+	if args.Operation == "compare_config" {
+		return t.compareConfig(ctx, args), nil
+	}
 	values, err := t.reader.GetSecretValues(ctx, args.Namespace, args.Name, args.Keys)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
+	}
+	if args.Operation == "check_nonempty" {
+		items := make([]map[string]string, 0, len(args.Keys))
+		for _, key := range args.Keys {
+			value, exists := values[key]
+			status := "nonempty"
+			switch {
+			case !exists:
+				status = "missing"
+			case len(value) == 0:
+				status = "empty"
+			}
+			items = append(items, map[string]string{"key": key, "status": status})
+		}
+		return tools.ToolResult{
+			Data: map[string]any{"kind": "SecretNonemptyResult", "namespace": args.Namespace, "name": args.Name, "items": items},
+			Text: "已在服务端检查 Secret key 是否为空",
+		}, nil
 	}
 	total := 0
 	for _, key := range args.Keys {
@@ -180,6 +227,11 @@ func parseSecretValueArgs(input json.RawMessage) (secretValueArgs, error) {
 	args.Namespace = strings.TrimSpace(args.Namespace)
 	args.Name = strings.TrimSpace(args.Name)
 	args.Reason = strings.TrimSpace(args.Reason)
+	switch args.Operation {
+	case "", "read", "check_nonempty", "compare_config":
+	default:
+		return secretValueArgs{}, fmt.Errorf("unsupported Secret operation")
+	}
 	if args.Namespace == "" || args.Name == "" {
 		return secretValueArgs{}, fmt.Errorf("namespace and name are required")
 	}
@@ -203,6 +255,10 @@ func parseSecretValueArgs(input json.RawMessage) (secretValueArgs, error) {
 		return secretValueArgs{}, fmt.Errorf("at most %d Secret keys can be read per call", maxSecretKeysPerRead)
 	}
 	args.Keys = keys
+	if args.Operation == "compare_config" && (len(keys) != 1 || args.Pod == "" || args.Container == "" ||
+		args.ConfigMap == "" || args.ConfigKey == "" || args.PodVersion == "" || args.ConfigVersion == "") {
+		return secretValueArgs{}, fmt.Errorf("comparison requires one key and observed Pod and ConfigMap fields and versions")
+	}
 	return args, nil
 }
 

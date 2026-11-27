@@ -55,11 +55,26 @@ func (s *chatService) BranchSession(ctx context.Context, source *session.Session
 		Branch: &session.BranchOrigin{SessionID: source.ID, TurnID: turnID},
 	}
 	commit := store.ChatCommit{CommandID: "branch", SessionID: branchID, CreateSession: true, Session: branch}
+	podHistory := make(map[string][]session.Message)
+	for _, message := range source.Messages {
+		pod := message.PodObservation
+		if pod != nil && pod.Cluster == source.Cluster {
+			podHistory[pod.TurnID] = append(podHistory[pod.TurnID], message)
+		}
+	}
 	redactor := security.NewRedactor()
 	for index, turn := range prefix {
 		input, output := redactor.Redact(turn.Input), redactor.Redact(turn.Output)
 		id := fmt.Sprintf("%s-t%08d", branchID, index+1)
 		branch.AddMessage(session.Message{Role: "user", Type: "text", Content: input, Timestamp: turn.CreatedAt})
+		for _, message := range podHistory[turn.ID] {
+			observation := *message.PodObservation
+			observation.TurnID = id
+			branch.AddMessage(session.Message{
+				Role: "tool", Type: message.Type, Name: message.Name,
+				PodObservation: &observation, Timestamp: message.Timestamp, ToolCallID: message.ToolCallID,
+			})
+		}
 		branch.AddMessage(session.Message{Role: "assistant", Type: "text", Content: output, Timestamp: turn.UpdatedAt})
 		commit.ExtraTurns = append(commit.ExtraTurns, &session.Turn{
 			ID: id, SessionID: branchID, UserID: source.UserID, Status: session.TurnDone,

@@ -89,6 +89,7 @@ func RegisterAllWithOptions(reg *tools.Registry, r Reader, opts RegisterOptions)
 		if secretReader, ok := r.(SecretValuesReader); ok {
 			all = append(all, &secretValueTool{
 				reader: secretReader,
+				config: r,
 			})
 		}
 	}

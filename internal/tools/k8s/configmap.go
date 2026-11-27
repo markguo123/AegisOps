@@ -4,9 +4,46 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 
+	"github.com/k8s-ai/k8s-ai/internal/security"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
+
+var variableReference = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(?::)?[-=?+][^{}\r\n]*)?\}$`)
+var configAssignment = regexp.MustCompile(`^[ \t]*([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*[:=][ \t]*(.*)$`)
+
+func safeConfigData(data map[string]string) (map[string]string, []map[string]string) {
+	redactor := security.NewRedactor()
+	safe := make(map[string]string, len(data))
+	var references []map[string]string
+	for key, value := range data {
+		if match := variableReference.FindStringSubmatch(strings.TrimSpace(value)); match != nil {
+			references = append(references, map[string]string{"dataKey": key, "variable": match[1]})
+			safe[key] = "[REFERENCE]"
+			continue
+		}
+		lines := strings.Split(value, "\n")
+		for i, line := range lines {
+			field := configAssignment.FindStringSubmatch(line)
+			if field == nil {
+				if strings.Contains(line, "${") {
+					lines[i] = "[REDACTED]"
+				}
+				continue
+			}
+			if match := variableReference.FindStringSubmatch(strings.TrimSpace(field[2])); match != nil {
+				references = append(references, map[string]string{"dataKey": key, "field": field[1], "variable": match[1]})
+				lines[i] = field[1] + "=[REFERENCE]"
+			} else if strings.Contains(field[2], "${") || redactor.RedactValueByKey(field[1], field[2]) == "[REDACTED]" {
+				lines[i] = field[1] + "=[REDACTED]"
+			}
+		}
+		safe[key] = redactor.RedactValueByKey(key, strings.Join(lines, "\n"))
+	}
+	return safe, references
+}
 
 // get_configmap：读取单个 ConfigMap（诊断配置类启动失败/崩溃）。
 type configMapTool struct{ base }
@@ -30,10 +67,12 @@ func (t *configMapTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
 	}
+	data, references := safeConfigData(cm.Data)
 	return tools.ToolResult{
 		Data: map[string]any{
 			"kind": "ConfigMap", "namespace": cm.Namespace, "name": cm.Name,
-			"data": cm.Data, "binaryDataKeys": keys(cm.BinaryData),
+			"resourceVersion": cm.ResourceVersion,
+			"data":            data, "variableReferences": references, "binaryDataKeys": keys(cm.BinaryData),
 		},
 		Text: fmt.Sprintf("configmap %s/%s", cm.Namespace, cm.Name),
 	}, nil

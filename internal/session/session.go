@@ -12,13 +12,14 @@ import (
 
 // Message 是会话中持久化的一条消息（落盘前统一脱敏）。
 type Message struct {
-	Role       string          `json:"role"`                 // user | assistant | tool
-	Type       string          `json:"type"`                 // text | reasoning | tool-call-response | error | ...
-	Name       string          `json:"name,omitempty"`       // tool 消息的工具名
-	ToolCallID string          `json:"toolCallId,omitempty"` // native Tool Calling 的调用 ID（恢复会话回传必需）
-	Arguments  json.RawMessage `json:"arguments,omitempty"`  // 工具调用参数（恢复会话展示命令用，仅读回放不喂 LLM）
-	Data       any             `json:"data,omitempty"`       // 工具结构化结果（恢复会话渲染表格用，仅读回放不喂 LLM）
-	Ok         *bool           `json:"ok,omitempty"`         // 工具执行是否成功（前端权威判定，回放兜底用）
+	PodObservation *PodObservation `json:"podObservation,omitempty"`
+	Role           string          `json:"role"`                 // user | assistant | tool
+	Type           string          `json:"type"`                 // text | reasoning | tool-call-response | error | ...
+	Name           string          `json:"name,omitempty"`       // tool 消息的工具名
+	ToolCallID     string          `json:"toolCallId,omitempty"` // native Tool Calling 的调用 ID（恢复会话回传必需）
+	Arguments      json.RawMessage `json:"arguments,omitempty"`  // 工具调用参数（恢复会话展示命令用，仅读回放不喂 LLM）
+	Data           any             `json:"data,omitempty"`       // 工具结构化结果（恢复会话渲染表格用，仅读回放不喂 LLM）
+	Ok             *bool           `json:"ok,omitempty"`         // 工具执行是否成功（前端权威判定，回放兜底用）
 	// P7.4 工具结果同源契约（ADR-034）：摘要/渲染形态/耗时/风险在本次执行时一并落库，
 	// 刷新后与 chat 流式结果共用同一份头部信息，避免回放时丢失 "320ms" 与风险标签。
 	Summary     string `json:"summary,omitempty"`     // 头部概览摘要（后端计算）
@@ -34,6 +35,20 @@ type Message struct {
 	ErrorCode string    `json:"errorCode,omitempty"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// PodObservation records a status snapshot from a successful get_pod call.
+type PodObservation struct {
+	WaitingFor      string `json:"waitingFor,omitempty"`
+	Cluster         string `json:"cluster"`
+	Namespace       string `json:"namespace"`
+	Name            string `json:"name"`
+	UID             string `json:"uid"`
+	ResourceVersion string `json:"resourceVersion"`
+	Phase           string `json:"phase"`
+	Ready           bool   `json:"ready"`
+	RestartCount    int32  `json:"restartCount"`
+	TurnID          string `json:"turnId"`
 }
 
 type BranchOrigin struct {

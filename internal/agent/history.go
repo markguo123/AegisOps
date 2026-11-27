@@ -1,9 +1,34 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/session"
 )
+
+// Recheck every declared comparison target before the result enters the model
+// history or its compaction request.
+func (a *Agent) filterSecretComparisonHistory(ctx context.Context, messages []session.Message) []session.Message {
+	if a.AccessScope == nil || a.AccessScope.Policy == nil {
+		return messages
+	}
+	out := make([]session.Message, 0, len(messages))
+	for _, message := range messages {
+		if message.Name == "get_secret_value" && message.Type == "tool-call-response" {
+			var args struct {
+				Operation string `json:"operation"`
+			}
+			if json.Unmarshal(message.Arguments, &args) != nil ||
+				(args.Operation == "compare_config" && (a.Session.Cluster != a.AccessScope.Policy.ClusterID ||
+					a.scopeCheck(ctx, llm.ToolCall{Name: message.Name, Arguments: message.Arguments}) != nil)) {
+				continue
+			}
+		}
+		out = append(out, message)
+	}
+	return out
+}
 
 // historyToMessages 将会话消息转成 LLM 消息，并裁剪到最近 maxTurns 轮用户对话。
 // tool 消息必须紧跟在对应 assistant 消息之后（OpenAI 契约），按"轮"整体截取。

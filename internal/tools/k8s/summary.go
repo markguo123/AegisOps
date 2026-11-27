@@ -19,6 +19,26 @@ func derefI32(p *int32) int32 {
 
 // summarizePod 提取 Pod 关键状态（容器状态/重启/条件），供 LLM 分析。
 func summarizePod(p *corev1.Pod) map[string]any {
+	var references []map[string]string
+	for _, container := range p.Spec.Containers {
+		for _, env := range container.Env {
+			if env.ValueFrom == nil {
+				continue
+			}
+			if ref := env.ValueFrom.SecretKeyRef; ref != nil {
+				references = append(references, map[string]string{"container": container.Name, "variable": env.Name, "kind": "Secret", "name": ref.Name, "key": ref.Key})
+			}
+			if ref := env.ValueFrom.ConfigMapKeyRef; ref != nil {
+				references = append(references, map[string]string{"container": container.Name, "variable": env.Name, "kind": "ConfigMap", "name": ref.Name, "key": ref.Key})
+			}
+		}
+	}
+	ready := false
+	for _, condition := range p.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			ready = condition.Status == corev1.ConditionTrue
+		}
+	}
 	var totalRestarts int32
 	containers := make([]map[string]any, 0, len(p.Status.ContainerStatuses))
 	for _, cs := range p.Status.ContainerStatuses {
@@ -38,17 +58,21 @@ func summarizePod(p *corev1.Pod) map[string]any {
 		})
 	}
 	return map[string]any{
-		"kind":         "Pod",
-		"namespace":    p.Namespace,
-		"name":         p.Name,
-		"phase":        p.Status.Phase,
-		"nodeName":     p.Spec.NodeName,
-		"podIP":        p.Status.PodIP,
-		"startTime":    p.Status.StartTime,
-		"restartCount": totalRestarts,
-		"containers":   containers,
-		"conditions":   podConditions(p.Status.Conditions),
-		"qosClass":     p.Status.QOSClass,
+		"kind":            "Pod",
+		"envReferences":   references,
+		"uid":             string(p.UID),
+		"resourceVersion": p.ResourceVersion,
+		"ready":           ready,
+		"namespace":       p.Namespace,
+		"name":            p.Name,
+		"phase":           p.Status.Phase,
+		"nodeName":        p.Spec.NodeName,
+		"podIP":           p.Status.PodIP,
+		"startTime":       p.Status.StartTime,
+		"restartCount":    totalRestarts,
+		"containers":      containers,
+		"conditions":      podConditions(p.Status.Conditions),
+		"qosClass":        p.Status.QOSClass,
 	}
 }
 

@@ -68,6 +68,30 @@ func TestSecretValueToolSeparatesModelAndSafeData(t *testing.T) {
 	}
 }
 
+func TestSecretValueToolNonemptyReturnsOnlyStatus(t *testing.T) {
+	const value = "fixture-sensitive-value"
+	tool := &secretValueTool{reader: &secretValueReaderStub{values: map[string][]byte{
+		"password": []byte(value), "empty": {},
+	}}}
+	args := json.RawMessage(`{"namespace":"prod","name":"mail","keys":["password","empty"],"reason":"核对 SMTP 配置","operation":"check_nonempty"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(result.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ModelOnly != nil || len(result.SensitiveValues) != 0 ||
+		bytes.Contains(body, []byte(value)) || bytes.Contains(body, []byte("sha256")) ||
+		!bytes.Contains(body, []byte(`"status":"nonempty"`)) || !bytes.Contains(body, []byte(`"status":"empty"`)) {
+		t.Fatalf("unexpected nonempty result: %s", body)
+	}
+	if !tool.RequiresHumanApproval(args) {
+		t.Fatal("nonempty check requires human consent")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

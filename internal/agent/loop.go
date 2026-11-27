@@ -79,7 +79,10 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		mode = "native" // auto 起始按 native，不支持时降级 shim
 	}
 	msgs := []llm.Message{{Role: "system", Content: a.systemPromptFor(mode)}}
-	msgs = append(msgs, historyToMessages(a.Session.Messages, a.HistoryTurns)...)
+	history, podContext := a.podHistory(ctx, a.Session.Messages)
+	history = a.filterSecretComparisonHistory(ctx, history)
+	msgs[0].Content += podContext
+	msgs = append(msgs, historyToMessages(history, a.HistoryTurns)...)
 
 	var usage llm.TokenUsage
 	toolCallsTotal := 0
@@ -186,7 +189,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				a.interruptFlowMessage(ctx, err)
 				a.completeStep(ctx, reason, false, "native tools unsupported; retrying in shim mode")
 				mode = "shim"
-				msgs[0] = llm.Message{Role: "system", Content: a.systemPromptFor("shim")}
+				msgs[0] = llm.Message{Role: "system", Content: a.systemPromptFor("shim") + podContext}
 				continue
 			}
 			a.audit(ctx, audit.ActionLLMError, map[string]any{"error": err.Error()})
@@ -392,13 +395,18 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			safeText, safeTruncated := tools.MarshalSafe(tr, a.ResultMaxBytes)
 			safeText = a.redactSensitive(safeText)
 			toolContent, sessionContent := text, safeText
+			var observation *session.PodObservation
+			if ok && toolExecuted && call.Name == "get_pod" {
+				observation = a.podObservation(safeData)
+			}
 			if mode == "native" {
 				msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: call.ID, Content: toolContent})
 				answered[call.ID] = true
 				a.Session.AddMessage(session.Message{
 					Role: "tool", Type: "tool-call-response", Name: call.Name, ToolCallID: call.ID,
 					Content: sessionContent, Arguments: safeCallArgs, Data: safeData, Ok: &ok,
-					Summary: summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
+					PodObservation: observation,
+					Summary:        summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
 					Command: safeCommand, Stdout: safeStdout, Stderr: safeStderr,
 					ExitCode: presentation.ExitCode, ErrorCode: presentation.ErrorCode,
 				})
@@ -409,7 +417,8 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				a.Session.AddMessage(session.Message{
 					Role: "user", Type: "tool-call-response", Name: call.Name,
 					Content: a.redactSensitive(sessionObs), Arguments: safeCallArgs, Data: safeData, Ok: &ok,
-					Summary: summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
+					PodObservation: observation,
+					Summary:        summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
 					Command: safeCommand, Stdout: safeStdout, Stderr: safeStderr,
 					ExitCode: presentation.ExitCode, ErrorCode: presentation.ErrorCode,
 				})

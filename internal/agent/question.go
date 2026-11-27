@@ -9,6 +9,7 @@ import (
 
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/model"
+	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/sse"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
@@ -31,6 +32,13 @@ func (*questionTool) InputSchema() any {
 		"type": "object", "required": []string{"question", "options"}, "additionalProperties": false,
 		"properties": map[string]any{
 			"question": map[string]any{"type": "string", "minLength": 1, "maxLength": 1000},
+			"pod_followup": map[string]any{"type": "object", "description": "结束本轮并等待用户在下一条消息提供 Pod 重启结果或原故障复测结果。必须引用本轮已观测的 Pod。options 必须为空。", "additionalProperties": false,
+				"required": []string{"namespace", "name", "evidence"}, "properties": map[string]any{
+					"namespace": map[string]any{"type": "string"},
+					"name":      map[string]any{"type": "string"},
+					"evidence":  map[string]any{"type": "string", "enum": []string{"restart_result", "symptom_recheck"}},
+				},
+			},
 			"options": map[string]any{"type": "array", "maxItems": 6, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"id", "label", "impact"}, "properties": map[string]any{
 				"id": map[string]any{"type": "string", "maxLength": 64}, "label": map[string]any{"type": "string", "maxLength": 120}, "impact": map[string]any{"type": "string", "maxLength": 500}, "recommended": map[string]any{"type": "boolean"},
 			}}},
@@ -40,9 +48,18 @@ func (t *questionTool) Execute(ctx context.Context, input json.RawMessage) (tool
 	a := t.agent
 	a.decisionUnresolved = true
 	var q decision.Question
-	if err := json.Unmarshal(a.safeArguments(input), &q); err != nil {
+	var request struct {
+		decision.Question
+		PodFollowup *struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+			Evidence  string `json:"evidence"`
+		} `json:"pod_followup"`
+	}
+	if err := json.Unmarshal(a.safeArguments(input), &request); err != nil {
 		return tools.ResultError("invalid question"), nil
 	}
+	q = request.Question
 	q.ID = newID()
 	q.SessionID = a.Session.ID
 	q.TurnID = a.turn.ID
@@ -52,6 +69,29 @@ func (t *questionTool) Execute(ctx context.Context, input json.RawMessage) (tool
 		return tools.ResultError(err.Error()), nil
 	}
 	defer p.Close()
+	if followup := request.PodFollowup; followup != nil {
+		if len(q.Options) != 0 || (followup.Evidence != "restart_result" && followup.Evidence != "symptom_recheck") {
+			return tools.ResultError("invalid Pod follow-up"), nil
+		}
+		for i := len(a.Session.Messages) - 1; i >= 0; i-- {
+			message := a.Session.Messages[i]
+			pod := message.PodObservation
+			if pod == nil || pod.TurnID != a.turn.ID || pod.Namespace != followup.Namespace || pod.Name != followup.Name {
+				continue
+			}
+			if !a.authorizePodObservation(ctx, pod) {
+				break
+			}
+			checkpoint := *pod
+			checkpoint.WaitingFor = followup.Evidence
+			a.Session.AddMessage(session.Message{
+				Type: "pod-followup", PodObservation: &checkpoint,
+				Timestamp: message.Timestamp, ToolCallID: message.ToolCallID,
+			})
+			return tools.ToolResult{Text: "已记录下一轮待补充的证据。请在最终回复中向用户说明等待事项，然后结束本轮。"}, nil
+		}
+		return tools.ResultError("Pod follow-up requires a currently authorized observation from this turn"), nil
+	}
 	// 统一 Interaction 外壳：问题卡与审批卡同源展示，但选择不授予写权限。
 	options := make([]sse.ChoiceOption, 0, len(q.Options))
 	for _, o := range q.Options {

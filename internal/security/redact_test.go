@@ -16,6 +16,9 @@ func TestRedact(t *testing.T) {
 	}{
 		{"api key", "api_key=sk-1234567890abcdef1234567890", "sk-1234567890abcdef1234567890", "[REDACTED]"},
 		{"password", "password: hunter2", "hunter2", "[REDACTED]"},
+		{"quoted password", `{"password":"first private-tail"}`, "private-tail", "[REDACTED]"},
+		{"Chinese credential", "SMTP密码：first private-tail", "private-tail", "[REDACTED]"},
+		{"opaque bearer", "Authorization: Bearer opaque-value", "opaque-value", "[REDACTED]"},
 		{"token", "token=abc-def-123", "abc-def-123", "[REDACTED]"},
 		{"bearer", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9.payload.sig", "[REDACTED]"},
 		{"jwt", "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123", "[REDACTED]"},

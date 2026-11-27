@@ -26,7 +26,12 @@ func TestBranchSessionPersistsOnlyHistoryThroughCut(t *testing.T) {
 	svc := &chatService{store: db}
 	source := &session.Session{
 		ID: "source", UserID: "owner", Cluster: "test-cluster", ApprovedWrites: []string{"must-not-copy"},
-		Messages: []session.Message{{Role: "tool", Content: "must-not-copy"}},
+		Messages: []session.Message{
+			{Role: "tool", Content: "must-not-copy"},
+			{Role: "tool", Name: "get_pod", Type: "tool-call-response", Content: "must-not-copy",
+				PodObservation: &session.PodObservation{Cluster: "test-cluster", Namespace: "team", Name: "worker", TurnID: "cut"}},
+			{Role: "tool", PodObservation: &session.PodObservation{Cluster: "test-cluster", Name: "later", TurnID: "later"}},
+		},
 	}
 	if err := db.Sessions().Create(ctx, source); err != nil {
 		t.Fatal(err)
@@ -58,8 +63,11 @@ func TestBranchSessionPersistsOnlyHistoryThroughCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	if child.Branch == nil || child.Branch.SessionID != "source" || child.Branch.TurnID != "cut" ||
-		child.Cluster != source.Cluster || child.UserID != source.UserID || len(child.Messages) != 4 || len(child.ApprovedWrites) != 0 {
+		child.Cluster != source.Cluster || child.UserID != source.UserID || len(child.Messages) != 5 || len(child.ApprovedWrites) != 0 {
 		t.Fatalf("inherited incorrect state: %+v", child)
+	}
+	if pod := child.Messages[3].PodObservation; pod == nil || pod.Name != "worker" || pod.TurnID != "child-t00000002" {
+		t.Fatalf("unexpected inherited Pod observation: %+v", pod)
 	}
 	for _, message := range child.Messages {
 		if strings.Contains(message.Content, "later") || strings.Contains(message.Content, "must-not-copy") {

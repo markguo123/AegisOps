@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/decision"
+	"github.com/k8s-ai/k8s-ai/internal/security"
 )
 
 func (s *Server) askQuestion(ctx context.Context, q decision.Question) (decision.Answer, error) {
@@ -76,6 +77,7 @@ func (s *Server) handleQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, decision.ErrStale)
 		return
 	}
+	a.Text = security.NewRedactor().Redact(a.Text)
 	if err := p.SubmitAfter(a, time.Now(), func() error {
 		if committer, ok := s.chat.(interface {
 			CommitQuestion(context.Context, decision.Answer) error

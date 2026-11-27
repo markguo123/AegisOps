@@ -24,6 +24,7 @@ import (
 	"github.com/k8s-ai/k8s-ai/internal/config"
 	"github.com/k8s-ai/k8s-ai/internal/decision"
 	"github.com/k8s-ai/k8s-ai/internal/permission"
+	"github.com/k8s-ai/k8s-ai/internal/security"
 	"github.com/k8s-ai/k8s-ai/internal/service"
 	"github.com/k8s-ai/k8s-ai/internal/session"
 	"github.com/k8s-ai/k8s-ai/internal/settings"
@@ -873,6 +874,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("modelId is too long"))
 		return
 	}
+	body.Query = security.NewRedactor().Redact(body.Query)
 	if body.Query == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("query must not be empty"))
 		return

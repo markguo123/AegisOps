@@ -21,6 +21,9 @@ func NewRedactor() *Redactor {
 
 // 高置信脱敏模式：命中的整段内容替换为 [REDACTED]。
 var compiledPatterns = []*regexp.Regexp{
+	// 引号内的值可能包含空格和转义。先处理完整字段，避免后续规则留下值的尾部。
+	regexp.MustCompile(`(?i)(?:password|passwd|pwd|secret|token|api[_-]?key|credential)["']?[ \t]*[:=][ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`),
+	regexp.MustCompile(`(?:密码|口令|凭据)[ \t]*[:：=][ \t]*[^\r\n]+`),
 	// API Key 常见形式
 	regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[:=]\s*\S+`),
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{10,}`),
@@ -29,7 +32,7 @@ var compiledPatterns = []*regexp.Regexp{
 	// Secret/Token 键值（要求有 = 或 :，避免误伤普通词）
 	regexp.MustCompile(`(?i)(secret|token)\s*[:=]\s*\S+`),
 	// 认证头与 Cookie
-	regexp.MustCompile(`(?i)authorization\s*[:=]\s*\S+`),
+	regexp.MustCompile(`(?i)authorization[ \t]*[:=][ \t]*(?:(?:bearer|basic)[ \t]+)?\S+`),
 	regexp.MustCompile(`(?i)cookie\s*[:=]\s*\S+`),
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/-]+=*`),
 	// JWT（eyJ 开头三段式）
