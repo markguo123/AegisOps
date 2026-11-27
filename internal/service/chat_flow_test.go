@@ -288,7 +288,7 @@ func TestChatFlowSingleExit(t *testing.T) {
 	fl := &typedStreamLLM{rounds: []typedRound{
 		{
 			reasoning: []string{"先看 ", "Pod 列表"},
-			toolCall:  &llm.ToolCall{ID: "c1", Name: "get_resources", Arguments: json.RawMessage(`{"kind":"pods","secretKey":"sk-super-secret"}`)},
+			toolCall:  &llm.ToolCall{ID: "c1", Name: "list_resources", Arguments: json.RawMessage(`{"kind":"Pod","secretKey":"sk-super-secret"}`)},
 		},
 		{reasoning: []string{"汇总异常项"}, content: "## 体检报告\n\n发现 1 个异常项"},
 	}}

@@ -42,6 +42,9 @@ type ToolResult struct {
 	ErrorCode string
 }
 
+// ArgumentValidator rejects malformed input before authorization and approval.
+type ArgumentValidator interface{ ValidateArguments(json.RawMessage) error }
+
 // ClusterAccessChecker 是写工具的可选能力：在人工审批前用当前执行身份做一次
 // Kubernetes SelfSubjectAccessReview。返回错误表示已确定无权限；探测本身失败
 // 时应返回 nil，让真实 API 调用/审批链路继续作为最终边界。

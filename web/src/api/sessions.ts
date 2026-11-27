@@ -29,6 +29,8 @@ export interface SessionSummary {
 
 /** 会话内一条消息，对齐 `internal/session/session.go` 的 Message。 */
 export interface ChatMessage {
+  contractVersion?: string
+  resultStatus?: string
   role: string
   type: string
   name?: string

@@ -24,14 +24,14 @@ func (f *fakeMCPClient) Close() error { return nil }
 func (f *fakeMCPClient) ListTools(context.Context) ([]Tool, error) {
 	return f.tools, nil
 }
-func (f *fakeMCPClient) CallTool(_ context.Context, name string, args map[string]any) (string, error) {
+func (f *fakeMCPClient) CallTool(_ context.Context, name string, args map[string]any) (any, error) {
 	f.called[name] = args
 	return "ok:" + name, nil
 }
 
 func TestRegisterAllAndAdapter(t *testing.T) {
 	client := &fakeMCPClient{
-		name:  "prometheus",
+		name:   "prometheus",
 		called: map[string]map[string]any{},
 		tools: []Tool{
 			{Name: "query", Description: "查询指标", InputSchema: map[string]any{"type": "object"}},

@@ -284,30 +284,32 @@ type Check struct {
 // ToolCall 是一次工具调用的规范对象。tool_call_id 区分重试调用，
 // 开始、结果与历史共用同一个 ID；不可用工具名或命令文本去重。
 type ToolCall struct {
-	ToolCallID  string     `json:"tool_call_id"`
-	TurnID      string     `json:"turn_id"`
-	StepID      string     `json:"step_id,omitempty"`
-	MessageID   string     `json:"message_id,omitempty"`
-	Name        string     `json:"name"`
-	Params      string     `json:"params,omitempty"`
-	Status      ToolStatus `json:"status"`
-	Ok          *bool      `json:"ok,omitempty"`
-	Result      string     `json:"result,omitempty"`
-	Summary     string     `json:"summary,omitempty"`
-	DisplayType string     `json:"display_type,omitempty"`
-	DurationMs  int64      `json:"duration_ms,omitempty"`
-	Risk        string     `json:"risk,omitempty"`
-	Command     string     `json:"command,omitempty"`
-	Stdout      string     `json:"stdout,omitempty"`
-	Stderr      string     `json:"stderr,omitempty"`
-	ExitCode    int        `json:"exit_code,omitempty"`
-	ErrorCode   string     `json:"error_code,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Data        any        `json:"data,omitempty"`
-	ItemOrder   int64      `json:"item_order"`
-	Revision    uint64     `json:"revision"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	ResultStatus    string     `json:"result_status,omitempty"`
+	ContractVersion string     `json:"contract_version,omitempty"`
+	ToolCallID      string     `json:"tool_call_id"`
+	TurnID          string     `json:"turn_id"`
+	StepID          string     `json:"step_id,omitempty"`
+	MessageID       string     `json:"message_id,omitempty"`
+	Name            string     `json:"name"`
+	Params          string     `json:"params,omitempty"`
+	Status          ToolStatus `json:"status"`
+	Ok              *bool      `json:"ok,omitempty"`
+	Result          string     `json:"result,omitempty"`
+	Summary         string     `json:"summary,omitempty"`
+	DisplayType     string     `json:"display_type,omitempty"`
+	DurationMs      int64      `json:"duration_ms,omitempty"`
+	Risk            string     `json:"risk,omitempty"`
+	Command         string     `json:"command,omitempty"`
+	Stdout          string     `json:"stdout,omitempty"`
+	Stderr          string     `json:"stderr,omitempty"`
+	ExitCode        int        `json:"exit_code,omitempty"`
+	ErrorCode       string     `json:"error_code,omitempty"`
+	Error           string     `json:"error,omitempty"`
+	Data            any        `json:"data,omitempty"`
+	ItemOrder       int64      `json:"item_order"`
+	Revision        uint64     `json:"revision"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // Interaction 是问题、审批、敏感读取的统一展示外壳。

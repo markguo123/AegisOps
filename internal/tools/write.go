@@ -190,12 +190,24 @@ func (t *kubectlTool) Execute(ctx context.Context, input json.RawMessage) (ToolR
 				Text: "SYSTEM_UNAVAILABLE",
 				Data: map[string]any{
 					"kind":    "kubectl_binary_missing",
-					"message": "未检测到 kubectl 二进制，写操作不可用。请安装 kubectl 或在配置中设置 kubernetes.kubectl_path。只读操作（scan_cluster / get_pod / get_deployment 等）继续可用，它们走 client-go typed client 不依赖 kubectl 二进制。",
+					"message": "未检测到 kubectl 二进制，写操作不可用。请安装 kubectl 或在配置中设置 kubernetes.kubectl_path。只读操作（scan_cluster / get_resource 等）继续可用，它们走 client-go typed client 不依赖 kubectl 二进制。",
 				},
 				Truncated: true,
 			}, nil
 		}
 		return ExecutionError(err), nil
+	}
+	if !approval.IsReadOnlyCommand(args["command"]) && res.ExecutionLocation != "pod" {
+		target := approval.ParseCommandTarget(args["command"])
+		if target.Name != "" && target.Kind != "" && target.Operation != "" && target.Operation != "exec" {
+			res.VerificationTarget = &executor.VerificationTarget{
+				Kind: target.Kind, Namespace: target.Namespace, Name: target.Name, Operation: target.Operation,
+			}
+		}
+		if res.ExitCode == 0 && !res.TimedOut && !res.StreamTimeout {
+			res.SubmissionStatus = "command_succeeded"
+			res.SymptomStatus = "unverified"
+		}
 	}
 	return ToolResult{
 		Text: extractKubectlSummary(res),

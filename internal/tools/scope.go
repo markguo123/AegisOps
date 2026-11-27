@@ -39,34 +39,15 @@ var (
 		"get_skill":         true,
 	}
 	clusterOnlyTools = map[string]bool{
-		"get_node":         true,
-		"get_nodes":        true,
-		"get_node_usage":   true,
-		"get_pv":           true,
-		"get_storageclass": true,
-		"get_namespace":    true,
-		"diagnose_node":    true,
+
+		"get_node_usage": true,
 	}
 	namespaceTools = map[string]bool{
-		"get_pod":            true,
-		"get_pods":           true,
-		"get_deployment":     true,
-		"get_statefulset":    true,
-		"get_daemonset":      true,
-		"get_replicaset":     true,
-		"get_service":        true,
-		"get_endpoints":      true,
-		"get_endpointslices": true,
-		"get_pvc":            true,
-		"get_configmap":      true,
-		"get_configmaps":     true,
-		"get_secret_info":    true,
-		"get_logs":           true,
-		"get_previous_logs":  true,
-		"get_secret_value":   true,
-		"scan_pod":           true,
-		"diagnose_pod":       true,
-		"diagnose_workload":  true,
+
+		"get_secret_info": true,
+		"get_logs":        true,
+
+		"get_secret_value": true,
 	}
 	clusterKinds = map[string]bool{
 		"node":                      true,
@@ -170,7 +151,7 @@ func (s AccessScope) Check(toolName string, input json.RawMessage) error {
 	if toolName == "create_resource" {
 		return s.checkManifest(stringArg(args, "manifest"))
 	}
-	if toolName == "get_resources" {
+	if isKindReadTool(toolName) {
 		kind := strings.ToLower(stringArg(args, "kind"))
 		if clusterKinds[kind] {
 			return s.deny("集群级资源读取权限")
@@ -189,7 +170,7 @@ func (s AccessScope) Check(toolName string, input json.RawMessage) error {
 		}
 		return s.checkNamespace(ns)
 	}
-	if namespaceTools[toolName] || toolName == "get_resources" || toolName == "get_events" {
+	if namespaceTools[toolName] || isKindReadTool(toolName) || toolName == "get_events" {
 		ns := strings.TrimSpace(stringArg(args, "namespace"))
 		if ns == "" {
 			return s.deny("显式 namespace 查询范围；当前不允许跨 namespace 查询")
@@ -391,4 +372,8 @@ func stringArg(args map[string]any, key string) string {
 	}
 	v, _ := args[key].(string)
 	return strings.TrimSpace(v)
+}
+
+func isKindReadTool(name string) bool {
+	return name == "get_resource" || name == "list_resources" || name == "diagnose_resource"
 }

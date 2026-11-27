@@ -80,34 +80,45 @@ func (c *remoteClient) ListTools(ctx context.Context) ([]Tool, error) {
 	}
 	return entries, nil
 }
-func (c *remoteClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+func (c *remoteClient) CallTool(ctx context.Context, name string, args map[string]any) (any, error) {
 	if !slices.Contains(c.spec.AllowedTools, name) {
-		return "", errors.New("MCP tool outside allowlist")
+		return nil, &callError{tools.ErrorPolicyDenied, "MCP tool outside allowlist"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	result, err := c.session.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: args})
-	if err != nil || result.IsError {
-		return "", errors.New("external MCP tool call failed")
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, &callError{tools.ErrorTimeout, "external MCP tool call timed out"}
+		}
+		return nil, &callError{tools.ErrorToolUnavailable, "external MCP connection or protocol failure"}
+	}
+	if result.IsError {
+		return nil, &callError{"MCP_REMOTE_ERROR", "external MCP server reported a tool error"}
 	}
 	var content any = result.StructuredContent
 	if content == nil {
 		var parts []string
 		for _, item := range result.Content {
-			if value, ok := item.(*sdk.TextContent); ok {
-				parts = append(parts, value.Text)
+			value, ok := item.(*sdk.TextContent)
+			if !ok {
+				return nil, &callError{tools.ErrorUnsupported, "unsupported MCP result content type"}
 			}
+			parts = append(parts, value.Text)
 		}
 		if len(parts) == 0 {
-			return "", errors.New("unsupported MCP tool result")
+			return nil, &callError{tools.ErrorUnsupported, "unsupported MCP tool result"}
 		}
 		content = parts
 	}
 	data, err := json.Marshal(content)
 	if len(data) > 256<<10 {
-		return "", errors.New("MCP result exceeds size limit")
+		return nil, &callError{"MCP_RESULT_TOO_LARGE", "MCP result exceeds size limit"}
 	}
-	return string(data), err
+	if err != nil {
+		return nil, &callError{tools.ErrorUnsupported, "MCP result cannot be represented as JSON"}
+	}
+	return content, nil
 }
 
 func RegisterRemote(ctx context.Context, reg *tools.Registry, spec config.MCPServerConfig, authorize ...func(context.Context) error) (func(), error) {

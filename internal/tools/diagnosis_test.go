@@ -52,7 +52,7 @@ func cannedScanResult() *model.ScanResult {
 func TestDiagnosisToolsCarryBoundClusterID(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
 	opts := model.ScanOptions{Attribution: model.ReportAttribution{ClusterID: "cluster-b", Actor: "u1"}}
-	tr, err := NewDiagnosisTools(r, opts)[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))
+	tr, err := NewDiagnosisTools(r, opts, nil)[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestDiagnosisToolsCarryBoundClusterID(t *testing.T) {
 
 func TestScanClusterTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
-	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))
+	tr, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[0].Execute(context.Background(), json.RawMessage(`{"namespace":"production"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestScanClusterTool(t *testing.T) {
 
 func TestScanPodTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
-	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[1].Execute(context.Background(), json.RawMessage(`{"namespace":"production","name":"web-0"}`))
+	tr, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[1].Execute(context.Background(), json.RawMessage(`{"kind":"Pod","namespace":"production","name":"web-0"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestScanPodTool(t *testing.T) {
 
 func TestDiagnosePodTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
-	if _, err := NewDiagnosisTools(r, model.ScanOptions{})[2].Execute(context.Background(), json.RawMessage(`{"namespace":"production","name":"web-0"}`)); err != nil {
+	if _, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[1].Execute(context.Background(), json.RawMessage(`{"kind":"Pod","namespace":"production","name":"web-0"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if r.opts.LLM.Enabled {
@@ -116,7 +116,7 @@ func TestDiagnosePodTool(t *testing.T) {
 
 func TestDiagnoseNodeTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
-	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[3].Execute(context.Background(), json.RawMessage(`{"name":"node-03"}`))
+	tr, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[1].Execute(context.Background(), json.RawMessage(`{"kind":"Node","name":"node-03"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestDiagnoseNodeTool(t *testing.T) {
 
 func TestDiagnoseWorkloadTool(t *testing.T) {
 	r := &fakeRunner{result: cannedScanResult()}
-	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[4].Execute(context.Background(), json.RawMessage(`{"kind":"deployment","namespace":"production","name":"web"}`))
+	tr, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[1].Execute(context.Background(), json.RawMessage(`{"kind":"Deployment","namespace":"production","name":"web"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestDiagnoseWorkloadTool(t *testing.T) {
 		t.Fatalf("workload 过滤结果 = %v", findings)
 	}
 	// 不支持的 kind。
-	tr, err = NewDiagnosisTools(r, model.ScanOptions{})[4].Execute(context.Background(), json.RawMessage(`{"kind":"job","namespace":"x","name":"y"}`))
+	tr, err = NewDiagnosisTools(r, model.ScanOptions{}, nil)[1].Execute(context.Background(), json.RawMessage(`{"kind":"job","namespace":"x","name":"y"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestDiagnoseWorkloadTool(t *testing.T) {
 
 func TestDiagnosisToolErrorIsolation(t *testing.T) {
 	r := &fakeRunner{err: context.DeadlineExceeded}
-	tr, err := NewDiagnosisTools(r, model.ScanOptions{})[0].Execute(context.Background(), nil)
+	tr, err := NewDiagnosisTools(r, model.ScanOptions{}, nil)[0].Execute(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,15 +166,15 @@ func TestDiagnosisToolErrorIsolation(t *testing.T) {
 }
 
 func TestNewDiagnosisToolsCount(t *testing.T) {
-	ts := NewDiagnosisTools(&fakeRunner{}, model.ScanOptions{})
-	if len(ts) != 5 {
-		t.Fatalf("工具数 = %d, want 5", len(ts))
+	ts := NewDiagnosisTools(&fakeRunner{}, model.ScanOptions{}, nil)
+	if len(ts) != 2 {
+		t.Fatalf("工具数 = %d, want 2", len(ts))
 	}
 	names := map[string]bool{}
 	for _, tl := range ts {
 		names[tl.Name()] = true
 	}
-	for _, want := range []string{"scan_cluster", "scan_pod", "diagnose_pod", "diagnose_node", "diagnose_workload"} {
+	for _, want := range []string{"scan_cluster", "diagnose_resource"} {
 		if !names[want] {
 			t.Fatalf("缺少 %s", want)
 		}

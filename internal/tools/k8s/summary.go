@@ -2,12 +2,13 @@ package k8s
 
 import (
 	"fmt"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/k8s-ai/k8s-ai/internal/scanner"
 )
 
 func derefI32(p *int32) int32 {
@@ -62,6 +63,7 @@ func summarizePod(p *corev1.Pod) map[string]any {
 		"envReferences":   references,
 		"uid":             string(p.UID),
 		"resourceVersion": p.ResourceVersion,
+		"ownerReferences": p.OwnerReferences,
 		"ready":           ready,
 		"namespace":       p.Namespace,
 		"name":            p.Name,
@@ -127,6 +129,7 @@ func summarizeNode(n *corev1.Node) map[string]any {
 	}
 	return map[string]any{
 		"kind": "Node", "name": n.Name,
+		"uid": n.UID, "resourceVersion": n.ResourceVersion,
 		"unschedulable": n.Spec.Unschedulable,
 		"conditions":    conds,
 		"addresses":     addrs,
@@ -196,6 +199,7 @@ func summarizeService(s *corev1.Service) map[string]any {
 	}
 	return map[string]any{
 		"kind": "Service", "namespace": s.Namespace, "name": s.Name,
+		"uid": s.UID, "resourceVersion": s.ResourceVersion,
 		"type": s.Spec.Type, "clusterIP": s.Spec.ClusterIP, "clusterIPs": s.Spec.ClusterIPs,
 		"selector": s.Spec.Selector, "ports": ports,
 		"externalIPs": s.Spec.ExternalIPs, "sessionAffinity": s.Spec.SessionAffinity,
@@ -204,6 +208,7 @@ func summarizeService(s *corev1.Service) map[string]any {
 
 func summarizeEndpoints(e *corev1.Endpoints) map[string]any {
 	subsets := make([]map[string]any, 0, len(e.Subsets))
+	ready, notReady := 0, 0
 	for _, ss := range e.Subsets {
 		addrs := make([]string, 0, len(ss.Addresses))
 		for _, a := range ss.Addresses {
@@ -213,22 +218,36 @@ func summarizeEndpoints(e *corev1.Endpoints) map[string]any {
 		for _, p := range ss.Ports {
 			ports = append(ports, map[string]any{"name": p.Name, "port": p.Port, "protocol": p.Protocol})
 		}
-		subsets = append(subsets, map[string]any{"addresses": addrs, "ports": ports})
+		notReadyAddrs := make([]string, 0, len(ss.NotReadyAddresses))
+		for _, a := range ss.NotReadyAddresses {
+			notReadyAddrs = append(notReadyAddrs, a.IP)
+		}
+		ready += len(addrs)
+		notReady += len(notReadyAddrs)
+		subsets = append(subsets, map[string]any{"addresses": addrs, "notReadyAddresses": notReadyAddrs, "ports": ports})
 	}
 	return map[string]any{
 		"kind": "Endpoints", "namespace": e.Namespace, "name": e.Name,
-		"subsets": subsets, "endpointCount": len(subsets),
+		"uid": e.UID, "resourceVersion": e.ResourceVersion,
+		"subsets": subsets, "subsetCount": len(subsets), "endpointCount": ready + notReady,
+		"countUnit": "address_entries", "readyAddressCount": ready, "notReadyAddressCount": notReady,
 	}
 }
 
 func summarizeEndpointSlice(es discoveryv1.EndpointSlice) map[string]any {
 	eps := make([]map[string]any, 0, len(es.Endpoints))
+	ready, notReady, unknown, addresses := 0, 0, 0, 0
 	for _, ep := range es.Endpoints {
-		ready := false
-		if ep.Conditions.Ready != nil {
-			ready = *ep.Conditions.Ready
+		addresses += len(ep.Addresses)
+		switch {
+		case ep.Conditions.Ready == nil:
+			unknown++
+		case *ep.Conditions.Ready:
+			ready++
+		default:
+			notReady++
 		}
-		eps = append(eps, map[string]any{"addresses": ep.Addresses, "ready": ready, "nodeName": ep.NodeName, "hostname": ep.Hostname})
+		eps = append(eps, map[string]any{"addresses": ep.Addresses, "ready": ep.Conditions.Ready, "targetRef": ep.TargetRef, "nodeName": ep.NodeName, "hostname": ep.Hostname})
 	}
 	ports := make([]map[string]any, 0, len(es.Ports))
 	for _, p := range es.Ports {
@@ -241,13 +260,15 @@ func summarizeEndpointSlice(es discoveryv1.EndpointSlice) map[string]any {
 	return map[string]any{
 		"name": es.Name, "addressType": es.AddressType,
 		"endpoints": eps, "ports": ports,
-		"labels": es.Labels,
+		"labels": es.Labels, "addressCount": addresses, "endpointCount": len(eps),
+		"countUnit": "endpoint_entries", "readyCount": ready, "notReadyCount": notReady, "unknownReadyCount": unknown,
 	}
 }
 
 func summarizePVC(p *corev1.PersistentVolumeClaim) map[string]any {
 	return map[string]any{
 		"kind": "PersistentVolumeClaim", "namespace": p.Namespace, "name": p.Name,
+		"uid": p.UID, "resourceVersion": p.ResourceVersion,
 		"phase":        string(p.Status.Phase),
 		"capacity":     p.Status.Capacity,
 		"requested":    p.Spec.Resources.Requests,
@@ -265,6 +286,7 @@ func summarizePV(p *corev1.PersistentVolume) map[string]any {
 	}
 	return map[string]any{
 		"kind": "PersistentVolume", "name": p.Name,
+		"uid": p.UID, "resourceVersion": p.ResourceVersion,
 		"phase": string(p.Status.Phase), "capacity": p.Spec.Capacity,
 		"storageClass": p.Spec.StorageClassName, "accessModes": p.Spec.AccessModes,
 		"reclaimPolicy": p.Spec.PersistentVolumeReclaimPolicy, "claimRef": claim,
@@ -274,6 +296,7 @@ func summarizePV(p *corev1.PersistentVolume) map[string]any {
 func summarizeStorageClass(sc *storagev1.StorageClass) map[string]any {
 	return map[string]any{
 		"kind": "StorageClass", "name": sc.Name,
+		"uid": sc.UID, "resourceVersion": sc.ResourceVersion,
 		"provisioner": sc.Provisioner, "reclaimPolicy": sc.ReclaimPolicy,
 		"volumeBindingMode": sc.VolumeBindingMode, "allowVolumeExpansion": derefBool(sc.AllowVolumeExpansion),
 	}
@@ -281,7 +304,8 @@ func summarizeStorageClass(sc *storagev1.StorageClass) map[string]any {
 
 func summarizeNamespace(ns *corev1.Namespace) map[string]any {
 	return map[string]any{
-		"kind": "Namespace", "name": ns.Name, "phase": string(ns.Status.Phase),
+		"kind": "Namespace", "name": ns.Name,
+		"uid": ns.UID, "resourceVersion": ns.ResourceVersion, "phase": string(ns.Status.Phase),
 		"labels": ns.Labels, "annotations": ns.Annotations,
 	}
 }
@@ -295,7 +319,9 @@ func summarizeEvent(e corev1.Event) map[string]any {
 		"reason":        e.Reason,
 		"message":       e.Message,
 		"count":         e.Count,
-		"lastTimestamp": e.LastTimestamp,
+		"lastTimestamp": scanner.EventLastObserved(e),
+		"objectUID":     e.InvolvedObject.UID,
+		"eventName":     e.Name,
 		"source":        e.Source.Component,
 	}
 }

@@ -9,7 +9,7 @@ import (
 
 func TestAccessScopeAllowsAuthorizedNamespace(t *testing.T) {
 	scope := NormalizeScope(AccessScope{Namespaces: []string{"mysql-dev", "mysql-dev"}})
-	if err := scope.Check("get_pods", json.RawMessage(`{"namespace":"mysql-dev"}`)); err != nil {
+	if err := scope.Check("list_resources", json.RawMessage(`{"kind":"Pod","namespace":"mysql-dev"}`)); err != nil {
 		t.Fatalf("authorized namespace denied: %v", err)
 	}
 	if err := scope.Check("get_secret_value", json.RawMessage(`{"namespace":"mysql-dev","name":"db","keys":["password"],"reason":"test"}`)); err != nil {
@@ -43,12 +43,12 @@ func TestAccessScopeDeniesClusterAndForeignResources(t *testing.T) {
 		args string
 		want string
 	}{
-		{"nodes", "get_nodes", `{}`, "集群级资源读取权限"},
-		{"foreign namespace", "get_pods", `{"namespace":"default"}`, `namespace "default"`},
-		{"all namespaces", "get_pods", `{}`, "显式 namespace"},
+		{"nodes", "list_resources", `{"kind":"Node"}`, "集群级资源读取权限"},
+		{"foreign namespace", "list_resources", `{"kind":"Pod","namespace":"default"}`, `namespace "default"`},
+		{"all namespaces", "list_resources", `{"kind":"Pod"}`, "显式 namespace"},
 		{"foreign Secret", "get_secret_value", `{"namespace":"default","name":"db","keys":["password"],"reason":"test"}`, `namespace "default"`},
 		{"full scan", "scan_cluster", `{}`, "集群体检"},
-		{"resource kind", "get_resources", `{"kind":"nodes"}`, "集群级资源读取"},
+		{"resource kind", "get_resource", `{"kind":"Node","name":"node-1"}`, "集群级资源读取"},
 		{"kubectl nodes", "kubectl", `{"command":"kubectl get nodes"}`, "集群级资源读取权限"},
 		{"kubectl shell", "kubectl", `{"command":"kubectl get pods -n mysql-dev | awk '{print $1}'"}`, "shell 构造"},
 		{"kubectl combo foreign namespace", "kubectl", `{"command":"kubectl get pods -n default | grep db"}`, `namespace "default"`},
@@ -71,10 +71,10 @@ func TestAccessScopeDeniesClusterAndForeignResources(t *testing.T) {
 
 func TestAccessScopeAdminIsUnrestricted(t *testing.T) {
 	scope := AccessScope{IsAdmin: true, ClusterScoped: true}
-	if err := scope.Check("get_nodes", json.RawMessage(`{}`)); err != nil {
+	if err := scope.Check("list_resources", json.RawMessage(`{"kind":"Node"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := scope.Check("get_pods", json.RawMessage(`{"namespace":"anything"}`)); err != nil {
+	if err := scope.Check("list_resources", json.RawMessage(`{"kind":"Pod","namespace":"anything"}`)); err != nil {
 		t.Fatal(err)
 	}
 }

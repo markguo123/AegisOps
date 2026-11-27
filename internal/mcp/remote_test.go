@@ -46,7 +46,8 @@ func TestRemoteTransports(t *testing.T) {
 			defer cancelCall()
 			result, err := tool.Execute(call, []byte("{}"))
 			data, _ := result.Data.(map[string]any)
-			if err != nil || data["content"] != `{"value":"found"}` {
+			content, _ := data["content"].(map[string]any)
+			if err != nil || content["value"] != "found" || data["untrusted"] != true {
 				t.Fatalf("result: %+v, error: %v", result, err)
 			}
 		})

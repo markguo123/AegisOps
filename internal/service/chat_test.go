@@ -48,7 +48,7 @@ func TestChatServicePersistsReasoningInRoundOrder(t *testing.T) {
 	fl := &typedStreamLLM{rounds: []typedRound{
 		{
 			reasoning: []string{"先看 ", "Pod 列表"},
-			toolCall:  &llm.ToolCall{ID: "c1", Name: "get_resources", Arguments: json.RawMessage(`{"kind":"pods"}`)},
+			toolCall:  &llm.ToolCall{ID: "c1", Name: "list_resources", Arguments: json.RawMessage(`{"kind":"Pod"}`)},
 		},
 		{reasoning: []string{"汇总异常项"}, content: "## 体检报告\n\n发现 1 个异常项"},
 	}}
@@ -196,7 +196,7 @@ func testChatService(t *testing.T, fl *scriptedLLM) (ChatService, *config.Config
 
 func TestChatServiceRoundTrip(t *testing.T) {
 	fl := &scriptedLLM{responses: []*llm.ChatResponse{
-		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "get_resources", Arguments: json.RawMessage(`{"kind":"nodes"}`)}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "list_resources", Arguments: json.RawMessage(`{"kind":"Node"}`)}}},
 		{Content: "集群有 1 个节点", Usage: llm.TokenUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}},
 	}}
 	svc, _, _ := testChatService(t, fl)
@@ -219,7 +219,7 @@ func TestChatServiceRoundTrip(t *testing.T) {
 	for ev := range events {
 		switch ev.Type {
 		case ChatEventToolCall:
-			if ev.Tool != nil && ev.Tool.Name == "get_resources" {
+			if ev.Tool != nil && ev.Tool.Name == "list_resources" {
 				gotToolCall = true
 			}
 		case ChatEventToolResponse:
@@ -249,11 +249,11 @@ func TestChatServiceRoundTrip(t *testing.T) {
 
 func TestChatServiceDisabledTools(t *testing.T) {
 	fl := &scriptedLLM{responses: []*llm.ChatResponse{
-		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "get_resources", Arguments: json.RawMessage(`{"kind":"nodes"}`)}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "list_resources", Arguments: json.RawMessage(`{"kind":"Node"}`)}}},
 		{Content: "done"},
 	}}
 	svc, cfg, _ := testChatService(t, fl)
-	cfg.Agent.DisabledTools = []string{"get_resources"}
+	cfg.Agent.DisabledTools = []string{"list_resources"}
 	if _, err := svc.GetOrCreateSession("s1", "", "qwen-plus"); err != nil {
 		t.Fatal(err)
 	}
@@ -424,5 +424,15 @@ func TestChatServiceWriteApproval(t *testing.T) {
 	}
 	if !strings.Contains(wr.lastCommand, "scale") {
 		t.Fatalf("写工具未执行: cmd=%q", wr.lastReplicas)
+	}
+}
+
+func TestTranslatePartialToolResult(t *testing.T) {
+	event, ok := translateEvent(agent.Message{Type: agent.MessageTypeToolCallResponse, Payload: map[string]any{
+		"name": "get_resource", "ok": true, "resultStatus": "partial",
+		"data": map[string]any{"eventsError": "RBAC_DENIED"},
+	}})
+	if !ok || event.Tool == nil || event.Tool.ResultStatus != "partial" || event.Tool.Ok == nil || !*event.Tool.Ok {
+		t.Fatalf("partial result not delivered to CLI consumers: %+v", event)
 	}
 }

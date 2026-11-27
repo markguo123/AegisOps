@@ -158,6 +158,7 @@ function toolUi(tool: ChatToolCall): ToolUiData {
     ok,
     params,
     result: tool.data ?? tool.result ?? null,
+    resultStatus: tool.result_status,
     raw: tool.result ?? (typeof params === 'string' ? params : ''),
     duration: typeof tool.duration_ms === 'number' ? tool.duration_ms : null,
     summary: tool.summary,

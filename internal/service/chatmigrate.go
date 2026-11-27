@@ -153,7 +153,7 @@ func buildLegacyCommit(ctx context.Context, st store.Store, sess *session.Sessio
 				}
 				tool := &sse.ToolCall{
 					ToolCallID: legacyToolID(m, sess.ID, seg.index, i),
-					TurnID:     turnID, Name: m.Name, Params: string(m.Arguments),
+					TurnID:     turnID, ContractVersion: m.ContractVersion, ResultStatus: m.ResultStatus, Name: m.Name, Params: string(m.Arguments),
 					Status: status, Ok: ok, Result: m.Content, Summary: m.Summary,
 					DisplayType: m.DisplayType, DurationMs: m.DurationMs, Risk: m.Risk,
 					Command: m.Command, Stdout: m.Stdout, Stderr: m.Stderr,

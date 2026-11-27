@@ -12,14 +12,16 @@ import (
 
 // Message 是会话中持久化的一条消息（落盘前统一脱敏）。
 type Message struct {
-	PodObservation *PodObservation `json:"podObservation,omitempty"`
-	Role           string          `json:"role"`                 // user | assistant | tool
-	Type           string          `json:"type"`                 // text | reasoning | tool-call-response | error | ...
-	Name           string          `json:"name,omitempty"`       // tool 消息的工具名
-	ToolCallID     string          `json:"toolCallId,omitempty"` // native Tool Calling 的调用 ID（恢复会话回传必需）
-	Arguments      json.RawMessage `json:"arguments,omitempty"`  // 工具调用参数（恢复会话展示命令用，仅读回放不喂 LLM）
-	Data           any             `json:"data,omitempty"`       // 工具结构化结果（恢复会话渲染表格用，仅读回放不喂 LLM）
-	Ok             *bool           `json:"ok,omitempty"`         // 工具执行是否成功（前端权威判定，回放兜底用）
+	ResultStatus    string          `json:"resultStatus,omitempty"`
+	ContractVersion string          `json:"contractVersion,omitempty"`
+	PodObservation  *PodObservation `json:"podObservation,omitempty"`
+	Role            string          `json:"role"`                 // user | assistant | tool
+	Type            string          `json:"type"`                 // text | reasoning | tool-call-response | error | ...
+	Name            string          `json:"name,omitempty"`       // tool 消息的工具名
+	ToolCallID      string          `json:"toolCallId,omitempty"` // native Tool Calling 的调用 ID（恢复会话回传必需）
+	Arguments       json.RawMessage `json:"arguments,omitempty"`  // 工具调用参数（恢复会话展示命令用，仅读回放不喂 LLM）
+	Data            any             `json:"data,omitempty"`       // 工具结构化结果（恢复会话渲染表格用，仅读回放不喂 LLM）
+	Ok              *bool           `json:"ok,omitempty"`         // 工具执行是否成功（前端权威判定，回放兜底用）
 	// P7.4 工具结果同源契约（ADR-034）：摘要/渲染形态/耗时/风险在本次执行时一并落库，
 	// 刷新后与 chat 流式结果共用同一份头部信息，避免回放时丢失 "320ms" 与风险标签。
 	Summary     string `json:"summary,omitempty"`     // 头部概览摘要（后端计算）
@@ -58,9 +60,10 @@ type BranchOrigin struct {
 
 // Session 是一个对话会话。
 type Session struct {
-	Branch          *BranchOrigin `json:"branch,omitempty"`
-	ApprovalContext string        `json:"approvalContext,omitempty"`
-	ID              string        `json:"id"`
+	ToolContractVersion string        `json:"toolContractVersion,omitempty"`
+	Branch              *BranchOrigin `json:"branch,omitempty"`
+	ApprovalContext     string        `json:"approvalContext,omitempty"`
+	ID                  string        `json:"id"`
 	// UserID 是会话所有者。空值表示三期历史会话或 CLI 会话；管理员可读取
 	// 这类会话，普通用户/操作员不得认领或访问。
 	UserID         string           `json:"userId,omitempty"`

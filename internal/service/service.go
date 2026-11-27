@@ -191,12 +191,14 @@ func (s *scanService) Run(ctx context.Context, opts model.ScanOptions) (*model.S
 
 	result := &model.ScanResult{
 		Meta: model.ScanMeta{
-			ToolVersion:   version.Version,
-			Cluster:       opts.Context,
-			ServerVersion: serverVersion,
-			ScanStartedAt: started.UTC().Format(time.RFC3339),
-			Namespace:     opts.Namespace,
-			Pod:           opts.PodTarget,
+			ToolVersion:        version.Version,
+			Cluster:            opts.Context,
+			ServerVersion:      serverVersion,
+			ScanStartedAt:      started.UTC().Format(time.RFC3339),
+			Namespace:          opts.Namespace,
+			Pod:                opts.PodTarget,
+			DiagnosticTarget:   observedDiagnosticTarget(snap, opts.DiagnosticTarget),
+			DiagnosticSubjects: diagnosticSubjects(snap, opts.DiagnosticTarget),
 		},
 		Summary:          summaryFromSnapshot(snap, opts),
 		Findings:         derefFindings(findings),
@@ -210,10 +212,12 @@ func (s *scanService) Run(ctx context.Context, opts model.ScanOptions) (*model.S
 	}
 	// 1.2：历史对比——读取上一份 latest.json，按指纹输出新增/持续/恢复
 	// （人读日报为次要产出；主要消费方是二期 Agent 的记忆契约，ADR-019）。
-	if h, err := history.LoadPrevious(opts.ReportDirectory); err != nil {
-		slog.Warn("scan: 读取历史报告失败", "error", err)
-	} else if h != nil {
-		result.History = history.Compare(h, derefFindings(findings))
+	if opts.DiagnosticTarget == nil {
+		if h, err := history.LoadPrevious(opts.ReportDirectory); err != nil {
+			slog.Warn("scan: 读取历史报告失败", "error", err)
+		} else if h != nil {
+			result.History = history.Compare(h, derefFindings(findings))
+		}
 	}
 
 	// P7：LLM 诊断（预算裁剪 → 校验 → 降级），单个/全部失败都不中断 scan。
@@ -304,7 +308,9 @@ func (s *scanService) Run(ctx context.Context, opts model.ScanOptions) (*model.S
 	}
 	// 归档到对象存储：与上面的 report.directory 落盘互不相干（本地文件只是兼容副本，
 	// 事实源是 objects + reports），失败只记 WARN，不影响本次扫描的返回值。
-	s.archiveReportsIfNeeded(ctx, result, opts, phaseStart, phaseDone)
+	if opts.DiagnosticTarget == nil {
+		s.archiveReportsIfNeeded(ctx, result, opts, phaseStart, phaseDone)
+	}
 	// 阶段账最后刷一次：把落盘/归档耗时也算进去。
 	result.Stages = rec.records()
 	return result, nil
@@ -595,4 +601,40 @@ func rootOnlyFindings(findings []model.Finding, incs []model.Incident) []model.F
 		}
 	}
 	return out
+}
+
+func diagnosticSubjects(snapshot *model.ClusterSnapshot, target *model.ResourceRef) []model.ResourceRef {
+	if target == nil {
+		return nil
+	}
+	var refs []model.ResourceRef
+	for _, pod := range snapshot.Pods {
+		refs = append(refs, pod.Ref)
+	}
+	for _, workload := range snapshot.Workloads {
+		if workload.Ref.Kind == "ReplicaSet" {
+			refs = append(refs, workload.Ref)
+		}
+	}
+	return refs
+}
+
+func observedDiagnosticTarget(snapshot *model.ClusterSnapshot, target *model.ResourceRef) *model.ResourceRef {
+	if target == nil {
+		return nil
+	}
+	resolved := *target
+	for _, node := range snapshot.Nodes {
+		if node.Ref.Kind == resolved.Kind && node.Ref.Name == resolved.Name {
+			resolved.UID = node.Ref.UID
+			return &resolved
+		}
+	}
+	for _, workload := range snapshot.Workloads {
+		if workload.Ref.Kind == resolved.Kind && workload.Ref.Name == resolved.Name && workload.Ref.Namespace == resolved.Namespace {
+			resolved.UID = workload.Ref.UID
+			break
+		}
+	}
+	return &resolved
 }

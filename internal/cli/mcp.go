@@ -30,14 +30,16 @@ type inspectionID struct {
 	ScanID string `json:"scanId"`
 }
 type inspectionStatus struct {
-	ScanID string `json:"scanId"`
-	State  string `json:"state"`
+	ScanID     string `json:"scanId"`
+	State      string `json:"state"`
+	ReasonCode string `json:"reasonCode,omitempty"`
 }
 type inspectionReportRequest struct {
 	inspectionID
 	Offset int `json:"offset,omitempty"`
 }
 type inspectionReport struct {
+	Scope      model.ScanMeta           `json:"observedScope"`
 	Summary    model.ClusterSummary     `json:"summary"`
 	Score      model.HealthScore        `json:"healthScore"`
 	Collection *model.CollectionQuality `json:"collection,omitempty"`
@@ -154,6 +156,10 @@ func inspectionHandler(ctx context.Context, base model.ScanOptions, scan func(co
 			defer func() { slog.Info("MCP inspection finished", "scan_id", job.status.ScanID, "status", job.status.State) }()
 			if err != nil || result == nil {
 				job.status.State = "failed"
+				job.status.ReasonCode = "INSPECTION_FAILED"
+				if errors.Is(err, context.DeadlineExceeded) {
+					job.status.ReasonCode = "INSPECTION_TIMEOUT"
+				}
 				return
 			}
 			job.result = result
@@ -166,7 +172,7 @@ func inspectionHandler(ctx context.Context, base model.ScanOptions, scan func(co
 		defer mu.Unlock()
 		job := jobs[in.ScanID]
 		if job == nil || !job.expires.IsZero() && time.Now().After(job.expires) {
-			return nil, inspectionStatus{}, errors.New("unknown or expired inspection")
+			return nil, inspectionStatus{}, errors.New("INSPECTION_REFERENCE_UNAVAILABLE: unknown or expired inspection")
 		}
 		return nil, job.status, nil
 	})
@@ -174,21 +180,27 @@ func inspectionHandler(ctx context.Context, base model.ScanOptions, scan func(co
 		mu.Lock()
 		defer mu.Unlock()
 		job := jobs[in.ScanID]
-		if job == nil || job.result == nil || time.Now().After(job.expires) {
-			return nil, inspectionReport{}, errors.New("report unavailable")
+		if job == nil || !job.expires.IsZero() && time.Now().After(job.expires) {
+			return nil, inspectionReport{}, errors.New("INSPECTION_REFERENCE_UNAVAILABLE: unknown or expired inspection")
+		}
+		if job.status.State == "running" {
+			return nil, inspectionReport{}, errors.New("INSPECTION_RUNNING: report is pending")
+		}
+		if job.result == nil {
+			return nil, inspectionReport{}, errors.New(job.status.ReasonCode + ": report unavailable")
 		}
 		findings := job.result.Findings
 		if in.Offset < 0 || in.Offset > len(findings) {
 			return nil, inspectionReport{}, errors.New("invalid report offset")
 		}
 		end := min(in.Offset+10, len(findings))
-		out := inspectionReport{Summary: job.result.Summary, Score: job.result.HealthScore, Collection: job.result.Collection, Findings: findings[in.Offset:end]}
+		out := inspectionReport{Scope: job.result.Meta, Summary: job.result.Summary, Score: job.result.HealthScore, Collection: job.result.Collection, Findings: findings[in.Offset:end]}
 		if end < len(findings) {
 			out.NextOffset = &end
 		}
 		payload, err := json.Marshal(out)
 		if err != nil || len(payload) > 256<<10 {
-			return nil, inspectionReport{}, errors.New("report page exceeds size limit")
+			return nil, inspectionReport{}, errors.New("INSPECTION_PAGE_TOO_LARGE: report page exceeds size limit")
 		}
 		return nil, out, nil
 	})

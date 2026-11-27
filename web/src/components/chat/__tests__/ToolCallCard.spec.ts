@@ -128,3 +128,10 @@ describe('ToolCallCard（P2.8 工具卡）', () => {
     expect(wrapper.text()).not.toContain('applied')
   })
 })
+
+it('shows the persisted partial result status when details are unavailable', () => {
+  const wrapper = mount(ToolCallCard, {
+    props: { tool: tool({ result: null, resultStatus: 'partial' }) },
+  })
+  expect(wrapper.find('.toolcard-partial').exists()).toBe(true)
+})

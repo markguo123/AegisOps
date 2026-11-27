@@ -274,6 +274,9 @@ func (s *snapCollector) addEvents(items []corev1.Event) {
 
 // Phase1 执行全量轻量采集，返回 ClusterSnapshot。
 func (c *collector) Phase1(ctx context.Context, opts model.ScanOptions) (*model.ClusterSnapshot, error) {
+	if opts.DiagnosticTarget != nil {
+		return c.collectDiagnosticTarget(ctx, opts)
+	}
 	if opts.PodTarget != "" && opts.Namespace == "" {
 		return nil, errors.New("target Pod requires a namespace")
 	}

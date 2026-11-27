@@ -82,7 +82,12 @@ func (t *secretValueTool) InputSchema() any {
 			"items":       map[string]any{"type": "string"},
 		},
 		"reason": strProp("为什么必须查看该值，以及该值将如何帮助定位当前故障"),
-	}, "namespace", "name", "keys", "reason")
+	}, "namespace", "name", "keys", "reason", "operation")
+}
+
+func (*secretValueTool) ValidateArguments(input json.RawMessage) error {
+	_, err := parseSecretValueArgs(input)
+	return err
 }
 
 func (t *secretValueTool) IsReadOnly(json.RawMessage) bool { return false }
@@ -228,9 +233,9 @@ func parseSecretValueArgs(input json.RawMessage) (secretValueArgs, error) {
 	args.Name = strings.TrimSpace(args.Name)
 	args.Reason = strings.TrimSpace(args.Reason)
 	switch args.Operation {
-	case "", "read", "check_nonempty", "compare_config":
+	case "read", "check_nonempty", "compare_config":
 	default:
-		return secretValueArgs{}, fmt.Errorf("unsupported Secret operation")
+		return secretValueArgs{}, fmt.Errorf("operation must be read, check_nonempty or compare_config")
 	}
 	if args.Namespace == "" || args.Name == "" {
 		return secretValueArgs{}, fmt.Errorf("namespace and name are required")

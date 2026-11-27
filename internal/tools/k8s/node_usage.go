@@ -41,12 +41,9 @@ func (t *nodeUsageTool) Execute(ctx context.Context, input json.RawMessage) (too
 	}
 	metrics, err := t.metrics.ListNodeMetrics(ctx)
 	if err != nil {
-		return tools.ResultError("get_node_usage: " + err.Error()), nil
+		return readError(fmt.Errorf("metrics.k8s.io: %w", err)), nil
 	}
-	nodes, err := t.reader.ListNodes(ctx)
-	if err != nil {
-		return tools.ResultError("get_node_usage: " + err.Error()), nil
-	}
+	nodes, nodeErr := t.reader.ListNodes(ctx)
 	allocatable := map[string]struct{ cpu, mem int64 }{}
 	for _, n := range nodes {
 		allocatable[n.Name] = struct{ cpu, mem int64 }{
@@ -68,23 +65,26 @@ func (t *nodeUsageTool) Execute(ctx context.Context, input json.RawMessage) (too
 			"memoryMiB":     memBytes / (1024 * 1024),
 			"timestamp":     m.Timestamp,
 		}
-		if cap, ok := allocatable[m.Name]; ok {
-			item["cpuPercent"] = percent(cpuMilli, cap.cpu)
-			item["memoryPercent"] = percent(memBytes, cap.mem)
-		}
+		cap := allocatable[m.Name]
+		item["cpuPercent"] = percent(cpuMilli, cap.cpu)
+		item["memoryPercent"] = percent(memBytes, cap.mem)
 		items = append(items, item)
-		sb.WriteString(fmt.Sprintf("%s: cpu=%.1f%% mem=%.1f%%\n",
-			m.Name, item["cpuPercent"].(float64), item["memoryPercent"].(float64)))
+		fmt.Fprintf(&sb, "%s: cpu=%dm memory=%dMiB\n", m.Name, cpuMilli, memBytes/(1024*1024))
+	}
+	data := map[string]any{"kind": "NodeUsageList", "source": "metrics.k8s.io", "count": len(items), "items": items}
+	if nodeErr != nil {
+		data["partial"] = true
+		data["allocatableError"] = readError(nodeErr).ErrorCode
 	}
 	return tools.ToolResult{
-		Data: map[string]any{"kind": "NodeUsageList", "count": len(items), "items": items},
+		Data: data,
 		Text: strings.TrimSuffix(sb.String(), "\n"),
 	}, nil
 }
 
-func percent(used, total int64) float64 {
+func percent(used, total int64) any {
 	if total <= 0 {
-		return 0
+		return nil
 	}
 	p := float64(used) * 100 / float64(total)
 	if p < 0 {

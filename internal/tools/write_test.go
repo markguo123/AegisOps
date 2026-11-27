@@ -188,7 +188,7 @@ func TestKubectlMissingError(t *testing.T) {
 	if !strings.Contains(msg, "未检测到 kubectl 二进制") {
 		t.Fatalf("message 缺少友好提示: %q", msg)
 	}
-	if !strings.Contains(msg, "scan_cluster") || !strings.Contains(msg, "get_pod") {
+	if !strings.Contains(msg, "scan_cluster") || !strings.Contains(msg, "get_resource") {
 		t.Fatalf("message 应提只读工具继续可用: %q", msg)
 	}
 

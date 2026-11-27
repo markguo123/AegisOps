@@ -128,13 +128,14 @@ func TestGetPodPrefixMatch(t *testing.T) {
 		},
 	}
 	r := testReader(pods...)
-	// 用 Deployment 名查询 → 前缀命中唯一 Pod，直接返回详情。
+	// 单个前缀命中仍是候选，需要确认目标。
 	tr, err := (&podTool{base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"name":"naviapp-backend"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := tr.Data.(map[string]any)
-	if m["name"] != "naviapp-backend-7597875c9d-jwsqs" || m["namespace"] != "agentops" {
+	items := m["items"].([]map[string]any)
+	if m["kind"] != "PodCandidates" || len(items) != 1 || items[0]["name"] != "naviapp-backend-7597875c9d-jwsqs" || items[0]["match"] != "name_prefix" {
 		t.Fatalf("prefix 匹配结果 = %v", m)
 	}
 	// 前缀命中多个 → 候选列表。
@@ -152,7 +153,7 @@ func TestGetPods(t *testing.T) {
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns1"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns1"}, Status: corev1.PodStatus{Phase: corev1.PodPending}},
 	}
-	tr, err := (&podsTool{base{reader: testReader(pods...)}}).Execute(context.Background(), json.RawMessage(`{"namespace":"ns1"}`))
+	tr, err := registeredList(t, testReader(pods...)).Execute(context.Background(), json.RawMessage(`{"kind":"Pod","namespace":"ns1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +180,7 @@ func TestGetNodeAndNodes(t *testing.T) {
 	if conds[0]["type"] != corev1.NodeReady || conds[0]["status"] != corev1.ConditionFalse {
 		t.Fatalf("node summary = %v", m)
 	}
-	tr2, err := (&nodesTool{base{reader: r}}).Execute(context.Background(), nil)
+	tr2, err := registeredList(t, r).Execute(context.Background(), json.RawMessage(`{"kind":"Node"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestGetServiceEndpointsAndSlices(t *testing.T) {
 	if tr, err := (&endpointsTool{base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","name":"web"}`)); err != nil || tr.Data.(map[string]any)["endpointCount"] != 1 {
 		t.Fatalf("endpoints: %v err=%v", tr, err)
 	}
-	tr, err := (&endpointSlicesTool{base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","service":"web"}`))
+	tr, err := registeredList(t, r).Execute(context.Background(), json.RawMessage(`{"kind":"EndpointSlice","namespace":"default","service":"web"}`))
 	if err != nil || tr.Data.(map[string]any)["count"] != 1 {
 		t.Fatalf("endpointslices: %v err=%v", tr, err)
 	}
@@ -300,7 +301,7 @@ func TestGetLogs(t *testing.T) {
 		return false, nil, nil
 	})
 	r := kubernetes.NewClientWithClientset(cs)
-	tr, err := (&logsTool{base: base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","pod":"web-0","container":"web","tailLines":50}`))
+	tr, err := (&logsTool{base: base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","pod":"web-0","container":"web","instance":"current","tailLines":50}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +312,7 @@ func TestGetLogs(t *testing.T) {
 	if !strings.Contains(tr.Text, "fake log line") {
 		t.Fatalf("日志正文应在 Text: %q", tr.Text)
 	}
-	tr2, err := (&logsTool{base: base{reader: r}, previous: true}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","pod":"web-0"}`))
+	tr2, err := (&logsTool{base: base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"namespace":"default","pod":"web-0","instance":"previous"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,11 +328,11 @@ func TestGetNamespaceAndResources(t *testing.T) {
 	if err != nil || tr.Data.(map[string]any)["phase"] != "Active" {
 		t.Fatalf("namespace: %v err=%v", tr, err)
 	}
-	tr, err = (&resourcesTool{base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"kind":"namespaces"}`))
+	tr, err = registeredList(t, r).Execute(context.Background(), json.RawMessage(`{"kind":"Namespace"}`))
 	if err != nil || tr.Data.(map[string]any)["count"] != 1 {
 		t.Fatalf("resources: %v err=%v", tr, err)
 	}
-	tr, err = (&resourcesTool{base{reader: r}}).Execute(context.Background(), json.RawMessage(`{"kind":"bogus"}`))
+	tr, err = registeredList(t, r).Execute(context.Background(), json.RawMessage(`{"kind":"bogus"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,10 +346,10 @@ func TestRegisterAllCount(t *testing.T) {
 	if err := RegisterAll(reg, testReader()); err != nil {
 		t.Fatal(err)
 	}
-	if len(reg.All()) != 23 {
-		t.Fatalf("工具数 = %d, want 23", len(reg.All()))
+	if len(reg.All()) != 6 {
+		t.Fatalf("工具数 = %d, want 6", len(reg.All()))
 	}
-	for _, want := range []string{"get_pod", "get_logs", "get_previous_logs", "get_resources", "get_events", "get_node_usage", "get_configmap", "get_configmaps", "get_secret_info"} {
+	for _, want := range []string{"get_resource", "get_logs", "list_resources", "get_events", "get_node_usage", "get_secret_info"} {
 		if _, ok := reg.Lookup(want); !ok {
 			t.Fatalf("缺少工具 %s", want)
 		}
@@ -365,7 +366,7 @@ func TestSchemaMetadataForReadOnlyTools(t *testing.T) {
 	for _, spec := range specs {
 		byName[spec.Name] = spec.Description
 	}
-	for _, name := range []string{"get_pod", "get_deployment", "get_nodes"} {
+	for _, name := range []string{"get_resource", "list_resources", "get_node_usage"} {
 		desc, ok := byName[name]
 		if !ok {
 			t.Fatalf("缺少工具 %s", name)
@@ -433,4 +434,17 @@ func TestGetNodeUsageUnavailable(t *testing.T) {
 	if tr.Data.(map[string]any)["error"] == nil {
 		t.Fatal("metrics 不可用应返回错误")
 	}
+}
+
+func registeredList(t *testing.T, reader Reader) tools.Tool {
+	t.Helper()
+	reg := tools.NewRegistry()
+	if err := RegisterAll(reg, reader); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := reg.Lookup("list_resources")
+	if !ok {
+		t.Fatal("list_resources unavailable")
+	}
+	return tool
 }

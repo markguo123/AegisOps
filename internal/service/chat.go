@@ -51,14 +51,15 @@ const (
 
 // ChatToolCallView 是工具调用在事件中的展示视图。
 type ChatToolCallView struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments,omitempty"`
-	Risk      string         `json:"risk,omitempty"`
-	Result    string         `json:"result,omitempty"`
-	Summary   string         `json:"summary,omitempty"`
-	Ok        *bool          `json:"ok,omitempty"` // nil=旧客户端/旧会话无此字段，前端回退正则兜底
-	Truncated bool           `json:"truncated,omitempty"`
-	Data      any            `json:"data,omitempty"` // 结构化结果（仅 UI 回放展示，不参与 LLM 载荷）
+	ResultStatus string         `json:"resultStatus,omitempty"`
+	Name         string         `json:"name"`
+	Arguments    map[string]any `json:"arguments,omitempty"`
+	Risk         string         `json:"risk,omitempty"`
+	Result       string         `json:"result,omitempty"`
+	Summary      string         `json:"summary,omitempty"`
+	Ok           *bool          `json:"ok,omitempty"` // nil=旧客户端/旧会话无此字段，前端回退正则兜底
+	Truncated    bool           `json:"truncated,omitempty"`
+	Data         any            `json:"data,omitempty"` // 结构化结果（仅 UI 回放展示，不参与 LLM 载荷）
 	// P7.4：工具结果同源（ADR-034），随 tool-response 一并下发（旧客户端兼容）。
 	DurationMs  int64  `json:"durationMs,omitempty"`
 	DisplayType string `json:"displayType,omitempty"`
@@ -577,10 +578,11 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	if req.UserID != "" && !req.AllowAnySession && sess.UserID != req.UserID {
 		return nil, fmt.Errorf("%w: session %s", session.ErrForbidden, req.SessionID)
 	}
-	if req.UserID != "" && req.ApprovalContext != sess.ApprovalContext {
+	if sess.ToolContractVersion != tools.CatalogVersion || req.UserID != "" && req.ApprovalContext != sess.ApprovalContext {
 		sess.ApprovalGrants = nil
 		sess.ApprovedWrites = nil
 		sess.ApprovalContext = req.ApprovalContext
+		sess.ToolContractVersion = tools.CatalogVersion
 	}
 	// P6.1：本轮装配统一用生效配置，配置中心改模型后下一轮立即生效。
 	cfg, err := s.effectiveConfig(ctx)
@@ -616,9 +618,12 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	// 本轮运行的 turn/step 作用域要在工具装配前创建：Skill 观测回调要用它补关联字段。
 	scope := &runScope{sessID: sess.ID}
 	reg := tools.NewRegistry()
+	disabled := map[string]bool{}
+	for _, name := range cfg.Agent.DisabledTools {
+		disabled[strings.TrimSpace(name)] = true
+	}
 	if err := k8stools.RegisterAllWithOptions(reg, reader, k8stools.RegisterOptions{
-		SecretAccess:       cfg.Agent.Secret.Access,
-		SecretReadApproval: config.SecretReadApprovalAlways,
+		SecretAccess: cfg.Agent.Secret.Access, Cluster: sess.Cluster, Disabled: disabled,
 	}); err != nil {
 		return nil, err
 	}
@@ -627,7 +632,7 @@ func (s *chatService) Chat(ctx context.Context, req ChatRequest, respond <-chan 
 	scanOpts := chatScanOptions(cfg)
 	scanOpts.Attribution.ClusterID = sess.Cluster
 	scanOpts.Attribution.Actor = req.UserID
-	for _, dt := range tools.NewDiagnosisTools(s.scanFactory(), scanOpts) {
+	for _, dt := range tools.NewDiagnosisTools(s.scanFactory(), scanOpts, disabled) {
 		if err := reg.Register(dt); err != nil {
 			return nil, err
 		}
@@ -1145,20 +1150,21 @@ func translateEvent(m agent.Message) (ChatEvent, bool) {
 			return ChatEvent{
 				Type: ChatEventToolResponse,
 				Tool: &ChatToolCallView{
-					Name:        toString(mm["name"]),
-					Result:      toString(mm["text"]),
-					Summary:     toString(mm["summary"]),
-					Ok:          boolPtr(mm["ok"]),
-					Truncated:   toBool(mm["truncated"]),
-					Data:        mm["data"],
-					Risk:        toString(mm["risk"]),
-					DurationMs:  toInt64(mm["durationMs"]),
-					DisplayType: toString(mm["displayType"]),
-					Command:     toString(mm["command"]),
-					Stdout:      toString(mm["stdout"]),
-					Stderr:      toString(mm["stderr"]),
-					ExitCode:    int(toInt64(mm["exitCode"])),
-					ErrorCode:   toString(mm["errorCode"]),
+					Name:         toString(mm["name"]),
+					ResultStatus: toString(mm["resultStatus"]),
+					Result:       toString(mm["text"]),
+					Summary:      toString(mm["summary"]),
+					Ok:           boolPtr(mm["ok"]),
+					Truncated:    toBool(mm["truncated"]),
+					Data:         mm["data"],
+					Risk:         toString(mm["risk"]),
+					DurationMs:   toInt64(mm["durationMs"]),
+					DisplayType:  toString(mm["displayType"]),
+					Command:      toString(mm["command"]),
+					Stdout:       toString(mm["stdout"]),
+					Stderr:       toString(mm["stderr"]),
+					ExitCode:     int(toInt64(mm["exitCode"])),
+					ErrorCode:    toString(mm["errorCode"]),
 				},
 			}, true
 		}

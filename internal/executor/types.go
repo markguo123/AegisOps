@@ -18,23 +18,33 @@ import (
 
 // Result 是一次命令执行的结果。
 type Result struct {
-	PodTarget                  *PodExecTarget `json:"podTarget,omitempty"`
-	ExecutionLocation          string         `json:"executionLocation,omitempty"`
-	DiagnosticRule             string         `json:"diagnosticRule,omitempty"`
-	TimedOut                   bool           `json:"timedOut,omitempty"`
-	RemoteTerminationConfirmed bool           `json:"remoteTerminationConfirmed"`
-	PlanFingerprint            string         `json:"planFingerprint,omitempty"`
-	DurationMs                 int64          `json:"durationMs,omitempty"`
-	Command                    string         `json:"command"`
-	Stdout                     string         `json:"stdout,omitempty"`
-	Stderr                     string         `json:"stderr,omitempty"`
-	ExitCode                   int            `json:"exitCode"`
-	Truncated                  bool           `json:"truncated,omitempty"`
-	StreamTimeout              bool           `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
+	SubmissionStatus           string              `json:"submissionStatus,omitempty"`
+	SymptomStatus              string              `json:"symptomStatus,omitempty"`
+	VerificationTarget         *VerificationTarget `json:"verificationTarget,omitempty"`
+	PodTarget                  *PodExecTarget      `json:"podTarget,omitempty"`
+	ExecutionLocation          string              `json:"executionLocation,omitempty"`
+	DiagnosticRule             string              `json:"diagnosticRule,omitempty"`
+	TimedOut                   bool                `json:"timedOut,omitempty"`
+	RemoteTerminationConfirmed bool                `json:"remoteTerminationConfirmed"`
+	PlanFingerprint            string              `json:"planFingerprint,omitempty"`
+	DurationMs                 int64               `json:"durationMs,omitempty"`
+	Command                    string              `json:"command"`
+	Stdout                     string              `json:"stdout,omitempty"`
+	Stderr                     string              `json:"stderr,omitempty"`
+	ExitCode                   int                 `json:"exitCode"`
+	Truncated                  bool                `json:"truncated,omitempty"`
+	StreamTimeout              bool                `json:"streamTimeout,omitempty"` // 流式命令（logs -f / get -w）超时后捕获的部分输出
 	// NoMatch 表示只读组合里的过滤阶段没有匹配（如 grep 退出码 1 且无输出）：
 	// 这是"没有匹配结果"，不是集群故障，不能被当成查询失败。
 	NoMatch      bool           `json:"noMatch,omitempty"`
 	Verification map[string]any `json:"verification,omitempty"` // 写操作执行后的状态核对
+}
+
+type VerificationTarget struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+	Operation string `json:"operation"`
 }
 
 type PodExecTarget struct {
@@ -96,6 +106,7 @@ type Options struct {
 
 // ObjectRef 定位一个集群对象（存在性检查与执行后校验共用）。
 type ObjectRef struct {
+	UID        string
 	APIVersion string
 	Kind       string
 	Namespace  string
@@ -166,8 +177,9 @@ const (
 
 // VerifyRequest 是执行后就绪校验请求。
 type VerifyRequest struct {
-	Ref     ObjectRef
-	Timeout time.Duration // <=0 取默认 30s
+	ExpectedGeneration int64
+	Ref                ObjectRef
+	Timeout            time.Duration // <=0 取默认 30s
 }
 
 // VerifyResult 是就绪判定结论；未就绪时附带最近事件，便于模型继续排查。

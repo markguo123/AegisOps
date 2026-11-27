@@ -107,6 +107,26 @@ func CollectionQuality(snap *model.ClusterSnapshot, opts model.ScanOptions, logT
 		q.CriticalGaps = append(q.CriticalGaps, "snapshot 缺失：无法判定采集范围")
 		return q
 	}
+	if opts.DiagnosticTarget != nil {
+		q.Planned = snap.DiagnosticReads + len(logTargets)
+		q.Failed = len(snap.CollectionErrors)
+		q.Collected = max(0, q.Planned-q.Failed)
+		if q.Planned > 0 {
+			q.Coverage = float64(q.Collected) / float64(q.Planned)
+		}
+		if q.Failed > 0 {
+			q.Integrity = model.IntegrityPartial
+		}
+		for _, failure := range snap.CollectionErrors {
+			q.Errors = append(q.Errors, fmt.Sprintf("%s: %s", failure.Operation, clipMsg(failure.Message)))
+		}
+		if opts.DiagnosticTarget.Kind == "Node" {
+			q.MissingData = append(q.MissingData, "Node diagnosis covers the Node object; Pod and event evidence is outside this collection scope.")
+		} else if !opts.CollectEvents {
+			q.MissingData = append(q.MissingData, "Events were disabled for this collection.")
+		}
+		return q
+	}
 
 	accts := map[string]*kindAccount{}
 	ensure := func(kind string) *kindAccount {

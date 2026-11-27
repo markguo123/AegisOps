@@ -52,10 +52,10 @@ func (s AccessScope) policyCheck(name string, input json.RawMessage) error {
 			return s.target("*", false, action)
 		}
 	case cluster:
-	case name == "get_resources":
+	case isKindReadTool(name):
 		cluster = clusterKinds[strings.ToLower(stringArg(args, "kind"))]
 	case name == "get_events" || namespaceTools[name]:
-		if name == "get_logs" || name == "get_previous_logs" {
+		if name == "get_logs" {
 			action = authz.ActionLogs
 		}
 		if name == "get_secret_value" {

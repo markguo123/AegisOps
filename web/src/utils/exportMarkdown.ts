@@ -17,10 +17,11 @@ export interface ExportSessionMeta {
 }
 
 function toolLine(message: ChatMessage): string[] {
-  const status = message.ok === false ? '失败' : '成功'
+  const status = message.resultStatus === 'partial' ? '部分结果' : message.ok === false ? '失败' : message.ok === true ? '成功' : '未记录'
   const content = (message.content ?? '').replace(/<\/?untrusted_k8s_data\b[^>]*>/g, '').trim()
   const summary = (message.summary || content).trim().split('\n')[0].slice(0, 500)
   const lines = [`## 工具调用 · ${message.name ?? 'tool'}`, '', `- 状态：${status}`, `- 时间：${message.timestamp}`, summary ? `- 摘要：${summary}` : '']
+  if (message.contractVersion) lines.push(`- 工具契约版本：${message.contractVersion}`)
   if (message.errorCode) lines.push(`- 错误码：${message.errorCode}`)
   if (message.durationMs !== undefined) lines.push(`- 耗时：${message.durationMs}ms`)
   if (message.risk) lines.push(`- 风险：${message.risk}`)

@@ -50,7 +50,7 @@ func testChatServiceWithStore(t *testing.T, fl *scriptedLLM) (ChatService, store
 
 func TestChatServicePersistsTurnAndSteps(t *testing.T) {
 	fl := &scriptedLLM{responses: []*llm.ChatResponse{
-		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "get_resources", Arguments: json.RawMessage(`{"kind":"nodes"}`)}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "list_resources", Arguments: json.RawMessage(`{"kind":"Node"}`)}}},
 		{Content: "集群就绪，节点数正常", Usage: llm.TokenUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}},
 	}}
 	svc, st := testChatServiceWithStore(t, fl)

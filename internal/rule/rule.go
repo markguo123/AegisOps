@@ -166,6 +166,9 @@ func (e *engine) Evaluate(ctx context.Context, snapshot *model.ClusterSnapshot, 
 	}
 	var findings []*model.Finding
 	for _, r := range e.registry.Filtered(opts.RulesEnabled, opts.RulesDisabled) {
+		if opts.DiagnosticTarget != nil && !runsOnDiagnosticTarget(r.Name(), opts.DiagnosticTarget.Kind) {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return findings
@@ -528,4 +531,22 @@ func podEventEvidence(ctx *RuleContext, ref model.ResourceRef) []model.Evidence 
 		out = append(out, evidence.TruncateValue(evidence.Event(e), 2048))
 	}
 	return out
+}
+
+// Targeted collections omit objects required by cross-resource absence rules.
+func runsOnDiagnosticTarget(name, kind string) bool {
+	if kind == "Node" {
+		switch name {
+		case "NodeNotReady", "NodeDiskPressure", "NodeMemoryPressure", "NodePIDPressure":
+			return true
+		}
+		return false
+	}
+	switch name {
+	case "DeploymentReplica", "DeploymentProgressDeadline", "DeploymentOverReplicas", "StatefulSetReplica", "DaemonSetReplica",
+		"CrashLoopBackOff", "OOMKilled", "ImagePullBackOff", "PendingPod", "PodTerminating", "EvictedPod", "HighRestartCount",
+		"ContainerCreateError", "ContainerHealthTimeout", "Unhealthy", "FailedMount":
+		return true
+	}
+	return false
 }

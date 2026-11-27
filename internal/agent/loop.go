@@ -106,7 +106,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 		req := llm.ChatRequest{Messages: msgs}
 		req.MaxTokens = a.OutputTokens
 		if mode == "native" {
-			req.Tools = a.Tools.Schemas()
+			req.Tools = a.Tools.SchemasFor(a.AccessScope)
 		} else {
 			req.JSONMode = true
 		}
@@ -293,7 +293,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			// 工具卡从开始到结果共用同一个 tool_call_id；重试会产生新的 ID。
 			flowTool := &sse.ToolCall{
 				ToolCallID: call.ID, TurnID: a.turn.ID, StepID: toolStep.ID,
-				MessageID: a.flowLastMessageID, Name: call.Name,
+				MessageID: a.flowLastMessageID, Name: call.Name, ContractVersion: tools.CatalogVersion,
 				Params: string(safeCallArgs), Status: sse.ToolStarted,
 				Risk: risk, StartedAt: &started,
 			}
@@ -323,10 +323,10 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				readonly = tool.IsReadOnly(call.Arguments) && !a.toolHasShell(tool, call.Arguments)
 			}
 			feedback := failureFeedback(tr, readonly)
-			code := tools.Present(tr).ErrorCode
+			presentation := tools.Present(tr)
+			code := presentation.ErrorCode
 			retryableFailures[failureKey] = readonly && (code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable)
 			durationMs := time.Since(started).Milliseconds()
-			presentation := tools.Present(tr)
 			ok := presentation.Ok
 			// P7.4：摘要/形态/耗时/风险在本次执行时一次性计算，事件流与落库共用。
 			summary := a.redactSensitive(tools.ToolSummary(tr.Text))
@@ -363,6 +363,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 					flowTool.Status = sse.ToolFailed
 				}
 			}
+			flowTool.ResultStatus = presentation.Status
 			flowTool.Ok = &ok
 			flowTool.Result = truncateText(a.redactSensitive(tr.Text), 2000)
 			flowTool.Summary = summary
@@ -396,14 +397,14 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 			safeText = a.redactSensitive(safeText)
 			toolContent, sessionContent := text, safeText
 			var observation *session.PodObservation
-			if ok && toolExecuted && call.Name == "get_pod" {
+			if ok && toolExecuted && call.Name == "get_resource" {
 				observation = a.podObservation(safeData)
 			}
 			if mode == "native" {
 				msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: call.ID, Content: toolContent})
 				answered[call.ID] = true
 				a.Session.AddMessage(session.Message{
-					Role: "tool", Type: "tool-call-response", Name: call.Name, ToolCallID: call.ID,
+					Role: "tool", Type: "tool-call-response", Name: call.Name, ContractVersion: tools.CatalogVersion, ResultStatus: presentation.Status, ToolCallID: call.ID,
 					Content: sessionContent, Arguments: safeCallArgs, Data: safeData, Ok: &ok,
 					PodObservation: observation,
 					Summary:        summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
@@ -415,7 +416,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				sessionObs := fmt.Sprintf("工具 %s 返回：\n%s", call.Name, sessionContent)
 				msgs = append(msgs, llm.Message{Role: "user", Content: modelObs})
 				a.Session.AddMessage(session.Message{
-					Role: "user", Type: "tool-call-response", Name: call.Name,
+					Role: "user", Type: "tool-call-response", Name: call.Name, ContractVersion: tools.CatalogVersion, ResultStatus: presentation.Status,
 					Content: a.redactSensitive(sessionObs), Arguments: safeCallArgs, Data: safeData, Ok: &ok,
 					PodObservation: observation,
 					Summary:        summary, DisplayType: displayType, DurationMs: durationMs, Risk: risk,
@@ -424,7 +425,7 @@ func (a *Agent) Chat(ctx context.Context, query string) (string, llm.TokenUsage,
 				})
 			}
 			a.EmitCritical(Message{Source: SourceAgent, Type: MessageTypeToolCallResponse, Payload: map[string]any{
-				"name": call.Name, "text": safeText, "truncated": safeTruncated, "ok": ok,
+				"name": call.Name, "resultStatus": presentation.Status, "text": safeText, "truncated": safeTruncated, "ok": ok,
 				"summary": summary, "data": safeData, "durationMs": durationMs, "risk": risk,
 				"displayType": displayType, "errorCode": presentation.ErrorCode,
 				"command": safeCommand, "stdout": safeStdout,
@@ -994,12 +995,17 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	executionStarted := false
 	defer func() {
 		if !executionStarted {
-			a.audit(ctx, audit.ActionToolCallResponse, map[string]any{"name": call.Name, "status": "not_executed"})
+			a.audit(ctx, audit.ActionToolCallResponse, map[string]any{"name": call.Name, "contract_version": tools.CatalogVersion, "tool_call_id": call.ID, "status": "not_executed"})
 		}
 	}()
 	t, ok := a.Tools.Lookup(call.Name)
 	if !ok {
 		return tools.ResultError("unknown tool: " + call.Name)
+	}
+	if validator, ok := t.(tools.ArgumentValidator); ok {
+		if err := validator.ValidateArguments(call.Arguments); err != nil {
+			return tools.ResultErrorWithCode(tools.ErrorInvalidArgument, err.Error())
+		}
 	}
 	if a.decisionUnresolved {
 		return tools.ResultError("USER_DECISION_UNRESOLVED: stop this task and report the unanswered decision")
@@ -1015,7 +1021,7 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	a.EmitCritical(Message{Source: SourceAgent, Type: MessageTypeToolCallRequest, Payload: ToolCallEvent{
 		Name: call.Name, Arguments: safeArgsView, Risk: string(t.Risk(call.Arguments)),
 	}})
-	a.audit(ctx, audit.ActionToolCallRequest, map[string]any{"name": call.Name, "arguments": safeArgsView})
+	a.audit(ctx, audit.ActionToolCallRequest, map[string]any{"name": call.Name, "contract_version": tools.CatalogVersion, "tool_call_id": call.ID, "arguments": safeArgsView})
 	if err := a.scopeCheck(ctx, call); err != nil {
 		if call.Name == "get_secret_value" {
 			a.flowNotice(ctx, sse.NoticeWarning, "SECRET_ACCESS_DENIED", "你没有权限读取该 namespace 下的 Secret，请联系管理员授权。")
@@ -1264,19 +1270,20 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall, batchApprove
 	if err != nil {
 		tr = tools.ResultError(err.Error())
 	}
+	presentation := tools.Present(tr)
 	outcomeUnknown := false
-	if !tools.Present(tr).Ok && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
-		code := tools.Present(tr).ErrorCode
-		if code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable || code == tools.ErrorToolFailed {
+	if !presentation.Ok && (!t.IsReadOnly(call.Arguments) || a.toolHasShell(t, call.Arguments)) {
+		code := presentation.ErrorCode
+		if code == tools.ErrorTimeout || code == tools.ErrorClusterUnavailable || code == tools.ErrorToolFailed || code == tools.ErrorSubmissionUnknown {
 			a.unknownWrite = true
 			outcomeUnknown = true
 		}
 	}
 	a.recordSensitiveValues(tr.SensitiveValues)
-	hasErr := !tools.Present(tr).Ok
+	hasErr := !presentation.Ok
 	responseAudit := map[string]any{
 		// readonly/risk 让四期审计能把非只读工具响应归类为 RESOURCE_MUTATION（P1.11）。
-		"name": call.Name, "truncated": tr.Truncated, "error": hasErr,
+		"name": call.Name, "contract_version": tools.CatalogVersion, "tool_call_id": call.ID, "result_status": presentation.Status, "truncated": tr.Truncated, "error": hasErr,
 		"readonly": t.IsReadOnly(call.Arguments), "risk": string(t.Risk(call.Arguments)),
 	}
 	if outcomeUnknown {
@@ -1387,7 +1394,7 @@ func (a *Agent) scopeCheck(ctx context.Context, call llm.ToolCall) error {
 	if checked.Policy != nil {
 		return a.Tools.Authorize(checked, call.Name, call.Arguments)
 	}
-	return checked.Check(call.Name, call.Arguments)
+	return a.Tools.AuthorizeLegacy(checked, call.Name, call.Arguments)
 }
 
 // collectSecretValues 在审批通过后、工具执行前逐个索取 $ASK 的 Secret 明文值（三期 R4.5）。

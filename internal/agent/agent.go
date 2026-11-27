@@ -217,10 +217,7 @@ func New(opts Options) *Agent {
 	}
 	// Each run owns its reader and references; never modify a shared registry.
 	if opts.Tools != nil {
-		a.Tools = tools.NewRegistry()
-		for _, tool := range opts.Tools.All() {
-			_ = a.Tools.Register(tool)
-		}
+		a.Tools = opts.Tools.Clone()
 		disabledReader := false
 		for _, name := range opts.DisabledTools {
 			if name == "read_tool_result" {
@@ -237,7 +234,15 @@ func New(opts Options) *Agent {
 	}
 	if a.Tools != nil {
 		a.Tools.Remove("ask_user_question")
-		_ = a.Tools.Register(&questionTool{agent: a})
+		disabled := false
+		for _, name := range opts.DisabledTools {
+			if strings.TrimSpace(name) == "ask_user_question" {
+				disabled = true
+			}
+		}
+		if !disabled {
+			_ = a.Tools.Register(&questionTool{agent: a})
+		}
 	}
 	if a.ApprovalPolicy == nil {
 		// 未显式指定时默认 strict + 要求审批，与 v1 行为一致。

@@ -3,43 +3,50 @@ package k8s
 import (
 	"context"
 	"encoding/json"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/tools"
 )
 
-// logsTool 实现 get_logs / get_previous_logs（previous=true 时取上次容器日志）。
 type logsTool struct {
 	base
-	previous bool
+	previousDisabled bool
 }
 
-func (t *logsTool) Name() string {
-	if t.previous {
-		return "get_previous_logs"
-	}
-	return "get_logs"
-}
-func (t *logsTool) Description() string {
-	if t.previous {
-		return "获取 Pod 容器上一次崩溃前的日志（--previous），用于分析 CrashLoopBackOff/OOMKilled 根因。"
-	}
-	return "获取 Pod 容器日志（尾部截断），用于分析运行期错误。"
+func (*logsTool) Name() string { return "get_logs" }
+func (*logsTool) Description() string {
+	return "Read current or previous container logs. Specify the instance explicitly."
 }
 func (t *logsTool) InputSchema() any {
-	return objSchema(map[string]any{
+	props := map[string]any{
 		"namespace":    strProp("命名空间"),
 		"pod":          strProp("Pod 名称"),
 		"container":    strProp("容器名（可选，单容器 Pod 可省略）"),
 		"tailLines":    intProp("日志尾部行数（默认 100）"),
 		"sinceSeconds": intProp("仅取最近 N 秒的日志（可选）"),
-	}, "namespace", "pod")
+	}
+	instances := []string{"current"}
+	if !t.previousDisabled {
+		instances = append(instances, "previous")
+	}
+	props["instance"] = map[string]any{"type": "string", "enum": instances}
+	return objSchema(props, "namespace", "pod", "instance")
 }
 func (t *logsTool) Execute(ctx context.Context, input json.RawMessage) (tools.ToolResult, error) {
-	args, err := tools.ParseArgs(input, "namespace", "pod")
+	args, err := tools.ParseArgs(input, "namespace", "pod", "instance")
 	if err != nil {
-		return tools.ResultError(err.Error()), nil
+		return tools.ResultErrorWithCode(tools.ErrorInvalidArgument, err.Error()), nil
+	}
+	instance := args["instance"]
+	if instance != "current" && instance != "previous" {
+		return tools.ResultErrorWithCode(tools.ErrorInvalidArgument, "instance must be current or previous"), nil
+	}
+	if instance == "previous" && t.previousDisabled {
+		return tools.ResultErrorWithCode(tools.ErrorUnsupported, "log instance is disabled"), nil
 	}
 	tail := int64(100)
 	if v := args["tailLines"]; v != "" {
@@ -57,23 +64,46 @@ func (t *logsTool) Execute(ctx context.Context, input json.RawMessage) (tools.To
 		}
 		since = &n
 	}
-	raw, err := t.reader.GetPodLogs(ctx, args["namespace"], args["pod"], args["container"], model.LogOptions{
+	observedAt := time.Now().UTC()
+	const maxBytes = 64 * 1024
+	options := model.LogOptions{
 		Container:    args["container"],
 		TailLines:    &tail,
 		SinceSeconds: since,
-		Previous:     t.previous,
-		MaxBytes:     64 * 1024,
+		Previous:     instance == "previous",
+		MaxBytes:     maxBytes,
 		MaxLineBytes: 0,
-	})
+	}
+	var raw []byte
+	var clipped bool
+	if source, ok := t.reader.(interface {
+		GetPodLogSample(context.Context, string, string, model.LogOptions) ([]byte, bool, error)
+	}); ok {
+		raw, clipped, err = source.GetPodLogSample(ctx, args["namespace"], args["pod"], options)
+	} else {
+		raw, err = t.reader.GetPodLogs(ctx, args["namespace"], args["pod"], args["container"], options)
+		clipped = len(raw) >= maxBytes
+	}
 	if err != nil {
-		return tools.ResultError(err.Error()), nil
+		if instance == "previous" && apierrors.IsBadRequest(err) &&
+			strings.Contains(err.Error(), "previous terminated container") && strings.Contains(err.Error(), "not found") {
+			return tools.ResultErrorWithCode("PREVIOUS_INSTANCE_NOT_FOUND", err.Error()), nil
+		}
+		return readError(err), nil
 	}
 	content := string(raw)
-	return tools.ToolResult{
-		Data: map[string]any{
-			"namespace": args["namespace"], "pod": args["pod"], "container": args["container"],
-			"previous": t.previous, "truncated": len(raw) >= 64*1024,
-		},
-		Text: content,
-	}, nil
+	lines := strings.Count(content, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		lines++
+	}
+	data := map[string]any{
+		"namespace": args["namespace"], "pod": args["pod"], "container": args["container"],
+		"previous": instance == "previous", "instance": instance, "truncated": clipped,
+		"collectedAt": observedAt, "tailLines": tail, "sinceSeconds": since, "maxBytes": maxBytes,
+		"returnedBytes": len(raw), "returnedLines": lines, "empty": len(raw) == 0,
+	}
+	if clipped {
+		data["limitReached"] = "byte_budget"
+	}
+	return tools.ToolResult{Data: data, Text: content, Truncated: clipped}, nil
 }

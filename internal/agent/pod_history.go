@@ -42,7 +42,7 @@ func (a *Agent) podHistory(ctx context.Context, messages []session.Message) ([]s
 	}
 	history := make([]session.Message, 0, len(messages))
 	for _, message := range messages {
-		if message.Type != "pod-followup" && (message.Name != "get_pod" || message.Type != "tool-call-response") {
+		if message.Type != "pod-followup" && !(message.Type == "tool-call-response" && (message.Name == "get_pod" || message.Name == "get_resource" && message.PodObservation != nil)) {
 			history = append(history, message)
 		}
 	}
@@ -83,6 +83,6 @@ func (a *Agent) authorizePodObservation(ctx context.Context, pod *session.PodObs
 	if a.AccessScope == nil || a.AccessScope.Policy == nil || pod.Cluster != a.AccessScope.Policy.ClusterID {
 		return false
 	}
-	args, _ := json.Marshal(map[string]string{"namespace": pod.Namespace, "name": pod.Name})
-	return a.scopeCheck(ctx, llm.ToolCall{Name: "get_pod", Arguments: args}) == nil
+	args, _ := json.Marshal(map[string]string{"kind": "Pod", "namespace": pod.Namespace, "name": pod.Name})
+	return a.scopeCheck(ctx, llm.ToolCall{Name: "get_resource", Arguments: args}) == nil
 }

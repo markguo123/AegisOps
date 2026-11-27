@@ -2,14 +2,16 @@ package model
 
 // ScanMeta 是每次扫描的概览信息，写入所有报告。
 type ScanMeta struct {
-	ToolVersion   string `json:"toolVersion"`
-	Cluster       string `json:"cluster"`
-	ServerVersion string `json:"serverVersion"`
-	ScanStartedAt string `json:"scanStartedAt"`
-	ScanEndedAt   string `json:"scanEndedAt"`
-	Duration      string `json:"duration"`
-	Namespace     string `json:"namespace,omitempty"`
-	Pod           string `json:"pod,omitempty"` // 单 Pod 目标扫描时非空
+	DiagnosticTarget   *ResourceRef  `json:"diagnosticTarget,omitempty"`
+	DiagnosticSubjects []ResourceRef `json:"diagnosticSubjects,omitempty"`
+	ToolVersion        string        `json:"toolVersion"`
+	Cluster            string        `json:"cluster"`
+	ServerVersion      string        `json:"serverVersion"`
+	ScanStartedAt      string        `json:"scanStartedAt"`
+	ScanEndedAt        string        `json:"scanEndedAt"`
+	Duration           string        `json:"duration"`
+	Namespace          string        `json:"namespace,omitempty"`
+	Pod                string        `json:"pod,omitempty"` // 单 Pod 目标扫描时非空
 }
 
 // ClusterSummary 是报告"集群资源汇总"节的数据（M1 垂直切片即可见）。

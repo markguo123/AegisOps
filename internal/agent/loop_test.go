@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k8s-ai/k8s-ai/internal/audit"
 	"github.com/k8s-ai/k8s-ai/internal/llm"
 	"github.com/k8s-ai/k8s-ai/internal/model"
 	"github.com/k8s-ai/k8s-ai/internal/session"
@@ -846,4 +847,42 @@ func containsMemoryNote(messages []llm.Message, note string) bool {
 		}
 	}
 	return false
+}
+
+func TestPartialResultKeepsContractAndEvidence(t *testing.T) {
+	executed := 0
+	result := &tools.ToolResult{Data: map[string]any{"kind": "Pod", "partial": true, "eventsError": "RBAC_DENIED"}}
+	model := &fakeLLM{responses: []*llm.ChatResponse{
+		toolCallResp(call("partial", "get_resource", `{"kind":"Pod","name":"app","namespace":"team"}`)),
+		{Content: "Pod observed; events unavailable"},
+	}}
+	ag, sess := testAgent(t, model, []tools.Tool{&stubTool{name: "get_resource", readonly: true, executed: &executed, result: result}}, nil)
+	recorder := &auditRecorder{}
+	ag.Recorder = recorder
+	if _, _, err := ag.Chat(context.Background(), "inspect app"); err != nil {
+		t.Fatal(err)
+	}
+	if executed != 1 {
+		t.Fatalf("calls=%d", executed)
+	}
+	if len(sess.Messages) < 2 {
+		t.Fatal("missing persisted result")
+	}
+	stored := sess.Messages[1]
+	if stored.ResultStatus != tools.ToolStatusPartial || stored.ContractVersion != tools.CatalogVersion || stored.Ok == nil || !*stored.Ok {
+		t.Fatalf("persisted result lost contract: %+v", stored)
+	}
+	found := false
+	for _, message := range model.captured[1] {
+		if strings.Contains(message.Content, "status=partial") && strings.Contains(message.Content, "RBAC_DENIED") {
+			found = true
+		}
+	}
+	payload, ok := recorder.payloadWith(audit.ActionToolCallResponse)
+	if !ok || payload["result_status"] != tools.ToolStatusPartial || payload["contract_version"] != tools.CatalogVersion || payload["tool_call_id"] != "partial" {
+		t.Fatalf("audit lost result contract: %v", payload)
+	}
+	if !found {
+		t.Fatal("model did not receive the partial evidence")
+	}
 }

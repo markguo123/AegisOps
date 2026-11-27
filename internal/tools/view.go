@@ -30,6 +30,7 @@ const (
 	ErrorClusterUnavailable = "CLUSTER_UNAVAILABLE"
 	ErrorToolUnavailable    = "TOOL_UNAVAILABLE"
 	ErrorToolFailed         = "TOOL_ERROR"
+	ErrorSubmissionUnknown  = "SUBMISSION_UNKNOWN"
 	ErrorScopeDenied        = "SCOPE_DENIED"
 	ErrorPolicyDenied       = "POLICY_DENIED"
 	ErrorTargetIsolation    = "TARGET_ISOLATION_DENIED"
@@ -130,6 +131,10 @@ func Present(result ToolResult) ToolPresentation {
 					p.ErrorCode = ErrorToolUnavailable
 				}
 				return p
+			}
+			partial, _ := data["partial"].(bool)
+			if partial || data["status"] == "partial" {
+				p.Status = ToolStatusPartial
 			}
 			if raw, exists := data["error"]; exists {
 				message := strings.TrimSpace(toString(raw))

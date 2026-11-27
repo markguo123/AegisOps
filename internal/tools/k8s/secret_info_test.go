@@ -70,43 +70,19 @@ func TestSecretInfoRegisteredRegardlessOfSecretMode(t *testing.T) {
 	}
 }
 
-// TestSecretReadApprovalModes 锁定 always/auto 两种审批决策：
-// always 必须真人审批且不能被 SensitiveAuto 放行；auto 是显式的敏感读取授权。
-func TestSecretReadApprovalModes(t *testing.T) {
+func TestSecretReadRequiresHumanApproval(t *testing.T) {
 	reader := &secretCapableReader{Reader: testReader(), secretValueReaderStub: &secretValueReaderStub{}}
-
-	always := tools.NewRegistry()
-	if err := RegisterAllWithOptions(always, reader, RegisterOptions{SecretAccess: "read_on_demand", SecretReadApproval: "always"}); err != nil {
+	registry := tools.NewRegistry()
+	if err := RegisterAllWithOptions(registry, reader, RegisterOptions{SecretAccess: "read_on_demand"}); err != nil {
 		t.Fatal(err)
 	}
-	tool, ok := always.Lookup("get_secret_value")
+	tool, ok := registry.Lookup("get_secret_value")
 	if !ok {
-		t.Fatal("read_on_demand 应注册 get_secret_value")
+		t.Fatal("missing Secret value tool")
 	}
 	mandatory, _ := tool.(tools.MandatoryHumanApproval)
-	if mandatory == nil || !mandatory.RequiresHumanApproval(nil) {
-		t.Fatal("always 模式每次读取都必须真人审批")
-	}
-	if sensitive, _ := tool.(tools.SensitiveReadAware); sensitive != nil && sensitive.SensitiveReadAuto(nil) {
-		t.Fatal("always 模式不得被敏感读取自动放行覆盖")
-	}
-
-	auto := tools.NewRegistry()
-	if err := RegisterAllWithOptions(auto, reader, RegisterOptions{SecretAccess: "read_on_demand", SecretReadApproval: "auto"}); err != nil {
-		t.Fatal(err)
-	}
-	autoTool, ok := auto.Lookup("get_secret_value")
-	if !ok {
-		t.Fatal("auto 模式仍应注册 get_secret_value")
-	}
-	if mandatory, _ := autoTool.(tools.MandatoryHumanApproval); mandatory == nil || !mandatory.RequiresHumanApproval(nil) {
-		t.Fatal("兼容 auto 配置仍必须逐次确认")
-	}
-	sensitive, _ := autoTool.(tools.SensitiveReadAware)
-	if sensitive == nil || sensitive.SensitiveReadAuto(nil) {
-		t.Fatal("兼容 auto 配置不能绕过用户确认")
-	}
-	if autoTool.IsReadOnly(nil) {
-		t.Fatal("auto 模式仍是敏感读取，不能改成普通只读")
+	sensitive, _ := tool.(tools.SensitiveReadAware)
+	if mandatory == nil || !mandatory.RequiresHumanApproval(nil) || sensitive == nil || sensitive.SensitiveReadAuto(nil) || tool.IsReadOnly(nil) {
+		t.Fatal("Secret reads must require fresh human approval")
 	}
 }

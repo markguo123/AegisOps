@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -72,29 +73,44 @@ func (r *Runner) Verify(ctx context.Context, req VerifyRequest) (VerifyResult, e
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				// 真实 client 在 ctx 取消时把取消当成错误返回：这里归入"未就绪"结论，
 				// 而不是让调用方拿到一个裸 error（创建事实不能因为等待超时而丢失）。
-				return r.verifyResult(ref, cancelObservation(last), true), nil
+				return r.verifyResult(ctx, ref, cancelObservation(last), true), nil
 			case apierrors.IsNotFound(err):
 				if time.Now().After(deadline) {
-					return r.verifyResult(ref, observation{ready: false, reason: "集群里还没有该对象（可能被准入控制拒绝或已被删除）"}, true), nil
+					return r.verifyResult(ctx, ref, observation{ready: false, reason: "集群里还没有该对象（可能被准入控制拒绝或已被删除）"}, true), nil
 				}
 			default:
 				return VerifyResult{}, err
 			}
 		} else {
+			if ref.UID != "" && string(obj.GetUID()) != ref.UID {
+				return VerifyResult{APIVersion: ref.APIVersion, Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name, Reason: "对象 UID 已变化，无法验证本次提交"}, nil
+			}
+			if req.ExpectedGeneration > 0 && obj.GetGeneration() > req.ExpectedGeneration {
+				return VerifyResult{APIVersion: ref.APIVersion, Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name, Reason: "对象代际已变化，无法验证本次提交"}, nil
+			}
 			last = observe(obj)
+			if last.fields == nil {
+				last.fields = map[string]any{}
+			}
+			last.fields["uid"] = obj.GetUID()
+			last.fields["resourceVersion"] = obj.GetResourceVersion()
+			last.fields["generation"] = obj.GetGeneration()
+			if !last.ready && ref.UID == "" {
+				ref.UID = string(obj.GetUID())
+			}
 			if last.ready {
-				return r.verifyResult(ref, last, false), nil
+				return r.verifyResult(ctx, ref, last, false), nil
 			}
 		}
 		if time.Now().After(deadline) {
 			if last.reason == "" {
 				last = observation{ready: false, reason: "集群里还没有该对象（可能被准入控制拒绝或已被删除）"}
 			}
-			return r.verifyResult(ref, last, true), nil
+			return r.verifyResult(ctx, ref, last, true), nil
 		}
 		select {
 		case <-ctx.Done():
-			res := r.verifyResult(ref, cancelObservation(last), true)
+			res := r.verifyResult(ctx, ref, cancelObservation(last), true)
 			return res, nil
 		case <-time.After(DefaultVerifyInterval):
 		}
@@ -110,7 +126,7 @@ func cancelObservation(last observation) observation {
 }
 
 // verifyResult 组装结论：未就绪时附带最近事件（脱敏 + 截断）。
-func (r *Runner) verifyResult(ref ObjectRef, obs observation, timedOut bool) VerifyResult {
+func (r *Runner) verifyResult(ctx context.Context, ref ObjectRef, obs observation, timedOut bool) VerifyResult {
 	out := VerifyResult{
 		APIVersion: ref.APIVersion, Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name,
 		Ready: obs.ready, Reason: obs.reason, TimedOut: timedOut, Observations: obs.fields,
@@ -118,7 +134,9 @@ func (r *Runner) verifyResult(ref ObjectRef, obs observation, timedOut bool) Ver
 	if obs.ready {
 		return out
 	}
-	events, truncated := r.recentEvents(context.Background(), ref)
+	eventCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	events, truncated := r.recentEvents(eventCtx, ref)
 	out.Events = events
 	out.Truncated = truncated
 	return out
@@ -135,8 +153,12 @@ func (r *Runner) recentEvents(ctx context.Context, ref ObjectRef) ([]string, boo
 	if ns == "" {
 		ns = metav1.NamespaceDefault
 	}
+	selector := fields.Set{"involvedObject.kind": ref.Kind, "involvedObject.name": ref.Name}
+	if ref.UID != "" {
+		selector["involvedObject.uid"] = ref.UID
+	}
 	list, err := ch.dyn.Resource(eventsGVR).Namespace(ns).List(ctx, metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("involvedObject.kind=%s,involvedObject.name=%s", ref.Kind, ref.Name),
+		FieldSelector: selector.AsSelector().String(), Limit: 200,
 	})
 	if err != nil {
 		return nil, false
@@ -168,11 +190,11 @@ func (r *Runner) recentEvents(ctx context.Context, ref ObjectRef) ([]string, boo
 		found = append(found, event{ts: ts, text: fmt.Sprintf("%s %s%s: %s", eventType, reason, suffix, truncateRunes(redactor.Redact(message), maxEventRunes))})
 	}
 	if len(found) == 0 {
-		return nil, false
+		return nil, list.GetContinue() != ""
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].ts.After(found[j].ts) })
-	truncated := len(found) > maxEventSamples
-	if truncated {
+	truncated := len(found) > maxEventSamples || list.GetContinue() != ""
+	if len(found) > maxEventSamples {
 		found = found[:maxEventSamples]
 	}
 	// 先按时间倒序取最近若干条，再转回时间正序输出，便于阅读。
@@ -187,7 +209,8 @@ func (r *Runner) recentEvents(ctx context.Context, ref ObjectRef) ([]string, boo
 func sameInvolvedObject(item *unstructured.Unstructured, ref ObjectRef) bool {
 	kind, _, _ := unstructured.NestedString(item.Object, "involvedObject", "kind")
 	name, _, _ := unstructured.NestedString(item.Object, "involvedObject", "name")
-	return strings.EqualFold(kind, ref.Kind) && name == ref.Name
+	uid, _, _ := unstructured.NestedString(item.Object, "involvedObject", "uid")
+	return strings.EqualFold(kind, ref.Kind) && name == ref.Name && (ref.UID == "" || uid == ref.UID)
 }
 
 // observe 按 Kind 读取关键状态并判定是否就绪。

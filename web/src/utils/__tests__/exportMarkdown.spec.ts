@@ -69,6 +69,24 @@ describe('buildSessionMarkdown（P7.5 导出）', () => {
   })
 })
 
+it('exports a partial result with its contract and safe evidence', () => {
+  const md = buildSessionMarkdown([{
+    role: 'tool',
+    type: 'tool-call-response',
+    name: 'get_resource',
+    ok: true,
+    resultStatus: 'partial',
+    contractVersion: '4.0.5',
+    content: '{"kind":"Pod","eventsError":"RBAC_DENIED"}',
+    data: { ModelOnly: 'never-export' },
+    timestamp: '2026-11-27T07:00:00Z',
+  }], { id: 's1' })
+  expect(md).toContain('- 状态：部分结果')
+  expect(md).toContain('4.0.5')
+  expect(md).toContain('RBAC_DENIED')
+  expect(md).not.toContain('never-export')
+})
+
 describe('markdownFileName', () => {
   it('生成 aegisops-<会话名>-<时间>.md 并过滤非法字符', () => {
     expect(markdownFileName('default 体检 / prod:01', new Date('2026-10-15T09:05:00'))).toBe(

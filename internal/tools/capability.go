@@ -11,12 +11,11 @@ import (
 
 // Capability describes operation facts. It contains no principal or grant rules.
 type Capability struct {
-	Domain       string
-	Resource     string
-	Action       string
-	KindArgument bool
-	ClusterRead  bool
-	Command      bool
+	Domain      string
+	Resource    string
+	Action      string
+	ClusterRead bool
+	Command     bool
 }
 type CapabilityProvider interface{ Capability() Capability }
 type OperationFacts struct {
@@ -61,22 +60,6 @@ func (c Capability) Facts(input json.RawMessage, scope AccessScope) (OperationFa
 	cluster := c.ClusterRead
 	if c.ClusterRead && c.Resource == "" && stringArg(args, "namespace") != "" {
 		cluster = false
-	}
-	if c.KindArgument {
-		kind := strings.ToLower(stringArg(args, "kind"))
-		g, res, ok := kubectlResourceForKind(kind)
-		if !ok && scope.ResolveResource != nil && scope.RequestContext != nil {
-			var e error
-			g, res, cluster, e = scope.ResolveResource(scope.RequestContext, kind)
-			if e != nil {
-				return OperationFacts{}, e
-			}
-			ok = true
-		}
-		if !ok {
-			return OperationFacts{}, fmt.Errorf("UNSUPPORTED: resource identity cannot be resolved")
-		}
-		resource = g + "/" + res
 	}
 	if resource != "" {
 		g, res, ok := strings.Cut(resource, "/")
@@ -132,18 +115,6 @@ func (t *getSkillTool) Capability() Capability   { return Capability{Domain: "lo
 func (t *scanClusterTool) Capability() Capability {
 	return Capability{Domain: "kubernetes", ClusterRead: true}
 }
-func (t *scanPodTool) Capability() Capability {
-	return Capability{Domain: "kubernetes", Action: authz.ActionRead}
-}
-func (t *diagnosePodTool) Capability() Capability {
-	return Capability{Domain: "kubernetes", Action: authz.ActionRead}
-}
-func (t *diagnoseWorkloadTool) Capability() Capability {
-	return Capability{Domain: "kubernetes", Action: authz.ActionRead}
-}
-func (t *diagnoseNodeTool) Capability() Capability {
-	return Capability{Domain: "kubernetes", Resource: "/nodes", ClusterRead: true}
-}
 
 // CommandFacts is only an input adapter for the legacy CLI path. Platform
 // kubectl uses request facts from its mandatory API channel instead.
@@ -181,6 +152,36 @@ func (r *Registry) Authorize(scope AccessScope, name string, input json.RawMessa
 	}
 	return fmt.Errorf("UNSUPPORTED: tool has no capability declaration")
 }
+
+// AuthorizeLegacy applies scope-only authorization to canonical read routes
+// for callers that do not have a platform EffectiveAccess.
+func (r *Registry) AuthorizeLegacy(scope AccessScope, name string, input json.RawMessage) error {
+	if !isKindReadTool(name) {
+		return scope.Check(name, input)
+	}
+	tool, _ := r.Lookup(name)
+	route, ok := tool.(OperationDescriber)
+	if !ok {
+		return fmt.Errorf("UNSUPPORTED: tool unavailable")
+	}
+	facts, err := route.OperationFacts(input)
+	if err != nil {
+		return err
+	}
+	if scope.IsAdmin || scope.ClusterScoped {
+		return nil
+	}
+	for _, target := range facts.Targets {
+		if target.ClusterScoped {
+			return scope.deny("cluster scoped read access")
+		}
+		if err := scope.checkNamespace(target.Namespace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func stringCommand(input json.RawMessage) string {
 	args, _ := ParseArgs(input, "command")
 	return args["command"]

@@ -150,7 +150,8 @@ type LogOptions struct {
 // ScanOptions is the CLI/Server/CronJob-shared execution contract passed to
 // service.ScanService.Run.
 type ScanOptions struct {
-	RequestCheck func(*http.Request) error `json:"-" mapstructure:"-"`
+	DiagnosticTarget *ResourceRef              `json:"-" mapstructure:"-"`
+	RequestCheck     func(*http.Request) error `json:"-" mapstructure:"-"`
 	// Kubernetes connection.
 	Kubeconfig string
 	Context    string

@@ -189,7 +189,12 @@ func (r *Runner) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, erro
 	}
 	got, err := res.Patch(ctx, name, types.ApplyPatchType, data, opts)
 	if err != nil {
-		return ApplyResult{}, applyError(err, obj.GetKind(), namespace, name, req.DryRun)
+		failure := applyError(err, obj.GetKind(), namespace, name, req.DryRun)
+		var status apierrors.APIStatus
+		if !req.DryRun && (!errors.As(err, &status) || status.Status().Code >= 500) {
+			return ApplyResult{}, &SubmissionUnknownError{cause: failure}
+		}
+		return ApplyResult{}, failure
 	}
 
 	out := ApplyResult{
@@ -210,7 +215,7 @@ func (r *Runner) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, erro
 		SecretKeyStatuses: secretStatuses,
 	}
 	if req.Verify && !req.DryRun {
-		vres, verr := r.Verify(ctx, VerifyRequest{Ref: ObjectRef{APIVersion: out.APIVersion, Kind: out.Kind, Namespace: out.Namespace, Name: out.Name}, Timeout: req.VerifyTimeout})
+		vres, verr := r.Verify(ctx, VerifyRequest{Ref: ObjectRef{APIVersion: out.APIVersion, Kind: out.Kind, Namespace: out.Namespace, Name: out.Name, UID: out.UID}, ExpectedGeneration: out.Generation, Timeout: req.VerifyTimeout})
 		if verr != nil {
 			out.Verify = &VerifyResult{APIVersion: out.APIVersion, Kind: out.Kind, Namespace: out.Namespace, Name: out.Name, Reason: fmt.Sprintf("就绪校验失败：%v", verr)}
 		} else {
@@ -342,6 +347,13 @@ func GenerateSecretValue(n int) (string, error) {
 }
 
 // applyError 把 apiserver 错误转成对模型友好的说明（保留原始错误用于审计）。
+// SubmissionUnknownError indicates that the executor sent a mutation but did
+// not receive a definitive result. Read the target before a new submission.
+type SubmissionUnknownError struct{ cause error }
+
+func (e *SubmissionUnknownError) Error() string { return e.cause.Error() }
+func (e *SubmissionUnknownError) Unwrap() error { return e.cause }
+
 func applyError(err error, kind, namespace, name string, dryRun bool) error {
 	subject := fmt.Sprintf("%s %s/%s", strings.ToLower(kind), namespace, name)
 	if namespace == "" {

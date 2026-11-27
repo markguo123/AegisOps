@@ -369,3 +369,32 @@ func TestCommitChatConflictRetrySafe(t *testing.T) {
 		t.Fatalf("chunk text=%q", text)
 	}
 }
+
+func TestPartialToolResultSurvivesSnapshot(t *testing.T) {
+	ctx := context.Background()
+	cs := chatStoreOf(t)
+	ok := true
+	tool := &sse.ToolCall{
+		ToolCallID: "partial", TurnID: "t1", Name: "get_resource", ItemOrder: 1,
+		Status: sse.ToolSucceeded, Ok: &ok, ResultStatus: "partial", ContractVersion: "4.0.5",
+		Data: map[string]any{"eventsError": "RBAC_DENIED"},
+	}
+	_, err := cs.CommitChat(ctx, ChatCommit{
+		CommandID: "partial-commit", SessionID: "s1",
+		Turn:   &session.Turn{ID: "t1", SessionID: "s1", Status: session.TurnRunning, Input: "inspect"},
+		Tools:  []*sse.ToolCall{tool},
+		Events: []sse.Event{sse.NewEvent("s1", "t1", sse.EventToolUpdated, sse.ToolUpdatedData{Tool: tool})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := cs.ChatSnapshot(ctx, "s1", 10)
+	if err != nil || len(snap.Items) != 1 {
+		t.Fatalf("missing tool snapshot: %+v, %v", snap, err)
+	}
+	stored := snap.Items[0].Tool
+	if stored == nil || stored.ContractVersion != tool.ContractVersion || stored.ResultStatus != tool.ResultStatus ||
+		stored.Data.(map[string]any)["eventsError"] != "RBAC_DENIED" {
+		t.Fatalf("partial result changed in replay: %+v", stored)
+	}
+}

@@ -130,9 +130,13 @@ func (a *Agent) resultForModel(ctx context.Context, call llm.ToolCall, tr tools.
 		previewBytes = max(previewBytes, 6*resultPageBytes+1024)
 	}
 	preview, truncated := tools.MarshalForLLM(tr, previewBytes)
+	presentation := tools.Present(tr)
+	if presentation.Status == tools.ToolStatusPartial {
+		preview = "Tool result status=partial.\n" + preview
+	}
 	if truncated {
 		// Preserve execution outcome even if the inline preview is only a few bytes.
-		preview = fmt.Sprintf("Tool result ok=%t.\n%s", tools.Present(tr).Ok, preview)
+		preview = fmt.Sprintf("Tool result ok=%t.\n%s", presentation.Ok, preview)
 	}
 	// Never spill a sensitive turn or spill the reader itself into a new result.
 	if !truncated || tr.ModelOnly != nil || a.hasSensitiveValues() || a.resultCache == nil || call.Name == "read_tool_result" {

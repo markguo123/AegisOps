@@ -46,6 +46,8 @@ export type ChatToolStatus =
   | 'unknown'
 
 export interface ChatToolCall {
+  contract_version?: string
+  result_status?: string
   tool_call_id: string
   turn_id: string
   step_id?: string

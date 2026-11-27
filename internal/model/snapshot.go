@@ -3,6 +3,7 @@ package model
 // ClusterSnapshot is the internal collection result of Phase 1.
 // It never enters the LLM or the report directly (ADR-002).
 type ClusterSnapshot struct {
+	DiagnosticReads     int                      `json:"-"`
 	ServerVersion       string                   `json:"serverVersion"`
 	CollectedAt         string                   `json:"collectedAt"`
 	Namespaces          []NamespaceInfo          `json:"namespaces"`

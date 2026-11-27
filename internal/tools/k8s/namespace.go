@@ -11,13 +11,6 @@ import (
 // get_namespace。
 type namespaceTool struct{ base }
 
-func (t *namespaceTool) Name() string { return "get_namespace" }
-func (t *namespaceTool) Description() string {
-	return "获取命名空间的状态（Active/Terminating）与标签。"
-}
-func (t *namespaceTool) InputSchema() any {
-	return objSchema(map[string]any{"name": strProp("命名空间名称")}, "name")
-}
 func (t *namespaceTool) Execute(ctx context.Context, input json.RawMessage) (tools.ToolResult, error) {
 	args, err := tools.ParseArgs(input, "name")
 	if err != nil {

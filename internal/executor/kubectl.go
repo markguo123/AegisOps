@@ -69,7 +69,7 @@ const exitShellDisabled = 126
 const shellDisabledHint = "shell 通道已由平台配置关闭（platform.exec.shell_enabled=false）：该实例不提供 bash，" +
 	"无法编译为安全受控执行计划的 Shell 命令不执行；已验证只读的管道与条件组合仍可使用。\n" +
 	"请改用单条不含 shell 语法的 kubectl 命令（例如 kubectl get pods -A -o json），" +
-	"过滤、统计交给结构化只读工具（scan_cluster / get_pod / get_deployment 等）。\n" +
+	"过滤、统计交给结构化只读工具（scan_cluster / get_resource / list_resources 等）。\n" +
 	"确实需要 shell 排障能力时，请让管理员改用默认交付镜像（内置 bash 与 kubectl）" +
 	"或把 platform.exec.shell_enabled 置为 true 后重启服务。"
 

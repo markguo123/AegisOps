@@ -13,17 +13,34 @@ type ScanRunner interface {
 	Run(ctx context.Context, opts model.ScanOptions) (*model.ScanResult, error)
 }
 
-// NewDiagnosisTools 创建诊断类 Tool（scan_cluster/scan_pod/diagnose_pod/diagnose_node/diagnose_workload）。
-// 全部复用一期 ScanService.Run，不重复实现扫描/规则/诊断逻辑（需求规格 §8.2）。
-func NewDiagnosisTools(runner ScanRunner, baseOpts model.ScanOptions) []Tool {
+// NewDiagnosisTools builds the canonical scan and object diagnosis entries.
+func NewDiagnosisTools(runner ScanRunner, baseOpts model.ScanOptions, disabled map[string]bool) []Tool {
 	base := scanToolBase{runner: runner, baseOpts: baseOpts}
-	return []Tool{
-		&scanClusterTool{scanToolBase: base},
-		&scanPodTool{scanToolBase: base},
-		&diagnosePodTool{scanToolBase: base},
-		&diagnoseNodeTool{scanToolBase: base},
-		&diagnoseWorkloadTool{scanToolBase: base},
+	var out []Tool
+	if !disabled["scan_cluster"] {
+		out = append(out, &scanClusterTool{scanToolBase: base})
 	}
+	if disabled["diagnose_resource"] {
+		return out
+	}
+	var routes []KindRoute
+	namespaced := Capability{Domain: "kubernetes", Action: "read"}
+	if !disabled["diagnose_pod"] || !disabled["scan_pod"] {
+		routes = append(routes, KindRoute{Kind: "Pod", Execute: (&diagnosePodTool{scanToolBase: base}).Execute, Capability: namespaced, NamespaceRequired: true})
+	}
+	if !disabled["diagnose_node"] {
+		routes = append(routes, KindRoute{Kind: "Node", Execute: (&diagnoseNodeTool{scanToolBase: base}).Execute, Capability: Capability{Domain: "kubernetes", Resource: "/nodes", ClusterRead: true}, ClusterScoped: true})
+	}
+	if !disabled["diagnose_workload"] {
+		workload := &diagnoseWorkloadTool{scanToolBase: base}
+		for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet"} {
+			routes = append(routes, KindRoute{Kind: kind, Execute: workload.Execute, Capability: namespaced, NamespaceRequired: true})
+		}
+	}
+	if len(routes) == 0 {
+		return out
+	}
+	return append(out, NewKindTool("diagnose_resource", "Gather rule-based evidence for a specific unhealthy object. Use targeted logs or events to fill evidence gaps.", routes))
 }
 
 type scanToolBase struct {
@@ -73,50 +90,10 @@ func (t *scanClusterTool) Execute(ctx context.Context, input json.RawMessage) (T
 	return ToolResult{Data: t.summarize(result)}, nil
 }
 
-// scanPodTool：单 Pod 体检（规则级）。
-type scanPodTool struct{ scanToolBase }
-
-func (t *scanPodTool) Name() string { return "scan_pod" }
-func (t *scanPodTool) Description() string {
-	return "对单个 Pod 执行规则体检（规则级），返回该 Pod 及其关联资源的 Finding 清单。"
-}
-func (t *scanPodTool) InputSchema() any {
-	return objSchema(map[string]any{
-		"namespace": strProp("命名空间"),
-		"name":      strProp("Pod 名称"),
-	}, "namespace", "name")
-}
-func (t *scanPodTool) Execute(ctx context.Context, input json.RawMessage) (ToolResult, error) {
-	args, err := ParseArgs(input, "namespace", "name")
-	if err != nil {
-		return ResultError(err.Error()), nil
-	}
-	opts := t.baseOpts
-	opts.Namespace = args["namespace"]
-	opts.PodTarget = args["name"]
-	opts.LLM.Enabled = false
-	opts.ReportMode = "none"
-	result, err := t.runner.Run(ctx, opts)
-	if err != nil {
-		return ResultError("scan_pod: " + err.Error()), nil
-	}
-	return ToolResult{Data: t.summarize(result)}, nil
-}
-
 // diagnosePodTool：单 Pod 深度证据采集（规则级；LLM 分析由 Agent 负责，
 // 工具内部不再跑诊断 LLM，避免双重 LLM 拖慢与信息损耗）。
 type diagnosePodTool struct{ scanToolBase }
 
-func (t *diagnosePodTool) Name() string { return "diagnose_pod" }
-func (t *diagnosePodTool) Description() string {
-	return "对单个 Pod 深度诊断：复用一期 Scanner+规则+Evidence 采集该 Pod 的问题清单、证据链与关联日志，直接返回给 Agent 分析。适合『为什么这个 Pod 起不来/一直重启』类问题。"
-}
-func (t *diagnosePodTool) InputSchema() any {
-	return objSchema(map[string]any{
-		"namespace": strProp("命名空间"),
-		"name":      strProp("Pod 名称"),
-	}, "namespace", "name")
-}
 func (t *diagnosePodTool) Execute(ctx context.Context, input json.RawMessage) (ToolResult, error) {
 	args, err := ParseArgs(input, "namespace", "name")
 	if err != nil {
@@ -129,7 +106,7 @@ func (t *diagnosePodTool) Execute(ctx context.Context, input json.RawMessage) (T
 	opts.ReportMode = "none"
 	result, err := t.runner.Run(ctx, opts)
 	if err != nil {
-		return ResultError("diagnose_pod: " + err.Error()), nil
+		return ResultError("diagnose_resource (Pod): " + err.Error()), nil
 	}
 	return ToolResult{Data: t.summarize(result)}, nil
 }
@@ -137,79 +114,73 @@ func (t *diagnosePodTool) Execute(ctx context.Context, input json.RawMessage) (T
 // diagnoseNodeTool：Node 深度证据采集（按 Node 过滤一期结果；LLM 分析由 Agent 负责）。
 type diagnoseNodeTool struct{ scanToolBase }
 
-func (t *diagnoseNodeTool) Name() string { return "diagnose_node" }
-func (t *diagnoseNodeTool) Description() string {
-	return "对单个 Node 深度诊断：体检后只保留该 Node 及其相关 Pod 的 Finding 与证据，供 Agent 分析。"
-}
-func (t *diagnoseNodeTool) InputSchema() any {
-	return objSchema(map[string]any{
-		"name":      strProp("Node 名称"),
-		"namespace": strProp("命名空间（可选，省略=集群体检后过滤）"),
-	}, "name")
-}
 func (t *diagnoseNodeTool) Execute(ctx context.Context, input json.RawMessage) (ToolResult, error) {
 	args, err := ParseArgs(input, "name")
 	if err != nil {
 		return ResultError(err.Error()), nil
 	}
 	opts := t.baseOpts
-	opts.Namespace = args["namespace"]
+	opts.Namespace = ""
+	opts.DiagnosticTarget = &model.ResourceRef{Kind: "Node", Name: args["name"]}
 	opts.LLM.Enabled = false // Agent 是唯一大脑：证据采集秒级返回，分析由 Agent LLM 完成
 	opts.ReportMode = "none"
 	result, err := t.runner.Run(ctx, opts)
 	if err != nil {
-		return ResultError("diagnose_node: " + err.Error()), nil
+		return ResultError("diagnose_resource (Node): " + err.Error()), nil
 	}
 	filtered := filterFindings(result, func(r model.ResourceRef) bool {
-		return (r.Kind == "Node" || r.Kind == "node") && r.Name == args["name"]
+		return strings.EqualFold(r.Kind, "Node") && r.Name == args["name"]
 	})
-	return ToolResult{Data: t.summarize(filtered)}, nil
+	return ToolResult{Data: diagnosticSummary(&t.scanToolBase, filtered, opts.DiagnosticTarget)}, nil
 }
 
 // diagnoseWorkloadTool：Workload 深度证据采集（Deployment/StatefulSet/DaemonSet
 // 及其 Pod 链；LLM 分析由 Agent 负责）。
 type diagnoseWorkloadTool struct{ scanToolBase }
 
-func (t *diagnoseWorkloadTool) Name() string { return "diagnose_workload" }
-func (t *diagnoseWorkloadTool) Description() string {
-	return "对 Deployment/StatefulSet/DaemonSet 深度诊断：体检后保留该 Workload 及其 Pod 链的 Finding 与证据（含故障链聚合 Incident），供 Agent 分析。"
-}
-func (t *diagnoseWorkloadTool) InputSchema() any {
-	return objSchema(map[string]any{
-		"kind":      strProp("Workload 类型：deployment | statefulset | daemonset"),
-		"namespace": strProp("命名空间"),
-		"name":      strProp("Workload 名称"),
-	}, "kind", "namespace", "name")
-}
 func (t *diagnoseWorkloadTool) Execute(ctx context.Context, input json.RawMessage) (ToolResult, error) {
 	args, err := ParseArgs(input, "kind", "namespace", "name")
 	if err != nil {
 		return ResultError(err.Error()), nil
 	}
-	kind := strings.ToLower(args["kind"])
-	var wantKind string
-	switch kind {
-	case "deployment":
-		wantKind = "Deployment"
-	case "statefulset":
-		wantKind = "StatefulSet"
-	case "daemonset":
-		wantKind = "DaemonSet"
-	default:
-		return ResultError("unsupported workload kind: " + kind), nil
-	}
+	wantKind := args["kind"]
 	opts := t.baseOpts
 	opts.Namespace = args["namespace"]
+	opts.DiagnosticTarget = &model.ResourceRef{Kind: wantKind, Namespace: opts.Namespace, Name: args["name"]}
 	opts.LLM.Enabled = false // Agent 是唯一大脑：证据采集秒级返回，分析由 Agent LLM 完成
 	opts.ReportMode = "none"
 	result, err := t.runner.Run(ctx, opts)
 	if err != nil {
-		return ResultError("diagnose_workload: " + err.Error()), nil
+		return ResultError("diagnose_resource: " + err.Error()), nil
 	}
 	filtered := filterFindings(result, func(r model.ResourceRef) bool {
-		return r.Kind == wantKind && r.Name == args["name"]
+		if strings.EqualFold(r.Kind, wantKind) && r.Namespace == args["namespace"] && r.Name == args["name"] {
+			return true
+		}
+		if result != nil && r.UID != "" {
+			for _, subject := range result.Meta.DiagnosticSubjects {
+				if subject.UID == r.UID {
+					return true
+				}
+			}
+		}
+		return false
 	})
-	return ToolResult{Data: t.summarize(filtered)}, nil
+	return ToolResult{Data: diagnosticSummary(&t.scanToolBase, filtered, opts.DiagnosticTarget)}, nil
+}
+
+func diagnosticSummary(tool *scanToolBase, result *model.ScanResult, target *model.ResourceRef) map[string]any {
+	data := tool.summarize(result)
+	data["target"] = target
+	if result.Meta.DiagnosticTarget != nil {
+		data["target"] = result.Meta.DiagnosticTarget
+		data["coverageScope"] = result.Meta.DiagnosticTarget
+		data["relatedSubjects"] = result.Meta.DiagnosticSubjects
+	}
+	for _, key := range []string{"summary", "healthScore", "healthScoreScope", "history", "components"} {
+		delete(data, key)
+	}
+	return data
 }
 
 // filterFindings 只保留 Resource 或 Related 命中匹配器的 Finding（及其诊断）。
@@ -258,8 +229,9 @@ func summarizeScanResult(result *model.ScanResult) map[string]any {
 			"severity":   f.Severity,
 			"title":      f.Title,
 			"summary":    f.Summary,
-			"resource":   map[string]any{"kind": f.Resource.Kind, "namespace": f.Resource.Namespace, "name": f.Resource.Name},
+			"resource":   map[string]any{"kind": f.Resource.Kind, "namespace": f.Resource.Namespace, "name": f.Resource.Name, "uid": f.Resource.UID},
 			"correlated": f.Correlated,
+			"related":    f.Related,
 		})
 	}
 	diagnoses := make([]map[string]any, 0, len(result.Diagnoses))
@@ -301,6 +273,8 @@ func summarizeScanResult(result *model.ScanResult) map[string]any {
 		"history":          history,
 		"components":       components,
 		"collectionErrors": len(result.CollectionErrors),
+		"partial":          len(result.CollectionErrors) > 0 || !result.Collection.Complete(),
+		"healthScoreScope": map[string]string{"namespace": result.Meta.Namespace, "pod": result.Meta.Pod},
 		"collection":       result.Collection,
 	}
 }

@@ -161,14 +161,21 @@ func (r *Runner) verifyDeployment(ctx context.Context, ns, name, summary string)
 		conditions = append(conditions, string(c.Type)+"="+string(c.Status))
 	}
 	return Result{
-		Command: summary,
-		Stdout:  summary,
+		Command:          summary,
+		Stdout:           summary,
+		SubmissionStatus: "submitted",
+		SymptomStatus:    "unverified",
 		Verification: map[string]any{
-			"replicas":          derefI32p(dep.Spec.Replicas),
-			"readyReplicas":     dep.Status.ReadyReplicas,
-			"updatedReplicas":   dep.Status.UpdatedReplicas,
-			"availableReplicas": dep.Status.AvailableReplicas,
-			"conditions":        conditions,
+			"replicas":                  derefI32p(dep.Spec.Replicas),
+			"targetUID":                 dep.UID,
+			"resourceVersion":           dep.ResourceVersion,
+			"generation":                dep.Generation,
+			"observedGeneration":        dep.Status.ObservedGeneration,
+			"currentGenerationObserved": dep.Generation > 0 && dep.Status.ObservedGeneration >= dep.Generation,
+			"readyReplicas":             dep.Status.ReadyReplicas,
+			"updatedReplicas":           dep.Status.UpdatedReplicas,
+			"availableReplicas":         dep.Status.AvailableReplicas,
+			"conditions":                conditions,
 		},
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -564,5 +565,23 @@ func normalizeNumbers(v any) any {
 		return value
 	default:
 		return v
+	}
+}
+
+func TestApplyInterruptedSubmissionIsUnknown(t *testing.T) {
+	runner, client := newSSARunner(t, Options{})
+	client.PrependReactor("patch", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, io.ErrUnexpectedEOF
+	})
+	req := ApplyRequest{Object: configMapContent("cm1", nil), Namespace: "default"}
+	_, err := runner.Apply(context.Background(), req)
+	var unknown *SubmissionUnknownError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("expected unknown submission, got %v", err)
+	}
+	req.DryRun = true
+	_, err = runner.Apply(context.Background(), req)
+	if err == nil || errors.As(err, &unknown) {
+		t.Fatalf("dry-run cannot leave an unknown mutation: %v", err)
 	}
 }

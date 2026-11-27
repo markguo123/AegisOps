@@ -29,49 +29,13 @@ func (b *base) SchemaMetadata() string {
 	return "[READ ONLY][RISK: SAFE][APPROVAL REQUIRED: NO]"
 }
 
-// All 返回全部只读 Kubernetes Tools。
-func All(r Reader) []tools.Tool {
-	return []tools.Tool{
-		&podTool{base: base{reader: r}},
-		&podsTool{base: base{reader: r}},
-		&nodeTool{base: base{reader: r}},
-		&nodesTool{base: base{reader: r}},
-		&deploymentTool{base: base{reader: r}},
-		&statefulSetTool{base: base{reader: r}},
-		&daemonSetTool{base: base{reader: r}},
-		&replicaSetTool{base: base{reader: r}},
-		&serviceTool{base: base{reader: r}},
-		&endpointsTool{base: base{reader: r}},
-		&endpointSlicesTool{base: base{reader: r}},
-		&pvcTool{base: base{reader: r}},
-		&pvTool{base: base{reader: r}},
-		&storageClassTool{base: base{reader: r}},
-		&eventsTool{base: base{reader: r}},
-		&configMapTool{base: base{reader: r}},
-		&configMapsTool{base: base{reader: r}},
-		&logsTool{base: base{reader: r}},
-		&logsTool{base: base{reader: r}, previous: true},
-		&namespaceTool{base: base{reader: r}},
-		&resourcesTool{base: base{reader: r}},
-		newNodeUsageTool(r),
-	}
-}
-
 // RegisterOptions 控制按部署配置选择性注册的工具。
 type RegisterOptions struct {
 	// SecretAccess 对应 agent.secret.access；只有 read_on_demand 注册
 	// get_secret_value，off/create_only 均不暴露读取工具。
 	SecretAccess string
-	// SecretReadApproval 保留旧配置接口；所有模式现在均要求逐次用户确认。
-	SecretReadApproval string
-}
-
-// newNodeUsageTool 在 reader 支持 metrics 时启用节点资源用量工具。
-func newNodeUsageTool(r Reader) tools.Tool {
-	if m, ok := r.(MetricsReader); ok {
-		return &nodeUsageTool{base: base{reader: r}, metrics: m}
-	}
-	return &nodeUsageTool{base: base{reader: r}}
+	Cluster      string
+	Disabled     map[string]bool
 }
 
 // RegisterAll 把全部只读工具注册进注册表。
@@ -83,8 +47,15 @@ func RegisterAll(reg *tools.Registry, r Reader) error {
 // get_secret_info（Secret 元数据/键名）始终注册：它是普通 read 权限，
 // 与 access/read_approval 无关；get_secret_value 只在 access=read_on_demand 时注册。
 func RegisterAllWithOptions(reg *tools.Registry, r Reader, opts RegisterOptions) error {
-	all := All(r)
-	all = append(all, &secretInfoTool{base: base{reader: r}})
+	if err := registerResourceCatalog(reg, r, opts.Cluster, opts.Disabled); err != nil {
+		return err
+	}
+	b := base{reader: r}
+	all := []tools.Tool{&eventsTool{base: b}, &secretInfoTool{base: b}}
+	if metrics, ok := r.(MetricsReader); ok {
+		all = append(all, &nodeUsageTool{base: b, metrics: metrics})
+	}
+	all = append(all, &logsTool{base: b, previousDisabled: opts.Disabled["get_previous_logs"]})
 	if strings.EqualFold(strings.TrimSpace(opts.SecretAccess), "read_on_demand") {
 		if secretReader, ok := r.(SecretValuesReader); ok {
 			all = append(all, &secretValueTool{
@@ -94,6 +65,9 @@ func RegisterAllWithOptions(reg *tools.Registry, r Reader, opts RegisterOptions)
 		}
 	}
 	for _, t := range all {
+		if opts.Disabled[t.Name()] {
+			continue
+		}
 		if err := reg.Register(t); err != nil {
 			return fmt.Errorf("register tool %s: %w", t.Name(), err)
 		}

@@ -79,34 +79,21 @@ const toolSelectionProtocol = `
 
 先判断用户意图属于下面哪一层，再选择对应工具路径。一层能解答就不要跑到另一层。
 
-### 第一层：诊断意图（为什么异常/起不来/一直重启/崩了/失败/报错）
-—— 根因可能在 YAML 任意字段，**必须拿完整 YAML**，结构化工具是摘要视图，严禁只看摘要就下结论。
-优先顺序：
-1. 先取证：**kubectl get <资源> <名称> -n <ns> -o yaml**（Pod/Deployment/StatefulSet/DaemonSet/Job/Ingress 等任何对象都用这一招）。
-   这是唯一完整视图，command/args/env/probe/affinity/volume/securityContext 等任意字段都不会漏。
-2. 需要事件关联/跨对象核对时（Service 没 Endpoint、PVC 一直 Pending/FailedBinding、Node 有 Pressure、Pod 调度/重启上下文），先用 kubectl describe <资源> <名称> -n <ns> 聚合状态/条件/事件快速缩小范围；字段级根因仍以 kubectl get -o yaml 为准。
-3. 配合取日志：get_previous_logs（CrashLoopBackOff/OOMKilled 时必取）、get_logs（当前日志）、get_events（按 kind+name 过滤）。
-4. 如果结构化工具 get_pod / get_deployment 摘要已经够回答，也可以用摘要；但摘要解释不了现象或证据自相矛盾时，**必须立刻升级 kubectl -o yaml 再看**，不要在摘要里瞎猜不要重复调用工具。
-5. diagnose_pod / diagnose_workload 只在"需要规则引擎确定性告警 + 故障链聚合"时用（相当于小范围 scan）。
-   单纯"为什么一个 Pod 异常"不要首选它（它只看规则命中，YAML 里大量自定义字段规则看不到）。
+### 第一层：诊断意图（异常、启动失败、重启或报错）
+1. 已知故障对象优先使用 diagnose_resource；只需要某项状态时用 get_resource。
+2. 补充缺失证据时，get_logs 显式选择 instance=current 或 previous，get_events 优先按对象 UID 过滤。Service 后端优先查看 EndpointSlice。
+3. 涉及摘要未覆盖的字段、原始证据或长尾资源时，使用受控 kubectl。证据充足即停止。前缀候选须先核实目标才能提出变更。
 
-### 第二层：浏览意图（现在状态/几个副本/多少节点/什么镜像/挂了什么PVC）
-—— 只看摘要就够，用结构化 get_* 工具省 token。
-- 单 Pod：get_pod（含内联 Events，快速找名称）
-- 多 Pod：get_pods（可按 ns 过滤）
-- 工作负载：get_deployment / get_statefulset / get_daemonset / get_replicaset
-- 存储：get_pvc / get_pv / get_storageclass
-- 网络：get_service / get_endpoints
-- 节点：get_nodes / get_node / get_node_usage（metrics-server 压力）
-- ConfigMap：get_configmaps / get_configmap（注意输出已脱敏）
-- Secret：先用 get_secret_info 看名称/类型/键名（普通读取，无审批）；只有当前运行启用了 get_secret_value 时，才可针对已经确认相关的具体 key 发起读取
-- 不确定名称 / 按类型列：get_resources kind=<pods/deployments/pvcs/events/...>
+### 第二层：浏览意图（状态、列表、资源用量）
+- 使用 get_resource 查看已知对象，list_resources 发现资源与续页，get_node_usage 读取采样用量。
+- Secret 元数据使用 get_secret_info；敏感读取使用独立、逐次确认的 get_secret_value。
+- 使用会话公布的工具及其 Schema。缺失或被拒绝的证据要明确标出。
 
 ### 第三层：命名空间级/局部批量健康（这个 ns 有没有异常/这批服务正不正常）
 —— 用规则引擎一次性批量覆盖。
 **首选：scan_cluster namespace=<ns>**（按命名空间裁剪采集，23 条规则全部生效，秒级返回 Findings + Incident 聚合 + 健康评分）。
 拿到结果后：重点问题看标题，细节再按需 kubectl -o yaml 深挖单个对象。
-不要自己拿 get_pods 逐个枚举再看状态，规则引擎覆盖的维度（23 规则 + 故障链关联）远多于人工看摘要。
+不要逐个枚举 Pod 来代替规则体检，规则引擎覆盖的维度（23 规则 + 故障链关联）远多于人工看摘要。
 
 ### 第四层：集群全景（整个集群有没有问题 / 健康检查）
 —— 对应"检查集群健康 / 集群状态 / 集群有没有问题"。
@@ -130,7 +117,7 @@ const toolSelectionProtocol = `
 —— 以上都不匹配（普通咨询、概念解释、对比分析、无法归类的提问）时，直接回答或先向用户确认意图，不要硬调工具。
 
 ### 交叉规则（硬性）
-1. 结构化工具（get_pod / get_deployment 等）返回的是**摘要视图**，字段不完整。诊断意图下看到"现象解释不了/字段缺失/根因在某个自定义字段"时，必须用 kubectl -o yaml 升级，不能硬猜。
+1. 结构化工具返回摘要。需要未覆盖字段时，调用受控 kubectl 查询对应字段。明确区分事实与推测。
 2. kubectl 只读命令（get/describe/list/logs/events）自动执行，不触发审批；可证明只读的组合也自动执行：管道的每一段都是 kubectl 只读查询或受支持的过滤器（grep/head/tail/sort/uniq/wc/cut/tr/jq），以及用 && / || / ; 连接的多条只读查询，例如 kubectl get po -A | grep mysql、kubectl get pods -n team-a | grep -E 'mysql|redis' | head -n 20、kubectl get pods -n team -o json | jq -r '.items[].metadata.name'。
    组合里不要使用 awk/sed/xargs/tee/解释器/curl、重定向 >、命令替换 $()、变量、通配符或未知参数：这些会整体升级为人工审批。过滤器只处理管道输入，不能带文件参数（grep 只能有一个模式参数，jq 只能有一个字面量表达式）。
 3. 写操作分两类：资源创建统一使用 **create_resource**（dry_run → 提案 → 确认 → apply）；已有资源的 patch/scale/delete/rollout/apply 等统一使用 kubectl 工具生成完整命令（含 JSON patch、cat <<EOF | kubectl apply -f - 等复合 shell 构造时同样使用 kubectl 工具），均触发人工审批。
@@ -187,9 +174,9 @@ const createProtocol = `
 // efficiencyProtocol 约束调查效率与回答收敛（避免重复工具调用与冗长输出）。
 const efficiencyProtocol = `
 调查效率：
-- 同一资源同一维度不要重复调用工具：get_logs 与 kubectl logs 二选一（优先结构化工具 get_logs/get_previous_logs）；同一 Pod 的 Events 不要反复拉取。
+- 同一资源同一维度不要重复调用工具：get_logs 与 kubectl logs 二选一（优先结构化工具 get_logs）；同一 Pod 的 Events 不要反复拉取。
 - 全集群管理场景可省略 namespace 让工具自动搜索；若系统提供“当前授权范围”，必须显式使用其中的 namespace，禁止省略 namespace 或猜测其他范围。
-- Pod 启动失败/崩溃时，先 kubectl get pod -o yaml，再 kubectl logs --previous，然后 get_events + get_configmap 检查挂载配置；修复配置用 kubectl patch configmap，应用配置用 kubectl rollout restart 或 kubectl delete pod。
+- Pod 启动失败或崩溃时，按缺失证据查询 previous 日志、UID 对应事件与 ConfigMap 摘要。
 - 已有足够证据就停止调查，直接回答；单次问题的工具调用尽量控制在 6 次以内。
 诊断类问题（为什么 Pod 起不来/一直重启/异常）最终回答保持简洁，按以下结构：
 现象（1-2 行）→ 根因（引用证据，不要贴大段原始输出）→ 排查方向 → 修复方案（含可执行命令）。
@@ -202,7 +189,7 @@ const remediationGate = `
 - 用户只要求"检查/诊断/看下什么问题/为什么"时，禁止调用写工具 kubectl 执行任何写命令。
   此时只输出：诊断结论 + 根因 + 修复方案（含命令），最后明确询问"需要我修复吗？"。
 - 只有用户明确要求修复（如"修复/帮我改/扩容/重启/解决"）或对修复提议给出肯定答复后，才允许调用写工具；每个写工具调用仍需走用户确认（审批）。
-- 修复执行后必须验证（get_pods/get_pod 确认 Ready、重启次数归零）并报告结果。
+- 用户要求修复时分别报告提交结果、目标状态和原症状复测结果。缺少可比较的原症状证据时标为待验证。提交结果未知时先读回状态，禁止自动重放写入。
 
 修复流程：先诊断，再解决必要决策，最后审批执行并验证。
   用户输入与只读调查能确定的信息先自行获取。仍存在影响目标、风险或策略的真实分歧时，调用 ask_user_question，说明选项影响。跳过、取消、超时或 unavailable 后停止依赖该选择的任务，不推断同意。选择方案不授权具体写操作，现有审批与 Secret 规则仍生效。
@@ -267,11 +254,16 @@ func shimPrompt(toolsJSON, toolNames string) string {
 func (a *Agent) systemPromptFor(mode string) string {
 	var base string
 	if mode == "shim" {
-		specsJSON, err := llm.ToolSpecsToJSON(a.Tools.Schemas())
+		specs := a.Tools.SchemasFor(a.AccessScope)
+		names := make([]string, 0, len(specs))
+		for _, spec := range specs {
+			names = append(names, spec.Name)
+		}
+		specsJSON, err := llm.ToolSpecsToJSON(specs)
 		if err != nil {
 			base = basePrompt()
 		} else {
-			base = shimPrompt(specsJSON, strings.Join(a.Tools.Names(), ", "))
+			base = shimPrompt(specsJSON, strings.Join(names, ", "))
 		}
 	} else {
 		base = basePrompt()

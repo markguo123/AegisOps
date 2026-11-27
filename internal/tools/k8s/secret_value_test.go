@@ -42,7 +42,7 @@ func TestSecretValueToolSeparatesModelAndSafeData(t *testing.T) {
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"namespace":"prod",
 		"name":"db-secret",
-		"keys":["password"],
+		"operation":"read","keys":["password"],
 		"reason":"验证应用使用的数据库口令是否为旧值"
 	}`))
 	if err != nil {
@@ -106,7 +106,7 @@ func TestSecretValueToolApprovalPlanHasReasonAndNoValue(t *testing.T) {
 	plan := tool.PreviewApproval(json.RawMessage(`{
 		"namespace":"prod",
 		"name":"db-secret",
-		"keys":["password","username"],
+		"operation":"read","keys":["password","username"],
 		"reason":"核对数据库认证配置"
 	}`))
 	if plan.Title != "读取 Secret 值" || plan.Target.Namespace != "prod" || plan.Target.Name != "db-secret" {
@@ -125,7 +125,7 @@ func TestSecretValueToolRejectsTooManyKeys(t *testing.T) {
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"namespace":"prod",
 		"name":"db-secret",
-		"keys":["a","b","c","d","e","f"],
+		"operation":"read","keys":["a","b","c","d","e","f"],
 		"reason":"test"
 	}`))
 	if err != nil {
@@ -141,7 +141,7 @@ func TestSecretValueToolRejectsOversizedValue(t *testing.T) {
 		"password": bytes.Repeat([]byte("x"), maxSecretValueBytes+1),
 	}}}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"namespace":"prod","name":"db-secret","keys":["password"],"reason":"test"
+		"namespace":"prod","name":"db-secret","operation":"read","keys":["password"],"reason":"test"
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestSecretValueToolRejectsOversizedBatch(t *testing.T) {
 		"c": []byte("z"),
 	}}}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"namespace":"prod","name":"db-secret","keys":["a","b","c"],"reason":"test"
+		"namespace":"prod","name":"db-secret","operation":"read","keys":["a","b","c"],"reason":"test"
 	}`))
 	if err != nil {
 		t.Fatal(err)

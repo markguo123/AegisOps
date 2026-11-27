@@ -624,10 +624,33 @@ func normalizeEvent(e corev1.Event) model.EventInfo {
 		Message:        redactor.Redact(e.Message), // 事件消息不可信，采集边界脱敏（ADR-006）
 		Type:           e.Type,
 		Count:          e.Count,
-		FirstTimestamp: e.FirstTimestamp.UTC().Format(time.RFC3339),
-		LastTimestamp:  e.LastTimestamp.UTC().Format(time.RFC3339),
+		FirstTimestamp: eventTimestamp(e.FirstTimestamp.Time),
+		LastTimestamp:  eventTimestamp(EventLastObserved(e)),
 		InvolvedObject: model.ResourceRef{Kind: e.InvolvedObject.Kind, Namespace: e.InvolvedObject.Namespace, Name: e.InvolvedObject.Name, UID: string(e.InvolvedObject.UID)},
 	}
+}
+
+func EventLastObserved(e corev1.Event) time.Time {
+	if e.Series != nil && !e.Series.LastObservedTime.IsZero() {
+		return e.Series.LastObservedTime.Time
+	}
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp.Time
+	}
+	if !e.EventTime.IsZero() {
+		return e.EventTime.Time
+	}
+	if !e.FirstTimestamp.IsZero() {
+		return e.FirstTimestamp.Time
+	}
+	return e.CreationTimestamp.Time
+}
+
+func eventTimestamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // redactMap 对 map 的值按键名或内容脱敏（采集边界，ADR-006）。

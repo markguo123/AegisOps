@@ -388,6 +388,9 @@ func renderEvents(events <-chan service.ChatEvent, respond chan<- string, in cha
 				fmt.Fprintf(w, "  ↳ [Tool] %s %s\n", ev.Tool.Name, formatArgs(ev.Tool.Arguments))
 			}
 		case service.ChatEventToolResponse:
+			if ev.Tool != nil && ev.Tool.ResultStatus == "partial" {
+				fmt.Fprintf(w, "  \u21b3 [Tool] %s returned partial results\n", ev.Tool.Name)
+			}
 			if ev.Tool != nil && ev.Tool.Name == "create_resource" {
 				renderCreateToolResult(w, ev.Tool.Data)
 			}

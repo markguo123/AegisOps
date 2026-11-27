@@ -20,7 +20,7 @@ type Client interface {
 	Connect(ctx context.Context) error
 	Close() error
 	ListTools(ctx context.Context) ([]Tool, error)
-	CallTool(ctx context.Context, name string, arguments map[string]any) (string, error)
+	CallTool(ctx context.Context, name string, arguments map[string]any) (any, error)
 }
 
 // Config 是 MCP 客户端配置（与 config.MCPConfig 对应；v1 只解析不连接）。

@@ -20,7 +20,7 @@ func (*podHistoryTool) Capability() tools.Capability {
 
 func TestPodHistoryRestoresAuthorizedObservation(t *testing.T) {
 	registry := tools.NewRegistry()
-	if err := registry.Register(&podHistoryTool{stubTool: stubTool{name: "get_pod"}}); err != nil {
+	if err := registry.Register(&podHistoryTool{stubTool: stubTool{name: "get_resource"}}); err != nil {
 		t.Fatal(err)
 	}
 	access := &authz.EffectiveAccess{ClusterID: "cluster", Rules: []authz.AccessRule{{

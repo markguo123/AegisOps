@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/k8s-ai/k8s-ai/internal/model"
@@ -58,10 +59,18 @@ func (a *ToolAdapter) Execute(ctx context.Context, input json.RawMessage) (tools
 	}
 	out, err := a.client.CallTool(ctx, a.spec.Name, args)
 	if err != nil {
-		return tools.ResultError("mcp " + a.Name() + ": " + err.Error()), nil
+		var failure *callError
+		if errors.As(err, &failure) {
+			return tools.ResultErrorWithCode(failure.code, failure.message), nil
+		}
+		return tools.ResultErrorWithCode(tools.ErrorToolFailed, "MCP tool call failed"), nil
 	}
-	return tools.ToolResult{Data: map[string]any{"content": out}}, nil
+	return tools.ToolResult{Data: map[string]any{"content": out, "source": a.Name(), "untrusted": true}}, nil
 }
+
+type callError struct{ code, message string }
+
+func (e *callError) Error() string { return e.message }
 
 // IsReadOnly MCP 工具默认为非只读（安全侧，必须审批）。
 func (a *ToolAdapter) IsReadOnly(json.RawMessage) bool { return a.readOnly }

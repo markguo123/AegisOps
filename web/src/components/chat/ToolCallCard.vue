@@ -40,6 +40,7 @@ export interface ToolUiData {
   ok: boolean
   params: unknown
   result: unknown
+  resultStatus?: string
   raw: string
   duration: number | null
   /** P7.4（ADR-034）：后端声明的头部摘要与渲染形态，chat 与刷新同源。 */
@@ -126,6 +127,7 @@ watch(
 const displayName = computed(() => {
   const names: Record<string, string> = {
     get_pods: '检查 Pod 状态', get_pod: '查看 Pod 详情', get_logs: '读取容器日志',
+    get_resource: '查看资源详情', list_resources: '查询资源列表', diagnose_resource: '诊断资源',
     get_resources: '查询资源', get_statefulset: '查看 StatefulSet',
     get_secret_info: '检查 Secret 元数据', read_tool_result: '读取检查结果',
     kubectl: '执行集群命令', get_events: '查看集群事件',
@@ -292,6 +294,13 @@ const view = computed<ResultView>(() => {
 
 /** 结果先做凭据兜底遮蔽，再做结构化识别（值永不回显）。 */
 const maskedResult = computed<unknown>(() => maskSensitiveValues(props.tool.result))
+const partialResult = computed(() => {
+  if (props.tool.resultStatus) return props.tool.resultStatus === "partial"
+  const result = maskedResult.value
+  if (!result || typeof result !== 'object') return false
+  const record = result as Record<string, unknown>
+  return record.partial === true || record.status === 'partial' || record.streamTimeout === true
+})
 
 const rawText = computed(() => {
   const text =
@@ -329,6 +338,7 @@ function toggle(): void {
   <article class="toolcard" :class="tool.status">
     <button type="button" class="toolcard-head" @click="toggle">
       <span class="toolcard-dot" :class="tool.status"></span>
+      <span v-if="partialResult" class="toolcard-partial">部分结果</span>
       <span class="toolcard-title" :title="tool.name">{{ displayName }}</span>
       <!-- P7.4：头部概览优先展示后端摘要（如 "成功 · 12 pods · 320ms"），命令降级为 tooltip -->
       <span v-if="tool.summary" class="toolcard-cmd toolcard-summary" :title="tool.command || tool.summary">
@@ -544,6 +554,10 @@ function toggle(): void {
 }
 
 .toolcard-block,
+.toolcard-partial {
+  color: var(--el-color-warning);
+}
+
 .toolcard-result {
   padding: 0 12px 10px;
   display: flex;

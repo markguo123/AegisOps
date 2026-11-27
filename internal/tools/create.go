@@ -15,6 +15,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -291,8 +292,13 @@ func (t *createTool) apply(ctx context.Context, args createArgs) ToolResult {
 	outcomes := make([]map[string]any, 0, len(objs))
 	var touches []SecretTouch
 	applied, refused := 0, 0
+	unknown := false
 	for i := range objs {
 		o := &objs[i]
+		if unknown {
+			outcomes = append(outcomes, map[string]any{"kind": o.Kind, "namespace": o.Namespace, "name": o.Name, "status": "not_submitted"})
+			continue
+		}
 		item, block := t.precheckObject(ctx, o)
 		if block != "" {
 			refused++
@@ -311,6 +317,11 @@ func (t *createTool) apply(ctx context.Context, args createArgs) ToolResult {
 		if err != nil {
 			refused++
 			item["status"] = "failed"
+			var submission *executor.SubmissionUnknownError
+			if errors.As(err, &submission) {
+				unknown = true
+				item["status"] = "unknown"
+			}
 			item["error"] = err.Error()
 			outcomes = append(outcomes, item)
 			continue
@@ -318,6 +329,8 @@ func (t *createTool) apply(ctx context.Context, args createArgs) ToolResult {
 		applied++
 		item["status"] = statusApplied
 		item["uid"] = res.UID
+		item["resourceVersion"] = res.ResourceVersion
+		item["generation"] = res.Generation
 		if res.Summary != nil {
 			item["summary"] = res.Summary
 		}
@@ -355,6 +368,11 @@ func (t *createTool) apply(ctx context.Context, args createArgs) ToolResult {
 	}
 	if len(touches) > 0 {
 		data[DataSecretTouches] = touches
+	}
+	if unknown {
+		data["status"] = "unknown"
+		data["error"] = "submission outcome unknown; read the target and reconcile resource versions before requesting another change"
+		return ToolResult{Data: data, Text: t.summaryText(data), ErrorCode: ErrorSubmissionUnknown}
 	}
 	if applied == 0 {
 		data["error"] = errCreateApplyFailed + ": 所有对象都未创建成功，见 objects[].error"
